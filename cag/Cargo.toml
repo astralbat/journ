@@ -1,0 +1,36 @@
+[package]
+name = "journ-cag"
+version = "0.2.0"
+authors = ["Mark Barrett <mark@barrett.uk>"]
+edition = "2018"
+license = "AGPL-3"
+metadata = { contributors = ["Mark Barrett"] }
+
+[dependencies]
+journ-core = { path = "../core", features = ["testing"] }
+lazy_static = "1.3.0"
+chrono = { version = "0.4" }
+chrono-tz = "0.8.6"
+env_logger = "0.11.3"
+rust_decimal = "1.8.1"
+rust_decimal_macros = "1.8.1"
+#num = "*"
+regex = "0.2"
+#derive_builder = "0.9.0"
+itertools = "0.8.0"
+smallvec = "1.4.2"
+linked_hash_set = "0.1.4"
+nom = "7.1.1"
+nom_locate = "*"
+term_size = "1.0.0-beta.2"
+ansi_term = "0.12.1"
+yaml-rust = "0.4.5"
+pyo3 = "0.20.3"
+log = { version = "0.4.20", features = ["max_level_trace", "release_max_level_trace"] }
+
+[dev-dependencies]
+indoc = "1.0.7"
+
+[features]
+testing = []
+

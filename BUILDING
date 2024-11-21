@@ -1,0 +1,17 @@
+= Building the Project =
+
+The project may be built with an embedded Python interpreter or without. If no embedded Python interpreter is used,
+the end user must have a suitable Python interpreter installed on their system.
+
+== Dependencies ==
+1. Install rust (https://www.rust-lang.org/tools/install)
+2. Install pyoxidizer (https://github.com/indygreg/PyOxidizer/releases/tag/pyoxidizer/0.24.0)
+
+== Building with embedded Python ==
+1. Navigate to the project root
+2. Run `pyoxidizer generate-python-embedding-artifacts core/resources/embedded_python`
+3. Run `PYO3_CONFIG_FILE=$(pwd)/core/resources/embedded_python/pyo3-build-config-file.txt cargo build --features=python-embedded --release`
+
+== Building without embedded Python ==
+1. Navigate to the project root
+2. Run `cargo build --release`

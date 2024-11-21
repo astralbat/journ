@@ -1,0 +1,5 @@
+#[target.x86_64-apple-darwin]
+#rustflags = [
+#    "-Z", "unstable-options",
+#    "-C", "symbol-mangling-version=v0",
+#]

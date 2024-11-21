@@ -1,0 +1,40 @@
+[package]
+name = "journ"
+description = "Plaintext Accounting Journal"
+version = "0.2.0"
+authors = ["Mark Barrett <mark@barrett.uk>"]
+edition = "2018"
+license = "AGPL-3"
+
+[package.metadata]
+contributors = ["Mark Barrett"]
+
+[workspace]
+members = ["core", "cag", "python"]
+
+[dependencies]
+journ-core = { path = "core" }
+journ-cag = { path = "cag" }
+clap = { version = "4.5.4", features = ["derive"] }
+chrono = { version = "0.4" }
+chrono-tz = "0.8.6"
+nom = "7.1.3"
+num-format = { version = "0.4", features = ["with-system-locale"] }
+env_logger = "0.11.3"
+ansi_term = "0.12.1"
+bumpalo-herd = "0.1.2"
+log = { version = "0.4", features = ["max_level_trace", "release_max_level_trace"] }
+
+[profile.dev]
+debug = true
+opt-level = 0
+
+[profile.release]
+debug = true
+# This works to squeeze out better parsing performance, when integrating with nom.
+# Disable while developing for faster builds.
+# lto = "fat"
+
+[features]
+# Disabled, see journ-core/Cargo.toml
+#python-embedded = ["journ-core/python-embedded"]

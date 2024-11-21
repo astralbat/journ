@@ -1,0 +1,14 @@
+.DS_Store
+Cargo.lock
+*.swp
+target/
+.vscode/
+.idea/
+tests/data
+*.pdf
+/venv/
+pyoxidizer
+core/resources/embedded_python/
+
+lldb/profiles/*
+scripts/custom/
