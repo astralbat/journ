@@ -14,6 +14,7 @@ use pyo3::types::PyDict;
 use pyo3::{intern, PyAny, PyErr, PyObject, PyResult, Python, ToPyObject};
 use std::collections::HashMap;
 use std::hash::Hash;
+use std::path::Path;
 use std::sync::{Arc, Condvar, LazyLock, Mutex};
 use std::thread;
 
@@ -249,19 +250,39 @@ impl PythonEnvironment {
                         Some(tb) => tb.format().unwrap(),
                         None => lowest_cause.to_string(),
                     };
-                    py_err_str.rfind("line ").map(|pos| {
-                        if let Ok((_, line_num)) =
-                            take_while1::<_, &str, JournError>(|c: char| c.is_ascii_digit())(
-                                &py_err_str[pos + "line ".len()..],
-                            )
-                        {
-                            let line_num = line_num.parse::<usize>().unwrap();
-                            bc.clear_highlights();
-                            bc.highlight_line(line_num);
-                            bc.shrink(5);
-                            bc.set_line(Some(line_num));
+                    // Check the filenames match and only highlight the line if they do.
+                    if let Some(begin) = py_err_str.rfind("File \"") {
+                        let py_err_filename = py_err_str[begin..]
+                            .find("\",")
+                            .map(|end| &py_err_str[begin + "File \"".len()..begin + end]);
+                        if let (Some(filename), Some(py_err_filename)) = (file, py_err_filename) {
+                            let canonical_bc_filename = Path::new(filename).canonicalize();
+                            let canonical_py_err_filename =
+                                Path::new(py_err_filename).canonicalize();
+
+                            if let (Ok(can_bc_filename), Ok(can_py_err_filename)) =
+                                (canonical_bc_filename, canonical_py_err_filename)
+                            {
+                                if can_bc_filename == can_py_err_filename {
+                                    py_err_str.rfind("line ").map(|pos| {
+                                        if let Ok((_, line_num)) =
+                                            take_while1::<_, &str, JournError>(|c: char| {
+                                                c.is_ascii_digit()
+                                            })(
+                                                &py_err_str[pos + "line ".len()..]
+                                            )
+                                        {
+                                            let line_num = line_num.parse::<usize>().unwrap();
+                                            bc.clear_highlights();
+                                            bc.highlight_line(line_num);
+                                            bc.shrink(5);
+                                            bc.set_line(Some(line_num));
+                                        }
+                                    });
+                                }
+                            }
                         }
-                    });
+                    }
 
                     let bce = BlockContextError::new(bc, "Error executing python code".to_string());
                     JournError::new(bce).with_source(pyerr!(py, e))

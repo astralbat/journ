@@ -25,6 +25,7 @@ use journ_core::valuer::{SystemValuer, Valuer};
 use journ_core::{err, valuer};
 use linked_hash_set::LinkedHashSet;
 use log::trace;
+use rust_decimal::Decimal;
 use std::collections::VecDeque;
 use std::fmt::Debug;
 use std::ops::Add;
@@ -745,6 +746,7 @@ impl<'h> SequenceDealHolding<'h> {
 
         let self_total = self.total().clone();
         let seq_len = self.sequence.len();
+        let bal_before = self.balance.clone();
         // Keep track of a remainder after applying each mini adjustment. We'll apply this to the last element.
         let mut rem_adj = orig_adj.clone();
         let mut rem_amount_adjustments = rem_adj.amount_adjustments().iter().cloned().collect();
@@ -775,13 +777,12 @@ impl<'h> SequenceDealHolding<'h> {
                         // holding. This is important as subsequent adjustments need to match on the same sign which is an implied
                         // requirement for ValuedAmounts. In certain edge cases, the rounding might change the sign, so here we try
                         // different rounding strategies to ensure the sign is maintained.
-                        let adj_amount = if j == 0 {
-                            let adj_amount = adj_amount_unrounded.rounded();
-                            sign_positive = (dh_amount_total + adj_amount).is_positive();
-                            adj_amount
+                        let adj_amount_rounded = adj_amount_unrounded.rounded();
+                        let mut adj_amount = if j == 0 {
+                            sign_positive = (dh_amount_total + adj_amount_rounded).is_positive();
+                            adj_amount_rounded
                         } else {
-                            if (dh_amount_total + adj_amount_unrounded.rounded()).is_positive()
-                                != sign_positive
+                            if (dh_amount_total + adj_amount_rounded).is_positive() != sign_positive
                             {
                                 if (dh_amount_total
                                     + adj_amount_unrounded
@@ -796,9 +797,14 @@ impl<'h> SequenceDealHolding<'h> {
                                         .rounded_with_strategy(RoundingStrategy::AlwaysUp)
                                 }
                             } else {
-                                adj_amount_unrounded.rounded()
+                                adj_amount_rounded
                             }
                         };
+                        // We force some imprecision here to _try_ to give wiggle room so that the mini adjustments
+                        // can be added precisely with `Amount::add_precise`. If we don't do this, we may fail on the post-condition assertion.
+                        if adj_amount.scale() > 18 {
+                            adj_amount = adj_amount.rounded_dec_places(18);
+                        }
 
                         let (left, _right) = amount_adj.split(adj_amount.quantity());
                         mini_adj_amount_adjustments.push(left.clone());
@@ -815,6 +821,16 @@ impl<'h> SequenceDealHolding<'h> {
             self.newest = self.newest.max(dh.datetime().end());
         }
         self.balance = Self::calc_balance(&self.sequence);
+
+        // Check the post-condition; the sum total of all mini-adjustments (the balance) should equal the original adjustment.
+        let mut adjusted_va = bal_before.into_valued_amount();
+        orig_adj.apply(&mut adjusted_va)?;
+        assert_eq!(
+            &adjusted_va,
+            self.balance.valued_amount(),
+            "The sum total of all mini adjustments should equal the original adjustment"
+        );
+
         Ok(())
 
         /*

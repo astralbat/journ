@@ -403,9 +403,9 @@ impl<'h> Adjustment<'h> {
                         == self.amount_adjustments[j].amount().unit()
                     {
                         self.amount_adjustments[i] = match self.amount_adjustments[j] {
-                            AmountAdjustment::Add(amount) => {
-                                AmountAdjustment::Add(self.amount_adjustments[i].amount() + amount)
-                            }
+                            AmountAdjustment::Add(amount) => AmountAdjustment::Add(
+                                self.amount_adjustments[i].amount().add_precise(amount).unwrap(),
+                            ),
                             AmountAdjustment::Scale(amount) => AmountAdjustment::Scale(
                                 self.amount_adjustments[i].amount() * amount,
                             ),

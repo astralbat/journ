@@ -36,6 +36,8 @@ pub struct Amount<'h> {
 }
 
 impl<'h> Amount<'h> {
+    pub const MAX_SCALE: u32 = 27;
+
     pub fn new<D: Into<Decimal>>(unit: &'h Unit<'h>, quantity: D) -> Amount<'h> {
         let amount = quantity.into().normalize();
         Amount { unit, quantity: amount }
@@ -198,6 +200,25 @@ impl<'h> Amount<'h> {
         let l_amount = (self * percent).rounded_dec_places(rounding_scale);
         let r_amount = self - l_amount;
         (l_amount, r_amount)
+    }
+
+    /// Adds two amounts together, like `+` but with an additional check that
+    /// the result is precise.
+    /// Natively, `Decimal::checked_add` is not sufficient to guard against precision loss
+    /// when the number of bits of the result exceeds 96. This check ensures precision by
+    /// checking the scale of the result.
+    /// Returns `None` if the addition would overflow or result in a loss of precision.
+    ///
+    /// # Panics
+    /// If the units of the two amounts do not match.
+    pub fn add_precise(&self, rhs: Amount<'h>) -> Option<Amount<'h>> {
+        let scale = self.quantity.scale().max(rhs.quantity.scale());
+        let result = self.quantity.checked_add(rhs.quantity)?;
+        if result.scale() <= scale {
+            Some(Amount::new(self.unit, result))
+        } else {
+            None
+        }
     }
 
     /// Counts the number of characters in a normal string representation of the amount.
@@ -400,90 +421,6 @@ impl<'h> From<&Amount<'h>> for Yaml {
     }
 }
 
-/*
-/// Display a column of amounts so that they line up on the decimal point.
-impl<'h, I> DisplayColumn<Amount<'h>> for I
-where
-    I: Iterator<Item = Option<Amount<'h>>> + Clone,
-{
-    fn col_fmt(self) -> impl FnMut(&mut fmt::Formatter) -> Option<fmt::Result> {
-        let mut max_num_pre_dp_width = 0usize;
-        let mut max_num_post_dp_width = 0usize;
-        let mut max_prefixed_code_before_neg_width = 0usize;
-        let mut max_prefixed_code_after_neg_width = 0usize;
-        let mut max_suffixed_code_width = 0usize;
-        let mut max_neg_width = 0usize;
-        let amounts = self.clone();
-        for amnt in self.clone() {
-            let dp_counts = amnt.map(Amount::count_formatted_str_parts).unwrap_or((0, 0, 0, 0, 0, 0));
-            max_prefixed_code_before_neg_width = max_prefixed_code_before_neg_width.max(dp_counts.0 as usize);
-            max_neg_width = max_neg_width.max(dp_counts.1 as usize);
-            max_prefixed_code_after_neg_width = max_prefixed_code_after_neg_width.max(dp_counts.2 as usize);
-            max_num_pre_dp_width = max_num_pre_dp_width.max(dp_counts.3 as usize);
-            max_num_post_dp_width = max_num_post_dp_width.max(dp_counts.4 as usize);
-            max_suffixed_code_width = max_suffixed_code_width.max(dp_counts.5 as usize);
-        }
-        let mut iter = amounts;
-        move |f| match iter.next() {
-            Some(maybe_amount) => {
-                let mut res = || match maybe_amount {
-                    Some(amount) => {
-                        let counts = amount.count_formatted_str_parts();
-                        let amount_str = amount.to_string();
-
-                        // Code prefix before any negative sign. E.g. '$' in '$5.00'.
-                        let offset_0 = amount_str.char_indices().nth(counts.0 as usize).unwrap().0;
-                        write!(f, "{:>max_prefixed_code_before_neg_width$}", &amount_str[..offset_0])?;
-
-                        // Negative sign. E.g. '-' in '-$5.00'.
-                        let offset_1 =
-                            offset_0 + amount_str[offset_0..].char_indices().nth(counts.1 as usize).unwrap().0;
-                        write!(f, "{:>max_neg_width$}", &amount_str[offset_0..offset_1])?;
-
-                        // Code part after the negative sign. E.g. '$' in '-$5.00'.
-                        let offset_2 =
-                            offset_1 + amount_str[offset_1..].char_indices().nth(counts.2 as usize).unwrap().0;
-                        write!(f, "{:>max_prefixed_code_after_neg_width$}", &amount_str[offset_1..offset_2])?;
-
-                        // Digits before the decimal point, including the decimal point: e.g. '5' in '5.00'.
-                        let offset_3 =
-                            offset_2 + amount_str[offset_2..].char_indices().nth(counts.3 as usize).unwrap().0;
-                        write!(f, "{:>max_num_pre_dp_width$}", &amount_str[offset_2..offset_3])?;
-
-                        // Digits after the decimal point, including the decimal point: e.g. '.00' in '5.00'.
-                        let offset_4 = amount_str[offset_3..]
-                            .char_indices()
-                            .nth((counts.4 + 1) as usize)
-                            .map(|a| offset_3 + a.0)
-                            .unwrap_or(amount_str.len());
-                        write!(f, "{:<width$}", &amount_str[offset_3..offset_4], width = max_num_post_dp_width + 1)?;
-
-                        // Code suffix. E.g. ' AUD' in '5.00 AUD'.
-                        write!(f, "{:<max_suffixed_code_width$}", &amount_str[offset_4..],)?;
-                        Ok(())
-                    }
-                    None => {
-                        write!(
-                            f,
-                            "{:>padding$}",
-                            "",
-                            padding = max_prefixed_code_before_neg_width
-                                + max_neg_width
-                                + max_prefixed_code_after_neg_width
-                                + max_num_pre_dp_width
-                                + max_num_post_dp_width
-                                + max_suffixed_code_width
-                                + 1
-                        )
-                    }
-                };
-                Some(res())
-            }
-            None => None,
-        }
-    }
-}*/
-
 impl<'h> Sum<Amount<'h>> for Amount<'h> {
     fn sum<I: Iterator<Item = Amount<'h>>>(iter: I) -> Amount<'h> {
         let mut sum: Amount<'h> = Amount::nil();
@@ -494,72 +431,56 @@ impl<'h> Sum<Amount<'h>> for Amount<'h> {
     }
 }
 
-macro_rules! op {
-    ($op_type:tt, $op_method:ident, $op:tt) => {
-        impl<'h> $op_type<Amount<'h>> for Amount<'h> {
-            type Output = Self;
-            fn $op_method(self, rhs: Amount<'h>) -> Amount<'h> {
-                if self.unit != rhs.unit {
-                    if !self.unit.is_none() && !rhs.unit.is_none() {
-                        panic!("Units do not match: left: {}, right: {}", self.unit, rhs.unit);
-                    }
-                }
-                Amount::new(if self.unit.is_none() { rhs.unit } else { self.unit }, self.quantity $op rhs.quantity)
-            }
-        }
-    }
-}
-op!(Mul, mul, *);
-op!(Add, add, +);
-op!(Sub, sub, -);
-op!(Div, div, /);
-
-macro_rules! op_ref {
-    ($op_type:tt, $op_method:tt, $op:tt) => {
-        impl<'h, 'a, 'b> $op_type<&'a Amount<'h>> for &'b Amount<'h> {
+macro_rules! checked_op {
+    ($amount_type:ty, $op_type:tt, $op_method:ident, $dec_op:path) => {
+        impl<'h> $op_type<$amount_type> for $amount_type {
             type Output = Amount<'h>;
-            fn $op_method(self, rhs: &'a Amount<'h>) -> Self::Output {
+            fn $op_method(self, rhs: $amount_type) -> Self::Output {
                 if self.unit != rhs.unit {
                     if !self.unit.is_none() && !rhs.unit.is_none() {
                         panic!("Units do not match: left: {}, right: {}", self.unit, rhs.unit);
                     }
                 }
-                Amount::new(if self.unit.is_none() { rhs.unit } else { self.unit }, self.quantity $op rhs.quantity)
-            }
-        }
-    }
-}
-op_ref!(Mul, mul, *);
-op_ref!(Add, add, +);
-op_ref!(Sub, sub, -);
-op_ref!(Div, div, /);
-
-macro_rules! op_assign {
-    ($op_type:tt, $op_method:tt, $op:tt) => {
-        impl<'h> $op_type for Amount<'h> {
-            fn $op_method(&mut self, rhs: Amount<'h>) {
-                if self.unit != rhs.unit {
-                    if !self.unit.is_none() && !rhs.unit.is_none() {
-                        panic!("Units do not match: left: {}, right: {}", self.unit, rhs.unit);
-                    }
-                }
-                if self.unit.is_none() {
-                    self.unit = rhs.unit;
-                }
-                self.quantity $op rhs.quantity;
+                Amount::new(
+                    if self.unit.is_none() { rhs.unit } else { self.unit },
+                    $dec_op(self.quantity, rhs.quantity).unwrap(),
+                )
             }
         }
     };
 }
-op_assign!(AddAssign, add_assign, +=);
-op_assign!(SubAssign, sub_assign, -=);
-op_assign!(MulAssign, mul_assign, *=);
-op_assign!(DivAssign, div_assign, /=);
+checked_op!(Amount<'h>, Mul, mul, Decimal::checked_mul);
+checked_op!(&Amount<'h>, Mul, mul, Decimal::checked_mul);
+checked_op!(Amount<'h>, Add, add, Decimal::checked_add);
+checked_op!(&Amount<'h>, Add, add, Decimal::checked_mul);
+checked_op!(Amount<'h>, Sub, sub, Decimal::checked_sub);
+checked_op!(&Amount<'h>, Sub, sub, Decimal::checked_sub);
 
-macro_rules! op_ref_assign {
-    ($op_type:tt, $op_method:tt, $op:tt) => {
-        impl<'h, 'a> $op_type<&'a Amount<'h>> for Amount<'h> {
-            fn $op_method(&mut self, rhs: &'a Amount<'h>) {
+macro_rules! op {
+    ($amount_type:ty, $op_type:tt, $op_method:ident, $dec_op:path) => {
+        impl<'h> $op_type<$amount_type> for $amount_type {
+            type Output = Amount<'h>;
+            fn $op_method(self, rhs: $amount_type) -> Amount<'h> {
+                if self.unit != rhs.unit {
+                    if !self.unit.is_none() && !rhs.unit.is_none() {
+                        panic!("Units do not match: left: {}, right: {}", self.unit, rhs.unit);
+                    }
+                }
+                Amount::new(
+                    if self.unit.is_none() { rhs.unit } else { self.unit },
+                    $dec_op(self.quantity, rhs.quantity),
+                )
+            }
+        }
+    };
+}
+op!(Amount<'h>, Div, div, Decimal::div);
+op!(&Amount<'h>, Div, div, Decimal::div);
+
+macro_rules! checked_op_assign {
+    ($amount_type:ty, $op_type:tt, $op_method:tt, $dec_op:path) => {
+        impl<'h> $op_type<$amount_type> for Amount<'h> {
+            fn $op_method(&mut self, rhs: $amount_type) {
                 if self.unit != rhs.unit {
                     if !self.unit.is_none() && !rhs.unit.is_none() {
                         panic!("Units do not match: left: {}, right: {}", self.unit, rhs.unit);
@@ -568,100 +489,120 @@ macro_rules! op_ref_assign {
                 if self.unit.is_none() {
                     self.unit = rhs.unit;
                 }
-                self.quantity $op rhs.quantity;
+                self.quantity = $dec_op(self.quantity, rhs.quantity).unwrap();
             }
         }
-    }
+    };
 }
-op_ref_assign!(AddAssign, add_assign, +=);
-op_ref_assign!(SubAssign, sub_assign, -=);
-op_ref_assign!(MulAssign, mul_assign, *=);
-op_ref_assign!(DivAssign, div_assign, /=);
+checked_op_assign!(Amount<'h>, AddAssign, add_assign, Decimal::checked_add);
+checked_op_assign!(&Amount<'h>, AddAssign, add_assign, Decimal::checked_add);
+checked_op_assign!(Amount<'h>, SubAssign, sub_assign, Decimal::checked_sub);
+checked_op_assign!(&Amount<'h>, SubAssign, sub_assign, Decimal::checked_sub);
+checked_op_assign!(Amount<'h>, MulAssign, mul_assign, Decimal::checked_mul);
+checked_op_assign!(&Amount<'h>, MulAssign, mul_assign, Decimal::checked_mul);
 
-macro_rules! op_decimal {
-    ($op_type:tt, $op_method:tt, $op:tt) => {
-        impl<'h, D> $op_type<D> for Amount<'h> where D: Into<Decimal> {
-            type Output = Amount<'h>;
-            fn $op_method(self, rhs: D) -> Self::Output {
-                if self.unit.is_none() {
-                    panic!("Attempt to operate on a nil amount")
+macro_rules! op_assign {
+    ($amount_type:ty, $op_type:tt, $op_method:tt, $dec_op:path) => {
+        impl<'h> $op_type<$amount_type> for Amount<'h> {
+            fn $op_method(&mut self, rhs: $amount_type) {
+                if self.unit != rhs.unit {
+                    if !self.unit.is_none() && !rhs.unit.is_none() {
+                        panic!("Units do not match: left: {}, right: {}", self.unit, rhs.unit);
+                    }
                 }
-                Amount::new(self.unit, self.quantity $op rhs.into())
+                if self.unit.is_none() {
+                    self.unit = rhs.unit;
+                }
+                self.quantity = $dec_op(self.quantity, rhs.quantity);
             }
         }
-    }
+    };
 }
-macro_rules! op_decimal_mul_div {
-    ($op_type:tt, $op_method:tt, $op:tt) => {
-        impl<'h, D> $op_type<D> for Amount<'h> where D: Into<Decimal> {
-            type Output = Amount<'h>;
-            fn $op_method(self, rhs: D) -> Self::Output {
-                Amount::new(self.unit, self.quantity $op rhs.into())
-            }
-        }
-    }
-}
-op_decimal_mul_div!(Mul, mul, *);
-op_decimal_mul_div!(Div, div, /);
-op_decimal!(Sub, sub, -);
-op_decimal!(Add, add, +);
+op_assign!(Amount<'h>, DivAssign, div_assign, Decimal::div);
+op_assign!(&Amount<'h>, DivAssign, div_assign, Decimal::div);
 
-macro_rules! op_ref_decimal_mul_div {
-    ($op_type:tt, $op_method:tt, $op:tt) => {
-        impl<'h, 'b, D> $op_type<D> for &'b Amount<'h>
+macro_rules! checked_op_decimal {
+    ($amount_type:ty, $op_type:tt, $op_method:tt, $op:path, $unit_check:expr) => {
+        impl<'h, D> $op_type<D> for $amount_type
         where
             D: Into<Decimal>,
         {
             type Output = Amount<'h>;
             fn $op_method(self, rhs: D) -> Self::Output {
-                Amount::new(self.unit, Decimal::$op(self.quantity, rhs.into()))
+                // Test whether $op is add or sub
+                if $unit_check {
+                    if self.unit.is_none() {
+                        panic!("Attempt to operate on a nil amount")
+                    }
+                }
+                Amount::new(self.unit, $op(self.quantity, rhs.into()).unwrap())
             }
         }
     };
 }
-macro_rules! op_ref_decimal {
-    ($op_type:tt, $op_method:tt, $op:tt) => {
-        impl<'h, 'b, D> $op_type<D> for &'b Amount<'h> where D: Into<Decimal> {
+checked_op_decimal!(Amount<'h>, Sub, sub, Decimal::checked_sub, true);
+checked_op_decimal!(&Amount<'h>, Sub, sub, Decimal::checked_sub, true);
+checked_op_decimal!(Amount<'h>, Add, add, Decimal::checked_add, true);
+checked_op_decimal!(&Amount<'h>, Add, add, Decimal::checked_add, true);
+checked_op_decimal!(Amount<'h>, Mul, mul, Decimal::checked_mul, false);
+checked_op_decimal!(&Amount<'h>, Mul, mul, Decimal::checked_mul, false);
+
+macro_rules! op_decimal {
+    ($amount_type:ty, $op_type:tt, $op_method:tt, $op:path, $unit_check:expr) => {
+        impl<'h, D> $op_type<D> for $amount_type
+        where
+            D: Into<Decimal>,
+        {
             type Output = Amount<'h>;
             fn $op_method(self, rhs: D) -> Self::Output {
-                if self.unit.is_none() {
-                    panic!("Attempt to operate on a nil amount")
+                // Test whether $op is add or sub
+                if $unit_check {
+                    if self.unit.is_none() {
+                        panic!("Attempt to operate on a nil amount")
+                    }
                 }
-                Amount::new(self.unit, self.quantity $op rhs.into())
+                Amount::new(self.unit, $op(self.quantity, rhs.into()))
             }
         }
-    }
+    };
 }
-op_ref_decimal_mul_div!(Mul, mul, mul);
-op_ref_decimal_mul_div!(Div, div, div);
-op_ref_decimal!(Add, add, +);
-op_ref_decimal!(Sub, sub, -);
+op_decimal!(Amount<'h>, Div, div, Decimal::div, false);
+op_decimal!(&Amount<'h>, Div, div, Decimal::div, false);
 
-macro_rules! op_assign_decimal_mul_div {
-    ($op_type:tt, $op_method:tt, $op:tt) => {
+macro_rules! checked_op_assign_decimal {
+    ($op_type:tt, $op_method:tt, $op:path, $unit_check:expr) => {
         impl $op_type<Decimal> for Amount<'_> {
             fn $op_method(&mut self, rhs: Decimal) {
-                self.quantity $op rhs
-            }
-        }
-    }
-}
-macro_rules! op_assign_decimal {
-    ($op_type:tt, $op_method:tt, $op:tt) => {
-        impl $op_type<Decimal> for Amount<'_> {
-            fn $op_method(&mut self, rhs: Decimal) {
-                if self.unit.is_none() {
-                    panic!("Attempt to operate on a nil amount")
+                if $unit_check {
+                    if self.unit.is_none() {
+                        panic!("Attempt to operate on a nil amount")
+                    }
                 }
-                self.quantity $op rhs
+                use std::borrow::BorrowMut;
+                *self.quantity.borrow_mut() = $op(self.quantity, rhs).unwrap()
             }
         }
-    }
+    };
 }
-op_assign_decimal!(AddAssign, add_assign, +=);
-op_assign_decimal!(SubAssign, sub_assign, -=);
-op_assign_decimal_mul_div!(MulAssign, mul_assign, *=);
-op_assign_decimal_mul_div!(DivAssign, div_assign, /=);
+
+macro_rules! op_assign_decimal {
+    ($op_type:tt, $op_method:tt, $op:path, $unit_check:expr) => {
+        impl $op_type<Decimal> for Amount<'_> {
+            fn $op_method(&mut self, rhs: Decimal) {
+                if $unit_check {
+                    if self.unit.is_none() {
+                        panic!("Attempt to operate on a nil amount")
+                    }
+                }
+                self.quantity = $op(self.quantity, rhs)
+            }
+        }
+    };
+}
+checked_op_assign_decimal!(AddAssign, add_assign, Decimal::checked_add, true);
+checked_op_assign_decimal!(SubAssign, sub_assign, Decimal::checked_sub, true);
+checked_op_assign_decimal!(MulAssign, mul_assign, Decimal::checked_mul, false);
+op_assign_decimal!(DivAssign, div_assign, Decimal::div, false);
 
 /// An arithmetic expression of `Amounts`.
 /// These are parsed from the journal files and stored so that they can be rewritten later.
