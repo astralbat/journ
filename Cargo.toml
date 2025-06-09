@@ -1,6 +1,6 @@
 [package]
 name = "journ"
-version = "0.2.1-beta.2"
+version = "0.2.1-beta.3"
 description = "Plaintext Accounting Journal"
 authors = ["Mark Barrett <mark@barrett.uk>"]
 edition = "2024"
@@ -51,5 +51,5 @@ debug = true
 
 [package.metadata.release]
 pre-release-replacements = [
-    { file = "dist/homebrew/journ.rb", search = 'url "https://github.com/astralbat/journ/archive/refs/tags/v[^"]+\.tar\.gz"', replace = 'url "https://github.com/astralbat/journ/archive/refs/tags/v{{version}}.tar.gz"', prerelease = true }
+    { file = "dist/homebrew/journ.rb", search = 'url\s+"https://github.com/astralbat/journ/archive/refs/tags/v[^"]+\.tar\.gz"', replace = 'url "https://github.com/astralbat/journ/archive/refs/tags/v{{version}}.tar.gz"', prerelease = true }
 ]
