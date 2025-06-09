@@ -1,2 +1,4 @@
-shared-version = true
+shared-version = false
+dependent-version = "upgrade"
 publish = false
+push = true
