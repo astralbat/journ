@@ -51,5 +51,6 @@ debug = true
 
 [package.metadata.release]
 pre-release-replacements = [
-    { file = "dist/homebrew/journ.rb", search = '(url\s+"https://github.com/astralbat/journ/archive/refs/tags/)v[^"]+(\.tar\.gz")', replace = '$1v{{version}}$2"', prerelease = true, exactly = 1 }
+    # First capture group not working?
+    { file = "dist/homebrew/journ.rb", search = '(url\s+"https://github.com/astralbat/journ/archive/refs/tags/)v[^"]+(\.tar\.gz")', replace = 'url      https://github.com/astralbat/journ/archive/refs/tags/v{{version}}$2"', prerelease = true, exactly = 1 }
 ]
