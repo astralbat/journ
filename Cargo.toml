@@ -48,3 +48,8 @@ debug = true
 #chrono-tz-build = { git = "https://github.com/chronotope/chrono-tz", rev = "f1c87850f2b241a72adcdab9bc8166df5fba8b36" }
 #[net]
 #git-fetch-with-cli = true
+
+[package.metadata.release]
+pre-release-replacements = [
+    { file = "dist/homebrew/journ.rb", search = 'url "https://github.com/astralbat/journ/archive/refs/tags/v[^"]+\.tar\.gz"', replace = 'url "https://github.com/astralbat/journ/archive/refs/tags/v{{version}}.tar.gz"' }
+]
