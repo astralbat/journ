@@ -1,6 +1,6 @@
 [package]
 name = "journ-core"
-version = "0.2.1-beta.6"
+version = "0.2.1-beta.7"
 authors = ["Mark Barrett <mark@barrett.uk>"]
 edition = "2024"
 license = "AGPL-3"
