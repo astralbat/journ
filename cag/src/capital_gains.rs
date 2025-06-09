@@ -8,25 +8,36 @@
 use crate::cgt_configuration::{
     CagCommand, CapitalGainsColumn, CapitalGainsGroupBy, CapitalGainsOrderBy,
 };
+use crate::pool::PoolBalance;
 use crate::pool_event::{AggregatedPoolEvent, PoolEvent};
-use chrono_tz::OffsetName;
+use chrono_tz::{OffsetName, TzOffset};
 use itertools::Itertools;
 use journ_core::arguments::Arguments;
+use journ_core::configuration::Configuration;
+use journ_core::date_and_time::JDateTime;
 use journ_core::reporting::table::Cell;
 use journ_core::reporting::table::{Row, Table};
-use std::collections::BTreeSet;
+use journ_core::unit::Unit;
+use journ_core::valued_amount::ValuedAmount;
+use journ_core::valuer::{SystemValuer, Valuer};
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use yaml_rust::yaml::Hash;
 use yaml_rust::{Yaml, YamlEmitter};
 
-#[derive(Default)]
 pub struct CapitalGains<'h> {
+    config: Configuration<'h>,
     events: Vec<PoolEvent<'h>>,
+    pool_balances: HashMap<&'h str, HashMap<&'h Unit<'h>, PoolBalance<'h>>>,
 }
 
 impl<'h> CapitalGains<'h> {
-    pub fn new(events: Vec<PoolEvent<'h>>) -> Self {
-        Self { events }
+    pub fn new(
+        config: Configuration<'h>,
+        events: Vec<PoolEvent<'h>>,
+        pool_balances: HashMap<&'h str, HashMap<&'h Unit<'h>, PoolBalance<'h>>>,
+    ) -> Self {
+        Self { config, events, pool_balances }
     }
 
     /*
@@ -57,12 +68,17 @@ impl<'h> CapitalGains<'h> {
         let filtered_and_grouped_events =
             ordered_events(filtered_events(aggregated_events.clone()));
 
+        fn tz_name_or_abbr<TzOffset: OffsetName>(o: &TzOffset) -> &str {
+            o.abbreviation().unwrap_or(o.tz_id())
+        }
+
         // Get Event abbreviations
         let mut event_tzs = BTreeSet::new();
         for e in filtered_and_grouped_events.iter() {
-            if !event_tzs.contains(e.event_datetime().start().datetime().offset().abbreviation()) {
+            if !event_tzs.contains(tz_name_or_abbr(e.event_datetime().start().datetime().offset()))
+            {
                 event_tzs.insert(
-                    e.event_datetime().start().datetime().offset().abbreviation().to_string(),
+                    tz_name_or_abbr(e.event_datetime().start().datetime().offset()).to_string(),
                 );
             }
         }
@@ -70,9 +86,9 @@ impl<'h> CapitalGains<'h> {
         // Get Deal Timezone abbreviations
         let mut deal_tzs = BTreeSet::new();
         for e in filtered_and_grouped_events.iter() {
-            if !deal_tzs.contains(e.deal_datetime().start().datetime().offset().abbreviation()) {
+            if !deal_tzs.contains(tz_name_or_abbr(e.deal_datetime().start().datetime().offset())) {
                 deal_tzs.insert(
-                    e.deal_datetime().start().datetime().offset().abbreviation().to_string(),
+                    tz_name_or_abbr(e.deal_datetime().start().datetime().offset()).to_string(),
                 );
             }
         }
@@ -148,6 +164,36 @@ impl<'h> CapitalGains<'h> {
         }
 
         table.print(writer)?;
+
+        // Print the pool balances.
+        // TODO: Move this outside this function and capture valuation errors.
+        let mut valuer =
+            SystemValuer::on_date(self.config.clone(), JDateTime::now().with_earliest_time());
+        let mut pool_table = Table::default();
+        pool_table.set_heading_row(vec![&"Pool", &"Balance", &"Current Value", &"Unrealised"]);
+        for (pool_name, pool_balances) in self.pool_balances.iter() {
+            for (_unit, balance) in pool_balances.iter() {
+                let mut vals = vec![];
+                for val in balance.valuations() {
+                    if let Ok(Some(val)) = valuer.value(balance.amount(), val.unit()) {
+                        vals.push(val.rounded());
+                    }
+                }
+                let curr_vals =
+                    ValuedAmount::from_valuations(vals.into_iter(), self.config.allocator());
+
+                let unrealised = (&curr_vals - balance.valued_amount()).unwrap();
+
+                pool_table.add_row(vec![
+                    pool_name.into(),
+                    balance.valued_amount().into(),
+                    Cell::from(curr_vals),
+                    Cell::from(unrealised),
+                ]);
+            }
+        }
+        write!(writer, "\n\n")?;
+        pool_table.print(writer)?;
         Ok(())
     }
 }

@@ -20,9 +20,13 @@ use chrono::TimeZone;
 use chrono_tz::Tz;
 use pyo3::basic::CompareOp;
 use pyo3::exceptions::PyException;
-use pyo3::types::{PyDateTime, PyDict, PyModule};
-use pyo3::{create_exception, wrap_pyfunction, IntoPy, PyNativeType, PyObject, PyResult, Python};
+use pyo3::types::{PyAnyMethods, PyDateTime, PyDict, PyDictMethods, PyModule, PyModuleMethods};
+use pyo3::{
+    Bound, IntoPyObject, Py, PyErr, PyObject, PyResult, Python, create_exception, wrap_pyfunction,
+};
 use pyo3::{pyclass, pyfunction, pymethods, pymodule};
+use rust_decimal::Decimal;
+use std::ffi::CString;
 use std::sync::Arc;
 
 /// The rust-facing interface to the module.
@@ -48,7 +52,7 @@ impl PythonLedgerModule {
                 .get_item("__price_dbs")
                 .ok()
                 .flatten()
-                .map(|v| v.downcast::<PyDict>().unwrap())
+                .map(|v| v.downcast_into::<PyDict>().unwrap())
             {
                 Some(db_map) => {
                     db_map.set_item(&alias_owned, Arc::as_ptr(&price_db) as usize).unwrap()
@@ -66,9 +70,9 @@ impl PythonLedgerModule {
         PythonLedgerModule::set_price_database("__default", price_db, journal_incarnation)
     }
 
-    fn get_price_database<'a>(
-        mod_ledger: &'a PyModule,
-        globals: &'a PyDict,
+    fn get_price_database<'a, 'py>(
+        mod_ledger: &'a Bound<'py, PyModule>,
+        globals: Bound<'py, PyDict>,
         unit_code: &str,
     ) -> Option<&'a PriceDatabase<'a>> {
         let journal_incarnation = globals
@@ -84,7 +88,7 @@ impl PythonLedgerModule {
             dict.get_item("__price_dbs")
                 .ok()
                 .flatten()
-                .map(|db| db.downcast::<PyDict>().unwrap())
+                .map(|db| db.downcast_into::<PyDict>().unwrap())
                 .and_then(|db| {
                     db.get_item(unit_code).ok().flatten().map(|r| r.extract::<usize>().unwrap())
                 })
@@ -111,7 +115,7 @@ create_exception!(ledger, PriceLookupError, PyException);
 
 #[pymodule]
 #[pyo3(name = "ledger")]
-pub fn ledger(py: Python, m: &PyModule) -> PyResult<()> {
+pub fn ledger<'py>(py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()> {
     m.add_class::<PyPrice>()?;
     m.add_function(wrap_pyfunction!(price_db_lookup, m)?)?;
     m.add("PriceLookupError", py.get_type::<PriceLookupError>())?;
@@ -120,15 +124,19 @@ pub fn ledger(py: Python, m: &PyModule) -> PyResult<()> {
 
 #[pyfunction]
 #[pyo3(pass_module)]
-fn price_db_lookup(
-    mod_ledger: &PyModule,
+fn price_db_lookup<'py>(
+    mod_ledger: &Bound<'py, PyModule>,
     bc: &str,
     qc: &str,
     dt: PyObject,
     within_seconds: i64,
-) -> PyResult<Option<PyPrice>> {
-    let globals =
-        mod_ledger.py().eval("globals()", None, None).unwrap().extract::<&PyDict>().unwrap();
+) -> PyResult<Option<Py<PyPrice>>> {
+    let globals = mod_ledger
+        .py()
+        .eval(c"globals()", None, None)
+        .unwrap()
+        .extract::<Bound<'py, PyDict>>()
+        .unwrap();
     match PythonLedgerModule::get_price_database(mod_ledger, globals, bc) {
         Some(price_db) => {
             let py = mod_ledger.py();
@@ -145,7 +153,7 @@ fn price_db_lookup(
             if found_price.is_none() {
                 debug!("Price not found in price database. Net lookup required.")
             }
-            Ok(found_price.map(|p| (*p).clone().into_py(py)))
+            Ok(found_price.map(|p| (*p).clone().into_pyobject(py).unwrap().unbind()))
         }
         None => Ok(None),
     }
@@ -160,10 +168,10 @@ pub struct PyPrice {
     quote_currency: String,
     // A python datetime
     #[pyo3(get, set)]
-    datetime: PyObject,
+    datetime: DateTimeWrapper,
     // A python decimal
     #[pyo3(get, set)]
-    price: PyObject,
+    price: Decimal,
     #[pyo3(get, set)]
     sources: Vec<String>,
 }
@@ -174,8 +182,8 @@ impl PyPrice {
     fn new(
         base_currency: String,
         quote_currency: String,
-        datetime: PyObject,
-        price: PyObject,
+        datetime: DateTimeWrapper,
+        price: Decimal,
         sources: Vec<String>,
     ) -> PyPrice {
         PyPrice { base_currency, quote_currency, datetime, price, sources }
@@ -186,16 +194,13 @@ impl PyPrice {
     fn quote_unit(&self) -> &String {
         &self.quote_currency
     }
-    fn datetime(&self) -> &PyObject {
-        &self.datetime
-    }
-    fn price(&self) -> &PyObject {
-        &self.price
+    fn price(&self) -> Decimal {
+        self.price
     }
     fn __str__(&self) -> PyResult<String> {
         Ok(format!(
             "BC='{}', QC='{}', D={}, P={}, S='{:?}'",
-            self.base_currency, self.quote_currency, self.datetime, self.price, self.sources
+            self.base_currency, self.quote_currency, self.datetime.0, self.price, self.sources
         ))
     }
     fn __repr__(&self) -> PyResult<String> {
@@ -205,18 +210,11 @@ impl PyPrice {
         match op {
             CompareOp::Eq => Ok(self.base_currency == other.base_currency
                 && self.quote_currency == other.quote_currency
-                && self
-                    .datetime
-                    .downcast::<PyDateTime>(py)
-                    .unwrap()
-                    .eq(other.datetime.downcast::<PyDateTime>(py).unwrap())
-                    .unwrap()),
+                && self.datetime.0 == other.datetime.0),
             CompareOp::Ne => self.__richcmp__(py, other, CompareOp::Eq).map(|b| !b),
             CompareOp::Lt => {
-                let timestamp: i64 =
-                    self.datetime.call_method(py, "timestamp", (), None)?.extract(py)?;
-                let other_timestamp: i64 =
-                    other.datetime.call_method(py, "timestamp", (), None)?.extract(py)?;
+                let timestamp: i64 = self.datetime.0.timestamp();
+                let other_timestamp: i64 = other.datetime.0.timestamp();
                 if timestamp == other_timestamp {
                     if self.base_currency == other.base_currency {
                         Ok(self.quote_currency < other.quote_currency)
@@ -243,32 +241,45 @@ impl PyPrice {
     }
 }
 
-impl IntoPy<PyPrice> for Price<'_> {
-    fn into_py(self, py: Python) -> PyPrice {
-        PyPrice::new(
-            self.base_unit().to_string(),
-            self.quote_unit().to_string(),
-            self.datetime().into_py(py),
-            py.eval(&format!("Decimal(\"{}\")", self.price().quantity()), None, None)
-                .unwrap()
-                .into_py(py),
-            self.sources().map(str::to_string).collect(),
+impl<'py> IntoPyObject<'py> for Price<'_> {
+    type Target = PyPrice;
+    type Output = Bound<'py, Self::Target>;
+    type Error = PyErr;
+
+    fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
+        Ok(Bound::new(
+            py,
+            PyPrice::new(
+                self.base_unit().to_string(),
+                self.quote_unit().to_string(),
+                DateTimeWrapper(self.datetime().datetime()),
+                self.price().quantity(),
+                self.sources().map(str::to_string).collect(),
+            ),
         )
+        .unwrap())
     }
 }
 
-impl IntoPy<PyObject> for JDateTime<'_> {
-    fn into_py(self, py: Python) -> PyObject {
-        py.eval(
-            &format!(
-                "datetime.strptime(\"{}\", \"%Y-%m-%dT%H:%M:%S%z\")",
-                self.datetime().format("%FT%T%z")
-            ),
-            None,
-            None,
-        )
-        .unwrap()
-        .into_py(py)
+impl<'py> IntoPyObject<'py> for JDateTime<'_> {
+    type Target = PyDateTime;
+    type Output = Bound<'py, Self::Target>;
+    type Error = PyErr;
+
+    fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
+        Ok(py
+            .eval(
+                &CString::new(format!(
+                    "datetime.strptime(\"{}\", \"%Y-%m-%dT%H:%M:%S%z\")",
+                    self.datetime().format("%FT%T%z")
+                ))
+                .unwrap(),
+                None,
+                None,
+            )?
+            .into_pyobject(py)?
+            .downcast_into()
+            .unwrap())
     }
 }
 
@@ -322,16 +333,14 @@ impl PyPrice {
         let quote_unit = config
             .get_unit(self.quote_unit())
             .unwrap_or_else(|| config.merge_unit(&Unit::new(self.quote_unit().clone()), allocator));
-        let chrono_date: DateTimeWrapper = self
-            .datetime
-            .extract(py)
-            .expect("datetime must be constructed with a valid Python datetime object");
+        let chrono_date: DateTimeWrapper = self.datetime;
         let date = JDateTime::from_datetime(
             chrono_date.0,
             Some(config.as_herd_ref().date_format()),
             Some(config.as_herd_ref().time_format()),
         );
 
+        /*
         let price_dict = PyDict::new(py);
         price_dict.set_item("p", &self.price).unwrap();
         let price_str: String = py
@@ -339,7 +348,8 @@ impl PyPrice {
             .map_err(|_| err!("Unable to call str(<price>)"))?
             .extract()
             .unwrap();
-        let price_dec = price_str.to_decimal(&config.number_format())?;
+        let price_dec = price_str.to_decimal(&config.number_format())?;*/
+        let price_dec = self.price;
 
         let sources = match self.into_sources() {
             sources if !sources.is_empty() => {

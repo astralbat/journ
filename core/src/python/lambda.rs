@@ -8,8 +8,8 @@
 use crate::err;
 use crate::error::{JournError, JournResult};
 use crate::ext::StrExt;
+use crate::python::conversion::DeferredArg;
 use crate::python::environment::{FromPyObjectOwned, PythonEnvironment};
-use pyo3::ToPyObject;
 use std::collections::HashMap;
 use std::str::FromStr;
 
@@ -33,9 +33,9 @@ impl Lambda {
         Lambda { parameters: self.parameters, expression: self.expression + code }
     }
 
-    pub fn eval<'a, T>(
+    pub fn eval<T>(
         &self,
-        args: Vec<Box<dyn ToPyObject + 'a>>,
+        args: Vec<Box<dyn DeferredArg>>,
         journal_incarnation: u32,
     ) -> JournResult<T>
     where
@@ -50,9 +50,10 @@ impl Lambda {
         PythonEnvironment::eval(self.expression(), Some(locals), Some(journal_incarnation))
     }
 
+    /*
     pub fn run<'a>(
         &self,
-        args: Vec<Box<dyn ToPyObject + 'a>>,
+        args: Vec<Box<dyn DeferredArg + 'a>>,
         journal_incarnation: Option<u32>,
     ) -> JournResult<()> {
         assert_eq!(args.len(), self.parameters.len(), "Arguments length mismatch");
@@ -62,11 +63,12 @@ impl Lambda {
             locals.insert(p.to_string(), a);
         }
         PythonEnvironment::run(self.expression(), journal_incarnation, Some(locals), None)
-    }
+    }*/
 
+    /*
     pub fn run_and_return<'a, T>(
         &self,
-        args: Vec<Box<dyn ToPyObject + 'a>>,
+        args: Vec<Box<dyn DeferredArg + 'a>>,
         return_var: &str,
         journal_incarnation: u32,
     ) -> JournResult<T>
@@ -93,7 +95,7 @@ impl Lambda {
                     .map_err(|e| err!("Unable to extract return result from lambda: {}", e))
             },
         )
-    }
+    }*/
 }
 
 impl FromStr for Lambda {
@@ -119,23 +121,22 @@ impl FromStr for Lambda {
             // a -> if 1 == 1:
             //        print("true")
             let trimmed_expression = expression.trim_start();
-            let mut expression = match expression[0..expression.len() - trimmed_expression.len()]
-                .rfind(|c| c == '\n')
-            {
-                Some(pos) => expression[pos + 1..].to_string(),
-                None => {
-                    let mut expr = String::new();
-                    let pos = arrow_pos + 2;
-                    for c in s[0..pos].chars().rev() {
-                        if c == '\n' || c == '\r' {
-                            break;
+            let mut expression =
+                match expression[0..expression.len() - trimmed_expression.len()].rfind('\n') {
+                    Some(pos) => expression[pos + 1..].to_string(),
+                    None => {
+                        let mut expr = String::new();
+                        let pos = arrow_pos + 2;
+                        for c in s[0..pos].chars().rev() {
+                            if c == '\n' || c == '\r' {
+                                break;
+                            }
+                            expr.push(' ');
                         }
-                        expr.push(' ');
+                        expr.push_str(expression);
+                        expr
                     }
-                    expr.push_str(expression);
-                    expr
-                }
-            };
+                };
 
             let base_indent_amount =
                 expression[0..expression.len() - expression.trim_start().len()].indented_amount();

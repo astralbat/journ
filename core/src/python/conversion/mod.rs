@@ -9,14 +9,32 @@ pub mod error;
 
 use chrono::{DateTime, Datelike, TimeZone, Timelike};
 use chrono_tz::Tz;
+use pyo3::prelude::PyAnyMethods;
 use pyo3::types::{PyDateTime, PyTzInfo};
-use pyo3::{FromPyObject, IntoPy, PyAny, PyObject, PyResult, Python};
+use pyo3::{
+    Bound, BoundObject, FromPyObject, IntoPyObject, Py, PyAny, PyErr, PyObject, PyResult, Python,
+};
 
-#[derive(Clone)]
+#[derive(Copy, Clone)]
 pub struct DateTimeWrapper(pub DateTime<Tz>);
 
-impl IntoPy<PyObject> for DateTimeWrapper {
-    fn into_py(self, py: Python) -> PyObject {
+impl DateTimeWrapper {}
+
+impl<'py> IntoPyObject<'py> for DateTimeWrapper {
+    type Target = PyAny;
+    type Output = Bound<'py, Self::Target>;
+    type Error = PyErr;
+
+    fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
+        let zone_info = py.import("zoneinfo").expect("Unable to import ZoneInfo module");
+        let zone_info_cls = zone_info.getattr("ZoneInfo").expect("Unable to get ZoneInfo class");
+        let tz_info = zone_info_cls
+            .call1((self.0.timezone().name(),))
+            .expect("Failed to create ZoneInfo instance")
+            .downcast_into::<PyTzInfo>()
+            .expect("Failed to downcast to PyTzInfo");
+
+        /*
         let mut tz_eval = String::with_capacity(100);
         tz_eval.push_str("ZoneInfo(\"");
         tz_eval.push_str(self.0.timezone().name());
@@ -25,7 +43,7 @@ impl IntoPy<PyObject> for DateTimeWrapper {
             .eval(&tz_eval, None, None)
             .expect("Incompatible timezone")
             .downcast::<PyTzInfo>()
-            .expect("Failed to downcast to PyTzInfo");
+            .expect("Failed to downcast to PyTzInfo");*/
 
         let py_dt = PyDateTime::new(
             py,
@@ -36,16 +54,64 @@ impl IntoPy<PyObject> for DateTimeWrapper {
             self.0.minute() as u8,
             self.0.second() as u8,
             self.0.timestamp_subsec_micros(),
-            Some(tz_info),
-        )
-        .expect("Failed to construct PyDateTime");
-        py_dt.into()
+            Some(&tz_info),
+        )?;
+        Ok(py_dt.into_any())
     }
 }
 
 impl<'source> FromPyObject<'source> for DateTimeWrapper {
-    fn extract(ob: &'source PyAny) -> PyResult<Self> {
+    fn extract_bound(ob: &Bound<'source, PyAny>) -> PyResult<Self> {
         let timestamp: f64 = ob.call_method0("timestamp")?.extract()?;
-        Ok(Self(Tz::UTC.timestamp_opt(timestamp as i64, 0).unwrap()))
+        Ok(DateTimeWrapper(Tz::UTC.timestamp_opt(timestamp as i64, 0).unwrap()))
     }
 }
+
+pub trait DeferredArg: Send + Sync + 'static {
+    fn to_pyobject<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>>;
+}
+
+impl DeferredArg for String {
+    fn to_pyobject<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        Ok(self
+            .into_pyobject(py)
+            .map_err(|_| {
+                PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                    "Failed to convert String to PyObject",
+                )
+            })?
+            .into_any()
+            .into_bound())
+    }
+}
+
+impl DeferredArg for DateTimeWrapper {
+    fn to_pyobject<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.clone()
+            .into_pyobject(py)
+            .map_err(|_| {
+                PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                    "Failed to convert DateTimeWrapper to PyObject",
+                )
+            })
+            .map(move |obj| obj.into_any().into_bound())
+    }
+}
+
+/*
+impl<'py2, T> DeferredArg for T
+where
+    T: IntoPyObject<'py2> + Send + Sync + Clone + 'static,
+    <T as IntoPyObject<'py2>>::Output: BoundObject<'py2, T::Target>,
+{
+    fn to_pyobject<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.clone()
+            .into_pyobject(py)
+            .map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                    "Failed to convert DeferredArg to PyObject",
+                )
+            })
+            .map(move |obj| obj.into_any().into_bound())
+    }
+}*/

@@ -14,7 +14,7 @@ use crate::reporting::table::{Alignment, Cell};
 use crate::reporting::term_style::{Colour, Style};
 use std::any::Any;
 use std::error::Error;
-use std::ops::{DerefMut, Range};
+use std::ops::Range;
 use std::{fmt, mem};
 
 pub type JournResult<T> = Result<T, JournError>;
@@ -447,9 +447,10 @@ impl From<&TextBlock<'_>> for BlockContext {
 
         // Go up the block tree while the parent block is on the same line as the current block.
         // We need full lines so that indexing works correctly.
+        // Also, go to the first parent block that is not indented.
         let mut parent = block;
         while let Some(p) = parent.parent() {
-            if parent.trimmed_start_lines().column() == 1 {
+            if parent.trimmed_start_lines().column() == 1 && parent.indented_amount() == 0 {
                 break;
             }
             //if p.column() == 1 || p.text().lines().count() > 20 {

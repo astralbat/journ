@@ -22,9 +22,7 @@ macro_rules! amount {
         let (_, amount) = parse!($str, $crate::parsing::amount::amount).unwrap();
         amount
     }};
-    ($code:expr, $value:expr) => {{
-        $crate::amount::Amount::new($crate::unit_ref!($code), $value)
-    }};
+    ($code:expr, $value:expr) => {{ $crate::amount::Amount::new($crate::unit_ref!($code), $value) }};
 }
 
 #[macro_export]
@@ -79,7 +77,7 @@ macro_rules! config {
 /// Handy utility for quickly matching and mapping enums. See https://github.com/rust-lang/rfcs/issues/2960
 #[macro_export]
 macro_rules! match_map {
-    ($expression:expr, $( $pattern:pat )|+ $( if $guard: expr )? => $ret:expr) => {
+    ($expression:expr, $( $pattern:pat_param )|+ $( if $guard: expr )? => $ret:expr) => {
         match $expression {
             $( $pattern )|+ $( if $guard )? => Some($ret),
             _ => None
@@ -92,7 +90,7 @@ macro_rules! match_map {
 /// If the match fails.
 #[macro_export]
 macro_rules! match_then {
-    ($expression:expr, $( $pattern:pat )|+ $( if $guard: expr )? => $then:expr) => {
+    ($expression:expr, $( $pattern:pat_param )|+ $( if $guard: expr )? => $then:expr) => {
         match $expression {
             $( $pattern )|+ $( if $guard )? => { $then },
             _ => panic!("Match failed")
@@ -140,9 +138,7 @@ macro_rules! dir {
         use $crate::config;
         dir!($text, config!())
     }};
-    ($text:expr, $config:expr) => {{
-        dir!($text, $config, $crate::journal_node::JournalNodeKind::Entry)
-    }};
+    ($text:expr, $config:expr) => {{ dir!($text, $config, $crate::journal_node::JournalNodeKind::Entry) }};
     ($text:expr, $config:expr, $node_kind:expr) => {{
         use $crate::parse_node;
 
@@ -164,9 +160,7 @@ macro_rules! dir_kind {
         use $crate::config;
         dir_kind!($text, $kind, config!(), $crate::journal_node::JournalNodeKind::Entry)
     }};
-    ($text:expr, $kind:tt, $config:expr) => {{
-        dir_kind!($text, $kind, $config, $crate::journal_node::JournalNodeKind::Entry)
-    }};
+    ($text:expr, $kind:tt, $config:expr) => {{ dir_kind!($text, $kind, $config, $crate::journal_node::JournalNodeKind::Entry) }};
     ($text:expr, $kind:tt, $config:expr, $file_kind:expr) => {{
         let dir_result = dir!($text, $config, $file_kind);
         match dir_result {

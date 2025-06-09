@@ -16,12 +16,12 @@ use journ_core::reporting::table::{Cell, WrapPolicy};
 use journ_core::unit::Unit;
 use journ_core::valued_amount::{Valuation, ValuedAmount};
 use log::trace;
-use rust_decimal::prelude::One;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::One;
 use std::fmt;
 use std::fmt::Formatter;
-use yaml_rust::yaml::Hash;
 use yaml_rust::Yaml;
+use yaml_rust::yaml::Hash;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct AdjustmentId<'h> {
@@ -270,8 +270,8 @@ impl<'h> Adjustment<'h> {
     /// Gets whether this identity is the same as the identity adjustment.
     pub fn is_identity(&self) -> bool {
         self.amount_adjustments.iter().all(|amnt_adj| match amnt_adj {
-            AmountAdjustment::Scale(ref q) => q.quantity() == Decimal::one(),
-            AmountAdjustment::Add(ref amount) => amount.is_zero(),
+            AmountAdjustment::Scale(q) => q.quantity() == Decimal::one(),
+            AmountAdjustment::Add(amount) => amount.is_zero(),
             AmountAdjustment::Set(_) => false,
         })
     }

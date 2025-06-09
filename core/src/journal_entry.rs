@@ -7,7 +7,7 @@
  */
 use crate::account::Account;
 use crate::alloc::HerdAllocator;
-use crate::amount::{Amount, AmountExpr};
+use crate::amount::Amount;
 use crate::configuration::Configuration;
 use crate::date_and_time::DateAndTime;
 use crate::error::{BlockContext, BlockContextError, JournError, JournResult};
@@ -15,25 +15,21 @@ use crate::ext::{RangeBoundsExt, StrExt};
 use crate::journal_entry_flow::Flows;
 use crate::journal_node::NodeId;
 use crate::metadata::{Metadata, MetadataKey};
-use crate::money_util::UnitAmountMap;
 use crate::parsing::text_block::TextBlock;
 use crate::posting::{Posting, PostingId};
 use crate::unit::Unit;
-use crate::valued_amount::{Valuation, ValuedAmount};
-use crate::valuer::{LinearSystemValuer, Valuer};
+use crate::valued_amount::Valuation;
 use crate::{err, match_map};
 use chrono::{
     DateTime, Datelike, Duration, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Timelike,
 };
 use chrono_tz::Tz;
 use linked_hash_set::LinkedHashSet;
-use nalgebra::{DMatrix, DVector};
 use rust_decimal::prelude::Zero;
 use rust_decimal::Decimal;
 use rust_decimal_macros::*;
 use smallvec::{smallvec, SmallVec};
 use std::cell::Cell;
-use std::convert::TryFrom;
 use std::ops::{Add, Bound, Range, RangeBounds};
 use std::{cmp, fmt};
 
@@ -811,7 +807,7 @@ impl<'h> JournalEntry<'h> {
                     .next()
                 {
                     match val {
-                        Valuation::Total(value, elided) => {
+                        Valuation::Total(value, _elided) => {
                             if pst.is_credit() {
                                 credits_total += **value;
                             } else {
@@ -890,11 +886,12 @@ impl<'h> JournalEntry<'h> {
                         match entry.range.intersection(&pst_price_range) {
                             Some(intersection) => entry.range = intersection,
                             None => {
-                                return Err(err!(err!(
-                                    "Inconsistent posting valuation: {} / {} not consistent with previous postings",
-                                    pst_value,
+                                return Err(err!(BlockContextError::new(BlockContext::from(pst.block()), format!("Posting valuation: {} @@ {} is not consistent with previous postings. Expected to be in range {}", pst.amount(), pst_value, entry.range.to_string()))));
+                                /*return Err(err!(err!(
+                                    "Inconsistent posting valuation: {} @@ {} not consistent with previous postings",
                                     pst.amount(),
-                                ); "Inconsistent valuation"));
+                                    pst_value,
+                                ); "Inconsistent valuation"));*/
                             }
                         }
                         continue 'next_curr;

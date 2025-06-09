@@ -13,7 +13,6 @@ use crate::reporting::table;
 use crate::reporting::table::{Cell, WrapPolicy};
 use crate::reporting::term_style::Colour;
 use crate::unit::Unit;
-use crate::valuer;
 use crate::valuer::Valuer;
 use rust_decimal::prelude::{One, Zero};
 use rust_decimal::Decimal;
@@ -314,6 +313,12 @@ impl<'h> ValuedAmount<'h> {
         *self.amount_expr
     }
 
+    /// Gets all effective 'amounts' for this valued amount. That is,
+    /// the primary amount first, and then all valuations as total valuations.
+    pub fn amounts(&self) -> impl Iterator<Item = Amount<'h>> + '_ {
+        iter::once(*self.amount_expr).chain(self.totalled_valuations())
+    }
+
     pub fn amount_expr(&self) -> &AmountExpr<'h> {
         &self.amount_expr
     }
@@ -356,10 +361,6 @@ impl<'h> ValuedAmount<'h> {
             }
             Valuation::Unit(factor) => Some(**factor * self.amount().quantity()),
         })
-    }
-
-    pub fn all_totalled_valuations(&self) -> impl Iterator<Item = Amount<'h>> + '_ {
-        iter::once(*self.amount_expr).chain(self.totalled_valuations())
     }
 
     /// An iterator of all units.
@@ -820,7 +821,7 @@ impl<'h> From<&ValuedAmount<'h>> for Yaml {
         // Create a map of unit keys -> an `Amount` yaml map.
         // We filter out the unit key from the valuation map.
         //let mut units_map = Hash::new();
-        for valuation in va.all_totalled_valuations() {
+        for valuation in va.amounts() {
             let mut unit_map = Hash::new();
             unit_map.extend(
                 Yaml::from(&valuation)

@@ -19,12 +19,12 @@ use journ_core::amount::{Amount, Quantity};
 use journ_core::arguments::Arguments;
 use journ_core::configuration::Configuration;
 use journ_core::date_and_time::{JDateTime, JDateTimeRange};
+use journ_core::err;
 use journ_core::error::{JournError, JournResult};
 use journ_core::journal_entry::JournalEntry;
 use journ_core::unit::Unit;
 use journ_core::valued_amount::ValuedAmount;
 use journ_core::valuer::{SystemValuer, Valuer};
-use journ_core::{err, valuer};
 use linked_hash_set::LinkedHashSet;
 use std::fmt;
 use yaml_rust::Yaml;
@@ -418,7 +418,7 @@ impl<'h> DealGroup<'h> {
         config: &Configuration<'h>,
         value_date: DateTime<Tz>,
     ) -> JournResult<()> {
-        let date_valuer = |mut config: Configuration<'h>, value_date: DateTime<Tz>| {
+        let date_valuer = |config: Configuration<'h>, value_date: DateTime<Tz>| {
             move |base_amount: Amount<'h>, quote_unit: &'h Unit<'h>| match SystemValuer::on_date(
                 config.clone(),
                 JDateTime::from_datetime(

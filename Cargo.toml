@@ -3,7 +3,7 @@ name = "journ"
 description = "Plaintext Accounting Journal"
 version = "0.2.0"
 authors = ["Mark Barrett <mark@barrett.uk>"]
-edition = "2018"
+edition = "2024"
 license = "AGPL-3"
 
 [package.metadata]
@@ -17,13 +17,17 @@ journ-core = { path = "core" }
 journ-cag = { path = "cag" }
 clap = { version = "4.5.4", features = ["derive"] }
 chrono = { version = "0.4" }
-chrono-tz = "0.8.6"
+chrono-tz = "0.10.3"
 nom = "7.1.3"
 num-format = { version = "0.4", features = ["with-system-locale"] }
 env_logger = "0.11.3"
 ansi_term = "0.12.1"
 bumpalo-herd = "0.1.2"
 log = { version = "0.4", features = ["max_level_trace", "release_max_level_trace"] }
+
+#[dependency-overrides]
+# Fixes build error with pyo3 including chrono-tz feature "no function or associated item named `default` found for struct `LineParser` in the current scope"
+#parse-zoneinfo = "0.3.1"
 
 [profile.dev]
 debug = true
@@ -38,3 +42,9 @@ debug = true
 [features]
 # Disabled, see journ-core/Cargo.toml
 #python-embedded = ["journ-core/python-embedded"]
+
+# Fixes build error "no function or associated item named `default` found for struct `LineParser` in the current scope"
+#[patch.crates-io]
+#chrono-tz-build = { git = "https://github.com/chronotope/chrono-tz", rev = "f1c87850f2b241a72adcdab9bc8166df5fba8b36" }
+#[net]
+#git-fetch-with-cli = true

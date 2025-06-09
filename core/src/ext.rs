@@ -373,11 +373,28 @@ impl StringExt for String {
     }
 }
 
-pub trait RangeBoundsExt<T> {
+pub trait RangeBoundsExt<T>: RangeBounds<T> {
     fn intersection<R>(&self, other: &R) -> Option<(Bound<T>, Bound<T>)>
     where
         R: RangeBounds<T>,
         Self: Sized;
+
+    fn to_string(&self) -> String
+    where
+        T: std::fmt::Display,
+    {
+        let start = match self.start_bound() {
+            Bound::Included(v) => format!("[{v}"),
+            Bound::Excluded(v) => format!("({v}"),
+            Bound::Unbounded => "(-∞".to_string(),
+        };
+        let end = match self.end_bound() {
+            Bound::Included(v) => format!("{v}]"),
+            Bound::Excluded(v) => format!("{v})"),
+            Bound::Unbounded => "∞)".to_string(),
+        };
+        format!("{start}, {end}")
+    }
 }
 
 macro_rules! impl_range_bounds_ext {

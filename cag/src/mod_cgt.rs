@@ -10,9 +10,10 @@ use journ_core::err;
 use journ_core::error::JournResult;
 use journ_core::python::conversion::DateTimeWrapper;
 use pyo3::prelude::PyModule;
-use pyo3::types::PyDict;
-use pyo3::PyObject;
-use pyo3::{pyclass, pymethods, pymodule, wrap_pymodule, IntoPy, PyResult, Python, ToPyObject};
+use pyo3::types::{PyAnyMethods, PyDict, PyDictMethods, PyModuleMethods};
+use pyo3::{Bound, PyResult, Python, pyclass, pymethods, pymodule, wrap_pymodule};
+use pyo3::{IntoPyObject, PyObject};
+use std::convert::Infallible;
 
 /*
 pub struct PythonCgtModule;
@@ -31,7 +32,7 @@ impl PythonCgtModule {
 }
 */
 #[pymodule]
-fn cgt(_py: Python, _m: &PyModule) -> PyResult<()> {
+fn cgt<'py>(_py: Python, _m: Bound<'py, PyModule>) -> PyResult<()> {
     //m.add_function(wrap_pyfunction!(pair_unpaired_buys_with_sells, m).unwrap()).unwrap();
     Ok(())
 }
@@ -41,7 +42,7 @@ pub fn register() -> JournResult<()> {
     Python::with_gil(|py| {
         match py.import("sys") {
             Ok(mod_sys) => match mod_sys.dict().get_item("modules").unwrap() {
-                Some(dict) => match dict.downcast::<PyDict>() {
+                Some(dict) => match dict.downcast_into::<PyDict>() {
                     Ok(dict) => match dict.set_item("cgt".to_string(), wrap_pymodule!(cgt)(py)) {
                         Ok(()) => Ok(()),
                         Err(_) => Err(err!("Failed to set module as an item on sys.modules")),
@@ -53,7 +54,7 @@ pub fn register() -> JournResult<()> {
             Err(_) => Err(err!("Unable to import python sys module")),
         }
         .and_then(|_| {
-            py.run("import cgt", None, None).map_err(|e| err!("Unable to import module: {}", e))
+            py.run(c"import cgt", None, None).map_err(|e| err!("Unable to import module: {}", e))
         })
     })
 }
@@ -103,9 +104,13 @@ impl FromPyObjectOwned for DealingEvent {
     }
 }*/
 
-impl<'h> ToPyObject for Deal<'h> {
-    fn to_object(&self, py: Python) -> PyObject {
-        PyDeal::from(self).into_py(py)
+impl<'py, 'h> IntoPyObject<'py> for Deal<'h> {
+    type Target = PyDeal;
+    type Output = Bound<'py, PyDeal>;
+    type Error = Infallible;
+
+    fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
+        Ok(Bound::new(py, PyDeal::from(&self)).expect("Unexpected error converting Deal to PyDeal"))
     }
 }
 

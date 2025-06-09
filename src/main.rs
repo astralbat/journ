@@ -5,6 +5,9 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
+
+#![feature(cow_is_borrowed)]
+
 mod bal;
 mod cag;
 mod csv;
@@ -24,12 +27,12 @@ use bumpalo_herd::Herd;
 use chrono_tz::Tz;
 use clap::{Parser, Subcommand};
 
-use env_logger::fmt::style::{AnsiColor, Color, RgbColor, Style};
 use env_logger::Builder;
+use env_logger::fmt::style::{AnsiColor, Color, RgbColor, Style};
 use journ_core::alloc::HerdAllocator;
 use journ_core::arguments::{Arguments, Command, DateTimeArguments};
 use journ_core::date_and_time::{
-    DateFormat, JDateTime, TimeFormat, DEFAULT_DATE_FORMAT, DEFAULT_TIME_FORMAT,
+    DEFAULT_DATE_FORMAT, DEFAULT_TIME_FORMAT, DateFormat, JDateTime, TimeFormat,
 };
 use journ_core::error::{BlockContextError, JournError, JournResult};
 use journ_core::journal::Journal;
@@ -142,7 +145,10 @@ pub trait ExecCommand: Command {
 fn main() {
     use num_format::{SystemLocale, ToFormattedString};
 
-    env::set_var("RUST_BACKTRACE", "full");
+    /// Safe because there are no other threads.
+    unsafe {
+        env::set_var("RUST_BACKTRACE", "full");
+    }
 
     let error_style = Style::default().fg_color(Some(Color::Ansi(AnsiColor::Red))).bold();
     let warn_style = Style::default().fg_color(Some(Color::Ansi(AnsiColor::Yellow))).bold();

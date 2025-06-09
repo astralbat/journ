@@ -9,6 +9,7 @@ use crate::account::Account;
 use crate::alloc::HerdAllocator;
 use crate::amount::{Amount, AmountExpr};
 use crate::journal_entry::EntryId;
+use crate::parsing::text_block::TextBlock;
 use crate::unit::Unit;
 use crate::valued_amount::{Valuation, ValuedAmount};
 use std::cell::Cell;
@@ -41,6 +42,7 @@ impl<'h> PostingId<'h> {
 #[derive(Debug, Clone)]
 pub struct Posting<'h> {
     posting_id: OnceLock<PostingId<'h>>,
+    text_block: &'h TextBlock<'h>,
     // Account spacing prefix.
     account_spacing: &'h str,
     account: Arc<Account<'h>>,
@@ -52,6 +54,7 @@ pub struct Posting<'h> {
 
 impl<'h> Posting<'h> {
     pub fn new(
+        text_block: &'h TextBlock<'h>,
         account_spacing: &'h str,
         account: Arc<Account<'h>>,
         valued_amount: ValuedAmount<'h>,
@@ -60,6 +63,7 @@ impl<'h> Posting<'h> {
     ) -> Self {
         Self {
             posting_id: OnceLock::new(),
+            text_block,
             amount_elided: valued_amount.is_nil(),
             account_spacing,
             account,
@@ -75,6 +79,11 @@ impl<'h> Posting<'h> {
 
     pub fn id(&self) -> PostingId<'h> {
         *self.posting_id.get().expect("Entry ID has not been set")
+    }
+
+    /// The block from which this posting was parsed.
+    pub fn block(&self) -> &'h TextBlock<'h> {
+        self.text_block
     }
 
     pub fn leading_whitespace(&self) -> &'h str {
@@ -111,6 +120,12 @@ impl<'h> Posting<'h> {
         );
 
         self.valued_amount.amount()
+    }
+
+    pub fn amounts(&self) -> impl Iterator<Item = Amount<'h>> + '_ {
+        debug_assert!(!self.valued_amount.is_nil(), "Amount not set; set amount first");
+
+        self.valued_amount.amounts()
     }
 
     /// The amount's unit

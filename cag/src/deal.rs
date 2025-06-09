@@ -20,7 +20,6 @@ use journ_core::reporting::table;
 use journ_core::unit::Unit;
 use journ_core::valued_amount::ValuedAmount;
 use journ_core::valuer::SystemValuer;
-use std::borrow::Cow;
 use std::fmt;
 use std::fmt::Formatter;
 use std::ops::Add;

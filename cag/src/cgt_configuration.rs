@@ -11,12 +11,11 @@ use chrono::{DateTime, Duration};
 use chrono_tz::Tz;
 use journ_core::account::Account;
 use journ_core::arguments::{Command, DateTimeArguments};
-use journ_core::configuration::{create_unit_filter, AccountFilter, FileFilter, Filter};
+use journ_core::configuration::{create_unit_filter, AccountFilter, Filter};
 use journ_core::directive::DirectiveKind;
 use journ_core::err;
 use journ_core::error::JournError;
 use journ_core::ext::StrExt;
-use journ_core::journal_node::JournalNode;
 use journ_core::module::{
     ModuleConfiguration, ModuleConfigurationClone, ModuleConfigurationEq, ModuleDirectiveObj,
 };

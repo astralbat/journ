@@ -7,7 +7,7 @@
  */
 use crate::alloc::HerdAllocator;
 use crate::configuration::Configuration;
-use crate::error::{BlockContext, BlockContextError, JournErrors, JournResult};
+use crate::error::{BlockContextError, JournErrors, JournResult};
 use crate::journal_node::{JournalNode, JournalNodeKind, NodeId};
 use crate::parsing::text_block::TextBlock;
 use crate::parsing::text_input::{BlockInput, LocatedInput, TextBlockInput, TextInput};
@@ -15,9 +15,8 @@ use crate::parsing::util::interim_space;
 use crate::python::environment::PythonEnvironment;
 use crate::{err, parsing};
 use nom_locate::LocatedSpan;
-use pyo3::ToPyObject;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::ffi::CString;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Mutex;

@@ -13,6 +13,8 @@ use crate::price::Price;
 use crate::unit::Unit;
 use chrono::DateTime;
 use chrono_tz::Tz;
+use std::cell::Cell;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 #[derive(Debug, Default)]
@@ -20,6 +22,8 @@ pub struct PriceDatabase<'h> {
     node: Option<&'h JournalNode<'h>>,
     // The prices and an initialised flag.
     prices: Mutex<(Vec<Arc<Price<'h>>>, bool)>,
+    // True if a price has been added/updated at all since the last save.
+    modified: AtomicBool,
 }
 
 impl<'h> PriceDatabase<'h> {
@@ -115,14 +119,19 @@ impl<'h> PriceDatabase<'h> {
         };
 
         prices.insert(pos, price);
+        self.modified.store(true, Ordering::Relaxed);
     }
 
-    /// Writes to the backing file if this is database file backed, otherwise this is a no-op.
-    pub fn overwrite(&self) -> JournResult<()> {
-        if let Some(node) = self.node() {
-            // Initialise memory _before_ clearing directives.
-            let prices_lock = self.prices_init();
-            Self::overwrite_internal(node, prices_lock)?;
+    /// Writes to the backing file if the database has been modified since the last save,
+    /// and if this database is file backed, otherwise this is a no-op.
+    pub fn save(&self) -> JournResult<()> {
+        if self.modified.load(Ordering::Relaxed) {
+            if let Some(node) = self.node() {
+                // Initialise memory _before_ clearing directives.
+                let prices_lock = self.prices_init();
+                Self::overwrite_internal(node, prices_lock)?;
+                self.modified.store(false, Ordering::Relaxed);
+            }
         }
         Ok(())
     }
@@ -234,12 +243,6 @@ impl<'h> PriceDatabase<'h> {
             };
         }
     }
-}
-
-#[derive(Debug, Clone)]
-pub enum PriceDatabaseAction<'t> {
-    Insert(Price<'t>, usize),
-    Remove(usize),
 }
 
 #[cfg(test)]

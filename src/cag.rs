@@ -149,7 +149,7 @@ impl ExecCommand for CagCommand {
                         .config()
                         .price_databases()
                         .into_iter()
-                        .for_each(|db| db.overwrite().unwrap());
+                        .for_each(|db| db.save().unwrap());
                 }
             }
             Err(cag_error) => {
@@ -160,7 +160,7 @@ impl ExecCommand for CagCommand {
                     .config()
                     .price_databases()
                     .into_iter()
-                    .for_each(|db| db.overwrite().unwrap());
+                    .for_each(|db| db.save().unwrap());
                 exit(1);
             }
         }

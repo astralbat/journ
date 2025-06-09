@@ -176,7 +176,7 @@ where
 
 pub(crate) fn posting<'h, I>(input: I) -> IParseResult<'h, I, Posting<'h>>
 where
-    I: TextInput<'h> + ConfigInput<'h>,
+    I: TextInput<'h> + ConfigInput<'h> + BlockInput<'h>,
 {
     let mut comment_str = None;
     let mut balance_assertion_expr = None;
@@ -195,9 +195,11 @@ where
         (input, comment_str) = opt(map(comment, |i: I| i.text()))(input.clone())?;
     }
 
+    let block = input.block();
     Ok((
         input,
         Posting::new(
+            block,
             account_leading_space,
             account,
             valued_amount.unwrap_or_else(ValuedAmount::nil),

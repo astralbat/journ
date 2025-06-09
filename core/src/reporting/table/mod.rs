@@ -17,8 +17,8 @@ use crate::reporting::table::cell::column::{CellColumn, ColumnTreeNode};
 use crate::reporting::term_style::Style;
 pub use row::Row;
 use std::cell::RefCell;
-use std::fmt;
 use std::rc::Rc;
+use std::{fmt, io};
 
 pub struct Table<'cell> {
     heading_row: Option<RefCell<Row<'cell>>>,
@@ -192,11 +192,6 @@ impl<'cell> Table<'cell> {
         }
         self.align_columns();
         self.pad_to_width();
-        //let mut wrapped = self.wrap_to_width();
-        //while wrapped {
-        //   self.pad_to_width();
-        //    wrapped = self.wrap_to_width();
-        //}
         trace!("Table: {:?}", self);
 
         let mut row_iter = all_rows!(self).peekable();
@@ -211,31 +206,22 @@ impl<'cell> Table<'cell> {
         Ok(())
     }
 
-    /*
-    pub fn wrap_to_width(&self) -> bool {
-        let mut wrapped = false;
-        if let Some(width) = self.max_width {
-            for row in all_rows_mut!(self) {
-                let mut extra_width = (row.padded_width() - width) as isize;
-                if extra_width > 0 {
-                    // Shrink each cell until we've removed the extra width.
-                    // Start at the end, reasoning that the last cells are the least important.
-                    let mut row_ref = row.root().borrow_mut();
-                    for mut cell in row_ref.iter_mut().rev() {
-                        let cell_width_before = cell.content_width();
-                        wrapped |= cell.wrap_text();
-                        extra_width -= (cell_width_before - cell.content_width()) as isize;
+    pub fn print_csv<W: fmt::Write>(&self, w: &mut W) -> fmt::Result {
+        for mut row in all_rows_mut!(self) {
+            row.set_separator(",");
+        }
+        trace!("Table: {:?}", self);
 
-                        // If we've removed enough width, we can stop.
-                        if extra_width <= 0 {
-                            break;
-                        }
-                    }
-                }
+        let mut row_iter = all_rows!(self).peekable();
+        while let Some(row) = row_iter.next() {
+            row.print_csv(w)?;
+            if row_iter.peek().is_some() {
+                writeln!(w)?;
             }
         }
-        wrapped
-    }*/
+        Style::fmt_end(w)?;
+        Ok(())
+    }
 }
 
 impl Default for Table<'_> {
@@ -250,33 +236,6 @@ impl Default for Table<'_> {
         }
     }
 }
-
-/*
-impl<'h> fmt::Display for Table<'h> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for mut row in all_rows_mut!(self) {
-            row.set_separator(self.column_separator);
-        }
-        self.align_columns();
-        self.pad_to_width();
-        //let mut wrapped = self.wrap_to_width();
-        //while wrapped {
-        //   self.pad_to_width();
-        //    wrapped = self.wrap_to_width();
-        //}
-
-        let mut row_iter = all_rows!(self).peekable();
-        while let Some(row) = row_iter.next() {
-            write!(f, "{:indent$}", "", indent = self.indent)?;
-            write!(f, "{}", row)?;
-            if row_iter.peek().is_some() {
-                writeln!(f)?;
-            }
-        }
-        Style::fmt_end(f)?;
-        Ok(())
-    }
-}*/
 
 impl fmt::Debug for Table<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

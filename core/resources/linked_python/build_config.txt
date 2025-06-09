@@ -1,0 +1,7 @@
+implementation=CPython
+interpreter=python3
+lib_dir=/Users/mark/Documents/IT/Projects/journ/lib/python
+version=3.9
+lib_name=python3.9
+shared=true
+abi3=false

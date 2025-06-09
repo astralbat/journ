@@ -7,16 +7,12 @@
  */
 use crate::account::Account;
 use crate::amount::Amount;
-use crate::arguments::{Arguments, BalCommand};
 use crate::journal_entry::JournalEntry;
-use crate::reporting::table::{Cell, Table};
-use crate::reporting::term_style::Colour;
 use crate::unit::Unit;
 use crate::valued_amount::ValuedAmount;
 use smallvec::SmallVec;
 use std::cell::Ref;
 use std::collections::HashMap;
-use std::fmt;
 use std::ops::AddAssign;
 use std::sync::Arc;
 
@@ -51,11 +47,24 @@ macro_rules! add_assign_vec_like {
 add_assign_vec_like!(Vec<Amount<'h>>);
 add_assign_vec_like!(SmallVec<[Amount<'h>; 8]>);
 
+pub trait AccountBalance<'h> {
+    fn balances(&mut self, account_filter: Option<&str>) -> AccountBalances<'h>;
+
+    fn balance(
+        &mut self,
+        account_filter: &str,
+        account: &Arc<Account<'h>>,
+        unit: &'h Unit<'h>,
+    ) -> Amount<'h> {
+        self.balances(Some(account_filter)).balance(account, unit)
+    }
+}
+
 pub struct AccountBalances<'h> {
     value_units: Vec<&'h Unit<'h>>,
     lines: Vec<BalanceLine<'h>>,
 }
-struct BalanceLine<'h> {
+pub struct BalanceLine<'h> {
     account: Arc<Account<'h>>,
     valued_amount: ValuedAmount<'h>,
 }
@@ -65,50 +74,28 @@ impl<'h> BalanceLine<'h> {
         BalanceLine { account, valued_amount }
     }
 
-    /*
-    fn set_valuations(&mut self, prices: &[Arc<Price<'h>>], valuation_currencies: &[&'h Unit<'h>]) {
-        self.valuations.clear();
-        'next_quote_curr: for quote_curr in valuation_currencies {
-            for p in prices {
-                if p.base_unit() == self.amount.unit() && p.price().unit() == *quote_curr {
-                    self.valuations.push(Some(p.base_valuation(self.amount)));
-                    continue 'next_quote_curr;
-                }
-            }
-            self.valuations.push(None);
-        }
-    }*/
+    pub fn account(&self) -> &Arc<Account<'h>> {
+        &self.account
+    }
 
-    /*
-    fn print(&self, val_cols: &[BalanceColumn<'h>], last_account: Option<&Arc<Account<'h>>>) {
-        print!("{:la$}", self.amount, la = val_cols[0].width);
-
-        for (i, col) in val_cols.iter().skip(1).enumerate() {
-            if Some(self.amount.unit()) == col.unit {
-                print!("  @@ {:lt$}", self.amount, lt = col.width);
-            } else if let Some(value) = &self.valuations[i] {
-                print!("  @@ {:lt$}", value, lt = col.width);
-            } else {
-                // No value, so print empty cell
-                print!("     {:lt$}", "", lt = col.width)
-            }
-        }
-        // Don't repeat the last account
-        if last_account != Some(&self.account) {
-            if atty::is(Stream::Stdout) {
-                println!("  {}", Blue.paint(&self.account.to_string()));
-            } else {
-                println!("  {}", self.account);
-            }
-        } else {
-            println!();
-        }
-    }*/
+    pub fn valued_amount(&self) -> &ValuedAmount<'h> {
+        &self.valued_amount
+    }
 }
 
 impl<'h> AccountBalances<'h> {
     pub fn new(value_units: Vec<&'h Unit<'h>>) -> AccountBalances<'h> {
         AccountBalances { value_units, lines: vec![] }
+    }
+
+    pub fn account_balances<'a>(
+        &'a self,
+        account: &'a Arc<Account<'h>>,
+    ) -> impl Iterator<Item = Amount<'h>> + 'a {
+        self.lines
+            .iter()
+            .filter(move |l| &l.account == account)
+            .flat_map(|l| l.valued_amount.amounts())
     }
 
     pub fn balance(&self, account: &Arc<Account<'h>>, unit: &'h Unit<'h>) -> Amount<'h> {
@@ -127,102 +114,9 @@ impl<'h> AccountBalances<'h> {
         v
     }
 
-    /*
-    /// Create a structure for each numerical column in these account balances.
-    fn create_balance_columns(&self) -> Vec<BalanceColumn<'h>> {
-        let mut bal_cols = Vec::with_capacity(self.prices.len());
-        bal_cols.push(BalanceColumn { width: 0, unit: None });
-        let mut buf = String::new();
-
-        // Set the first column to the width of the longest total.
-        for t in self.totals.iter().filter(|t| !t.is_zero()) {
-            write!(&mut buf, "{t}").unwrap();
-            if buf.chars().count() > bal_cols[0].width {
-                bal_cols[0].width = buf.chars().count();
-            }
-            buf.clear();
-        }
-
-        let val_currs = self.valuation_units();
-        let mut val_totals = Vec::with_capacity(val_currs.len());
-        for val_curr in val_currs.iter() {
-            val_totals.push(val_curr.with_quantity(0));
-        }
-        for l in self.lines.iter().filter(|l| !l.amount.is_zero()) {
-            for (i, val_curr) in val_currs.iter().copied().enumerate() {
-                val_totals += l.valuations[i].unwrap_or(val_curr.with_quantity(0))
-            }
-        }
-        for t in val_totals.into_iter() {
-            bal_cols.push(BalanceColumn { width: 0, unit: Some(t.unit()) });
-            write!(&mut buf, "{t}").unwrap();
-            let len = bal_cols.len() - 1;
-            bal_cols[len].width = buf.chars().count();
-            buf.clear();
-        }
-        bal_cols
-    }*/
-
-    /*
-    pub fn print(&self) {
-        let cols = self.create_balance_columns();
-
-        // Print the lines
-        let mut last_account = None;
-        for line in self.lines.iter().filter(|l| !l.amount.is_zero()) {
-            line.print(&cols, last_account);
-            last_account = Some(&line.account);
-        }
-
-        // Print sub grand totals
-        if self.lines.len() > 1 && last_account.is_some() {
-            print!("{:-<la$}", "", la = cols[0].width);
-            for col in cols.iter().skip(1) {
-                print!("     {:-<lt$}", "", lt = col.width)
-            }
-            println!();
-            for tot in self.totals.iter().filter(|t| !t.is_zero()) {
-                print!("{:la$}", tot, la = cols[0].width);
-                for (i, col) in cols.iter().enumerate().skip(1) {
-                    let mut val_curr_sub_total = col.unit.as_ref().unwrap().with_quantity(0);
-                    for l in self.lines.iter().filter(|l| !l.amount.is_zero()) {
-                        if l.amount.unit() == tot.unit() {
-                            if col.unit == Some(l.amount.unit()) {
-                                val_curr_sub_total += l.amount
-                            } else {
-                                val_curr_sub_total +=
-                                    l.valuations[i - 1].as_ref().map(|m| m.quantity()).unwrap_or(dec!(0));
-                            }
-                        }
-                    }
-                    print!("  @@ {:lt$}", val_curr_sub_total, lt = cols[i].width)
-                }
-                println!()
-            }
-
-            // Print grand valuations
-            if cols.len() > 1 {
-                print!("{:la$}", "", la = cols[0].width);
-                for col in cols.iter().skip(1) {
-                    print!("     {:-<lt$}", "", lt = col.width)
-                }
-                println!();
-                print!("{:la$}", "", la = cols[0].width);
-                for (i, col) in cols.iter().enumerate().skip(1) {
-                    let mut val_curr_tot = col.unit.as_ref().unwrap().with_quantity(0);
-                    for l in self.lines.iter().filter(|l| !l.amount.is_zero()) {
-                        if col.unit == Some(l.amount.unit()) {
-                            val_curr_tot += l.amount
-                        } else {
-                            val_curr_tot += l.valuations[i - 1].as_ref().map(|m| m.quantity()).unwrap_or(dec!(0));
-                        }
-                    }
-                    print!("  @@ {:lt$}", val_curr_tot, lt = col.width)
-                }
-                println!()
-            }
-        }
-    }*/
+    pub fn value_units(&self) -> &[&'h Unit<'h>] {
+        &self.value_units
+    }
 
     /// Updates the balance of the specified account.
     /// If replace is true, the balance will be set instead of added.
@@ -253,6 +147,18 @@ impl<'h> AccountBalances<'h> {
         }
     }
 
+    pub fn len(&self) -> usize {
+        self.lines.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.lines.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &BalanceLine<'h>> {
+        self.lines.iter()
+    }
+
     fn find_line(
         &self,
         account: &Arc<Account<'h>>,
@@ -279,101 +185,6 @@ impl<'h> AccountBalances<'h> {
             Ok(i) => Ok(&mut self.lines[i]),
             Err(i) => Err(i),
         }
-    }
-}
-
-impl fmt::Display for AccountBalances<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let cmd = Arguments::get().cast_cmd::<BalCommand>().unwrap();
-        let mut table = Table::default();
-
-        // Heading Row
-        if !self.lines.is_empty() {
-            let mut headings = vec![Cell::from(&"Account"), Cell::from(&"Amount")];
-            for value_unit in cmd.value_units() {
-                headings.push(Cell::from(value_unit.to_string()));
-            }
-            table.set_heading_row(headings);
-        }
-
-        // Account Rows
-        let mut num_rows = 0;
-        for line in self.lines.iter().filter(|l| !l.valued_amount.is_zero()) {
-            let mut row = vec![
-                Cell::from(line.account.to_string()).with_foreground(Some(Colour::Blue)),
-                Cell::from(line.valued_amount.amount()),
-            ];
-            for unit in self.value_units.iter() {
-                row.push(Cell::from(line.valued_amount.value_in(unit).unwrap()));
-            }
-            num_rows += 1;
-            table.add_row(row);
-        }
-
-        // Total rows for each unit
-        if num_rows > 1 {
-            table.add_separator_row('-', (2 + self.value_units.len()) as u16);
-            let mut num_totals = 0;
-            for unit in self.units() {
-                let mut total = unit.with_quantity(0);
-                let mut val_totals = vec![];
-                for vu in self.value_units.iter() {
-                    val_totals.push(vu.with_quantity(0));
-                }
-                for bl in self
-                    .lines
-                    .iter()
-                    .filter(|l| !l.valued_amount.is_zero())
-                    .filter(|l| l.valued_amount.unit() == unit)
-                {
-                    total += bl.valued_amount.amount();
-                    for (i, val_curr) in self.value_units.iter().copied().enumerate() {
-                        val_totals[i] += bl.valued_amount.value_in(val_curr).unwrap();
-                    }
-                }
-                let mut row = vec![Cell::from(&"")];
-                row.push(Cell::from(total));
-                for val in val_totals {
-                    row.push(Cell::from(val));
-                }
-                table.add_row(row);
-                num_totals += 1;
-            }
-
-            // Grand total row
-            if num_totals > 1 && !self.value_units.is_empty() {
-                table.add_separator_row('-', (2 + self.value_units.len()) as u16);
-                let mut val_totals = vec![];
-                for vu in self.value_units.iter() {
-                    val_totals.push(vu.with_quantity(0));
-                }
-                for bl in self.lines.iter().filter(|l| !l.valued_amount.is_zero()) {
-                    for (i, val_curr) in self.value_units.iter().copied().enumerate() {
-                        val_totals[i] += bl.valued_amount.value_in(val_curr).unwrap();
-                    }
-                }
-                let mut row = vec![Cell::from(&""), Cell::from(&"")];
-                for val in val_totals {
-                    row.push(Cell::from(val));
-                }
-                table.add_row(row);
-            }
-        }
-
-        table.print(f)
-    }
-}
-
-pub trait AccountBalance<'h> {
-    fn balances(&mut self, account_filter: Option<&str>) -> AccountBalances<'h>;
-
-    fn balance(
-        &mut self,
-        account_filter: &str,
-        account: &Arc<Account<'h>>,
-        unit: &'h Unit<'h>,
-    ) -> Amount<'h> {
-        self.balances(Some(account_filter)).balance(account, unit)
     }
 }
 

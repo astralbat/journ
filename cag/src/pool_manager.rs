@@ -48,6 +48,10 @@ impl<'h> PoolManager<'h> {
         }
     }
 
+    pub fn pools(&self) -> &[Pool<'h>] {
+        &self.pools
+    }
+
     pub fn set_unit_filter(&mut self, unit_filter: Box<dyn Filter<Unit<'h>> + 'h>) {
         self.unit_filter = unit_filter;
     }

@@ -7,6 +7,7 @@
  */
 use crate::err;
 use crate::error::JournError;
+use pyo3::types::PyTracebackMethods;
 use pyo3::{PyErr, Python};
 
 /// Converts a `PyErr` into a `JournError` containing traceback information.

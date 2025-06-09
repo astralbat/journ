@@ -17,15 +17,14 @@ use journ_core::alloc::HerdAllocator;
 use journ_core::amount::{Amount, Quantity};
 use journ_core::configuration::Configuration;
 use journ_core::date_and_time::{JDateTime, JDateTimeRange};
+use journ_core::err;
 use journ_core::error::{JournError, JournResult};
 use journ_core::ext::NumExt;
 use journ_core::unit::{RoundingStrategy, Unit};
 use journ_core::valued_amount::{Valuation, ValuedAmount};
 use journ_core::valuer::{SystemValuer, Valuer};
-use journ_core::{err, valuer};
 use linked_hash_set::LinkedHashSet;
 use log::trace;
-use rust_decimal::Decimal;
 use std::collections::VecDeque;
 use std::fmt::Debug;
 use std::ops::Add;
@@ -57,6 +56,7 @@ impl<'h> DealHolding<'h> {
         }
     }
 
+    /*
     fn abs_total(&self) -> Amount<'h> {
         match self {
             //Single(deal) => deal.total().amount().abs(),
@@ -64,7 +64,7 @@ impl<'h> DealHolding<'h> {
             Sequence(seq) => seq.abs_total(),
             Average(avg) => avg.total().amount().abs(),
         }
-    }
+    }*/
 
     /// Gets the deal totals without expenses.
     pub fn total_before_expenses(&self) -> ValuedAmount<'h> {
@@ -613,13 +613,14 @@ impl<'h> SequenceDealHolding<'h> {
         self.sequence.iter().flat_map(|dh| dh.adjustments())
     }*/
 
+    /*
     fn abs_total(&self) -> Amount<'h> {
         let mut total = self.sequence.iter().next().unwrap().unit().with_quantity(0);
         for dh in &self.sequence {
             total += dh.abs_total();
         }
         total
-    }
+    }*/
 
     fn calc_balance(
         sequence: &VecDeque<DealHolding<'h>, &'h HerdAllocator<'h>>,

@@ -369,6 +369,10 @@ impl<'h> Pool<'h> {
             None => PoolBalance::zero(unit, self.allocator),
         }
     }
+
+    pub fn balances(&self) -> impl Iterator<Item = (&'h Unit<'h>, PoolBalance<'h>)> + '_ {
+        self.holdings.iter().map(|(unit, holding)| (*unit, holding.total().clone()))
+    }
 }
 
 /// A snapshot of a pool in time, summarising the total amount held in the pool and its cost which

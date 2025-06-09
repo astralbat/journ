@@ -9,9 +9,9 @@ use crate::reporting::table::cell::sequence::CellSequence;
 use crate::reporting::table::cell::{Cell, CellNodeKind};
 use crate::reporting::term_style::Style;
 use std::cell::{Ref, RefCell, RefMut};
-use std::fmt;
 use std::iter::FromIterator;
 use std::rc::Rc;
+use std::{fmt, io};
 
 /// A logical table row containing a number of columns, each having a number of lines.
 pub struct Row<'cell> {
@@ -106,6 +106,28 @@ impl<'cell> Row<'cell> {
                 }
                 if col < seq.len() - 1 {
                     Style::default().fmt(w, seq.separator)?;
+                }
+            }
+            if line_num < num_lines - 1 {
+                writeln!(w)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn print_csv<W: fmt::Write>(&self, w: &mut W) -> fmt::Result {
+        let num_lines = self.num_lines();
+        for line_num in 0..num_lines {
+            let row_root_borrow = self.root.borrow();
+            let seq = row_root_borrow.as_branch().unwrap();
+            for (col, col_root) in seq.iter().enumerate() {
+                let lines = col_root.as_root().unwrap();
+                if line_num < lines.len() {
+                    let line = lines[line_num].borrow();
+                    line.print(w, line.style())?;
+                }
+                if col < seq.len() - 1 {
+                    write!(w, ",")?;
                 }
             }
             if line_num < num_lines - 1 {

@@ -9,10 +9,10 @@ use crate::reporting::table::cell::node::Cell;
 use crate::reporting::term_style::Style;
 use smallvec::SmallVec;
 use std::cell::{Ref, RefCell, RefMut};
-use std::fmt;
 use std::iter::FromIterator;
 use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
+use std::{fmt, io};
 
 #[derive(Clone, Default)]
 pub struct CellSequence<'cell> {

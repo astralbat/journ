@@ -8,7 +8,7 @@
 //#![feature(drain_filter)]
 #![feature(cell_leak)]
 #![feature(hash_set_entry)]
-#![feature(const_box)]
+//#![feature(const_box)]
 #![feature(allocator_api)]
 #![feature(btreemap_alloc)]
 #![feature(type_alias_impl_trait)]

@@ -5,37 +5,35 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
-use crate::amount::{Amount, Quantity};
+use crate::amount::Amount;
 use crate::configuration::Configuration;
 use crate::date_and_time::JDateTime;
 use crate::error::{JournError, JournResult};
 use crate::journal_entry::JournalEntry;
-use crate::money_util::UnitAmountMap;
 use crate::parsing;
 use crate::price::Price;
 use crate::price_db::PriceDatabase;
+use crate::python::conversion::{DateTimeWrapper, DeferredArg};
 use crate::python::environment::PythonEnvironment;
 use crate::python::lambda::Lambda;
 use crate::python::mod_ledger::PyPrice;
 use crate::unit::Unit;
-use crate::valued_amount::{Valuation, ValuedAmount};
+use crate::valued_amount::Valuation;
 use crate::{err, parse};
 use chrono::DateTime;
 use chrono_tz::Tz;
 use itertools::Itertools;
-use linked_hash_set::LinkedHashSet;
-use nalgebra::{DMatrix, DVector, OMatrix};
-use pyo3::{PyObject, Python, ToPyObject};
-use rust_decimal::prelude::{One, Zero};
+use nalgebra::{DMatrix, DVector};
+use pyo3::types::PyDateTime;
+use pyo3::{PyObject, Python};
 use rust_decimal::Decimal;
-use smallvec::{smallvec, SmallVec};
+use rust_decimal::prelude::One;
+use smallvec::{SmallVec, smallvec};
 use std::borrow::Cow;
-use std::cell::{OnceCell, RefCell};
-use std::cmp::Ordering;
-use std::collections::{BTreeSet, HashSet, VecDeque};
+use std::collections::{HashSet, VecDeque};
 use std::convert::{Infallible, TryFrom};
 use std::iter;
-use std::ops::{ControlFlow, FromResidual, Neg, Range, RangeTo, Try};
+use std::ops::{ControlFlow, FromResidual, Range, Try};
 use std::sync::Arc;
 
 /// A trait for valuing amounts in different units.
@@ -141,7 +139,7 @@ impl<'h> LinearSystemValuer<'h> {
         }*/
 
         // Add valuations, with equations rearranged to be Amount - Value = 0.
-        let mut data = Vec::with_capacity(8);
+        let data = Vec::with_capacity(8);
         //data.extend((0..units.len()).map(|_| 0.0));
         let mut vav =
             LinearSystemValuer { data, units: smallvec!(), row_count: 0, zero_sum_row: None };
@@ -238,11 +236,7 @@ impl<'h> From<&JournalEntry<'h>> for LinearSystemValuer<'h> {
                         Valuation::Total(m, _) => {
                             // Zero valuations create a contradiction for the base unit whose solution we
                             // have set to 1.0.
-                            if m.is_zero() {
-                                None
-                            } else {
-                                Some((p.amount().abs(), m.abs()))
-                            }
+                            if m.is_zero() { None } else { Some((p.amount().abs(), m.abs())) }
                         }
                         Valuation::Unit(price) => {
                             Some((p.unit().with_quantity(Decimal::one()), price.abs()))
@@ -280,6 +274,7 @@ impl<'h> Valuer<'h> for LinearSystemValuer<'h> {
             self.data[i] = if self.unit_col(base_unit) == j { 1.0 } else { 0.0 };
         }
 
+        #[allow(non_snake_case)]
         let mut A = DMatrix::from_row_slice(self.row_count + 1, self.units.len(), &self.data);
         let mut b = DVector::from_fn(A.nrows(), |i, _| if i == self.row_count { 1.0 } else { 0.0 });
 
@@ -433,7 +428,7 @@ impl<'h, 'p, 'l> Valuer<'h> for LambdaValuer<'h, 'p, 'l> {
         amount: Amount<'h>,
         quote_unit: &'h Unit<'h>,
     ) -> JournResult<Option<Amount<'h>>> {
-        let py_datetime: PyObject = match PythonEnvironment::eval(
+        let py_datetime = match PythonEnvironment::eval::<DateTimeWrapper>(
             &format!(
                 "datetime.strptime(\"{}\", \"%Y-%m-%dT%H:%M:%S%z\")",
                 self.datetime.format("%FT%T%z")
@@ -445,7 +440,7 @@ impl<'h, 'p, 'l> Valuer<'h> for LambdaValuer<'h, 'p, 'l> {
             Err(e) => panic!("Unable to prepare datetime for valuation call: {}", e),
         };
 
-        let args: Vec<Box<dyn ToPyObject>> = vec![
+        let args: Vec<Box<dyn DeferredArg>> = vec![
             Box::new(amount.unit().to_string()),
             Box::new(quote_unit.to_string()),
             Box::new(py_datetime),
@@ -453,10 +448,10 @@ impl<'h, 'p, 'l> Valuer<'h> for LambdaValuer<'h, 'p, 'l> {
 
         let result =
             self.lambda.eval(args, self.config.version().node_id().journal_incarnation())?;
-        let db_config =
-            amount.unit().prices().and_then(|p_db| p_db.node()).map(|file| file.config());
-        let date_format = self.config.as_herd_ref().date_format();
-        let time_format = self.config.as_herd_ref().time_format();
+        //let db_config =
+        //    amount.unit().prices().and_then(|p_db| p_db.node()).map(|file| file.config());
+        //let date_format = self.config.as_herd_ref().date_format();
+        //let time_format = self.config.as_herd_ref().time_format();
         let mut prices = match LambdaValuer::extract_price_from_python_result(
             &mut self.config,
             amount.unit(),
@@ -484,7 +479,7 @@ impl<'h, 'p, 'l> Valuer<'h> for LambdaValuer<'h, 'p, 'l> {
             Err(e) => {
                 return Err(
                     err!(err!(e; "Cannot determine price from expression: '{}'", self.lambda.expression()); "No price found for '{}' -> '{}'", amount.unit(), quote_unit),
-                )
+                );
             }
         };
         let got_inverse = prices.first().map(|p| p.base_unit() == quote_unit).unwrap_or(false);
@@ -857,15 +852,16 @@ impl<'h> Valuer<'h> for SystemValuer<'h, '_> {
                                 Some(val)
                                     if unit_to_value == base_unit && val.unit() == quote_unit =>
                                 {
+                                    let value = val * amount.quantity();
                                     info!(
                                         "{} Valued via lookup: {} = {:?}",
-                                        self.datetime, amount, val
+                                        self.datetime, amount, value
                                     );
-                                    break Ok(Some(val));
+                                    break Ok(Some(value));
                                 }
                                 None if unit_to_value == base_unit => break Ok(None),
                                 // Received a valuation not in our base unit. Add this to the system and try to solve
-                                // if for the actual base unit.
+                                // it for the actual base unit.
                                 Some(val) => {
                                     self.linear_system_valuer
                                         .add_value((unit_to_value.with_quantity(1), val));
@@ -1140,7 +1136,7 @@ where
             ValueResult::ValuationNeeded(base, quote) => {
                 match SystemValuer::from(entry.as_ref()).value(base.with_quantity(1), quote)? {
                     Some(price) => {
-                        let mut entry = entry.to_mut();
+                        let entry = entry.to_mut();
                         for pst in entry.postings_mut() {
                             if let Some(amount) = pst.amount_in(base) {
                                 // When the amount is small, use unit valuations for increased accuracy. This matters when using the LinearSystemValuer.

@@ -1,30 +1,29 @@
 /*
- * Copyright (c) 2020-2024. Mark Barrett
+ * Copyright (c) 2020-2025. Mark Barrett
  * This file is part of Journ.
  * Journ is free software: you can redistribute it and/or modify it under the terms of the GNU Affero General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
+use crate::entry_iterator::EntryIterator;
+use crate::journal_entry::JournalEntry;
+use crate::posting::Posting;
 use ansi_term::{Color, Style};
 use atty::Stream;
 use bumpalo_herd::Herd;
 use env_logger::Builder;
 use journ_core::alloc::HerdAllocator;
-use journ_core::amount::{Amount, AmountExpr};
+use journ_core::amount::Amount;
 use journ_core::date_and_time::{DateAndTime, JDateTime, JDateTimeRange};
+use journ_core::err;
 use journ_core::error::JournError;
-use journ_core::journal_entry::EntryObject;
 use journ_core::journal_node::NodeId;
-use journ_core::metadata::Metadata;
 use journ_core::module::MODULES;
-use journ_core::parsing;
 use journ_core::parsing::text_block::TextBlock;
-use journ_core::posting::PostingId;
 use journ_core::python::conversion::DateTimeWrapper;
 use journ_core::python::mod_ledger;
+use journ_core::reporting::balance::AccountBalances;
 use journ_core::unit::{Unit, UnitFormat};
-use journ_core::valued_amount::{Valuation, ValuedAmount};
-use journ_core::{err, parse};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyDateTime;
@@ -33,6 +32,7 @@ use std::error::Error;
 use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::io::Write;
+use std::ops::Bound;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::{Arc, LazyLock, Mutex};
@@ -59,6 +59,7 @@ fn journ(py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<Configuration>()?;
     m.add_class::<JournalEntry>()?;
     m.add_class::<Posting>()?;
+    m.add_class::<EntryIterator>()?;
     m.add("JournError", py.get_type::<JournPyError>())?;
     m.add_function(wrap_pyfunction!(format_amount, m)?)?;
     Ok(())
@@ -66,9 +67,9 @@ fn journ(py: Python, m: &PyModule) -> PyResult<()> {
 
 /// Create a wrapper error so that we can override its display behaviour.
 #[derive(Debug)]
-struct PyLedgerError(JournError);
+pub(crate) struct PyLedgerError(pub JournError);
 
-type PyLedgerResult<T> = Result<T, PyLedgerError>;
+pub(crate) type PyLedgerResult<T> = Result<T, PyLedgerError>;
 
 impl Error for PyLedgerError {}
 
@@ -101,7 +102,8 @@ create_exception!(journ, JournPyError, pyo3::exceptions::PyException);
 /// If many new Journals would be created, we could have a pool of HERDS that
 /// are deallocated when the Journal is dropped.
 static HERD: LazyLock<Herd> = LazyLock::new(|| Herd::new());
-static ALLOCATOR: LazyLock<HerdAllocator<'static>> = LazyLock::new(|| HerdAllocator::new(&HERD));
+pub(crate) static ALLOCATOR: LazyLock<HerdAllocator<'static>> =
+    LazyLock::new(|| HerdAllocator::new(&HERD));
 
 /// Declaring as unsendable means that the class will panic when accessed by another thread.
 /// Journal isn't Send through the use of Rc.
@@ -178,33 +180,110 @@ impl Journal {
         Ok(self.edit_node_id.lock().unwrap().id())
     }
 
+    fn with_entry_range<'a>(
+        &'a self,
+        py: Python,
+        start_time: &PyDateTime,
+        end_time: &PyDateTime,
+        callback: PyObject,
+    ) -> PyResult<()> {
+        let journal = self.journal.lock().unwrap();
+        let chrono_start: DateTimeWrapper = start_time
+            .extract()
+            .expect("datetime must be constructed with a valid Python datetime object");
+        let chrono_end: DateTimeWrapper = end_time
+            .extract()
+            .expect("datetime must be constructed with a valid Python datetime object");
+
+        for entry in journal.entry_range(chrono_start.0..chrono_end.0) {
+            let entry = JournalEntry::new(
+                Arc::clone(&self.journal),
+                Arc::new(Mutex::new(journ_core::journal_entry::JournalEntry::clone(entry))),
+                *entry.id().node_id(),
+            );
+            callback.call1(py, (entry,))?;
+        }
+        Ok(())
+    }
+
+    /// Finds all entries between `start_time` and `end_time` exclusive, and having an entry description
+    /// equal to `description`.
     fn find_entries(
         &self,
-        py_datetime: &PyDateTime,
+        start_time: &PyDateTime,
+        end_time: &PyDateTime,
         description: &str,
     ) -> PyResult<Vec<JournalEntry>> {
         let journal = self.journal.lock().unwrap();
-        let chrono_date: DateTimeWrapper = py_datetime
+        let chrono_start: DateTimeWrapper = start_time
+            .extract()
+            .expect("datetime must be constructed with a valid Python datetime object");
+        let chrono_end: DateTimeWrapper = end_time
             .extract()
             .expect("datetime must be constructed with a valid Python datetime object");
 
         let mut entries = vec![];
-        for entry in journal.find_entries(chrono_date.0, description) {
-            entries.push(JournalEntry {
-                journal: Arc::clone(&self.journal),
-                entry: Arc::new(Mutex::new(journ_core::journal_entry::JournalEntry::clone(entry))),
-                node_id: *entry.id().node_id(),
-            });
+        for entry in journal.find_entries(chrono_start.0..chrono_end.0, description) {
+            entries.push(JournalEntry::new(
+                Arc::clone(&self.journal),
+                Arc::new(Mutex::new(journ_core::journal_entry::JournalEntry::clone(entry))),
+                *entry.id().node_id(),
+            ));
         }
         Ok(entries)
     }
 
-    // TODO: Combine the py_datetime and write_time into a single argument (new type needed).
+    /// Gets the quantity balance of the specified `account`, in the specified `unit` between `start`..`end`.
+    #[pyo3(signature = (account, unit, start=None, end=None))]
+    fn account_bal(
+        &self,
+        account: &str,
+        unit: &str,
+        start: Option<&PyDateTime>,
+        end: Option<&PyDateTime>,
+    ) -> PyLedgerResult<Option<String>> {
+        let mut bals = AccountBalances::new(vec![]);
+        let time_range = (
+            start
+                .map(|t| {
+                    let chrono_start: DateTimeWrapper = t
+                        .extract()
+                        .expect("datetime must be constructed with a valid Python datetime object");
+                    Bound::Included(chrono_start.0)
+                })
+                .unwrap_or_else(|| Bound::Unbounded),
+            end.map(|t| {
+                let chrono_end: DateTimeWrapper = t
+                    .extract()
+                    .expect("datetime must be constructed with a valid Python datetime object");
+                Bound::Excluded(chrono_end.0)
+            })
+            .unwrap_or_else(|| Bound::Unbounded),
+        );
+        let journal = self.journal.lock().unwrap();
+        let account_obj = journal.root().config().get_or_create_account(account);
+        for entry in journal.entry_range(time_range) {
+            for pst in entry.postings() {
+                if pst.account() != &account_obj {
+                    continue;
+                }
+                bals.update_balance(pst.account(), pst.valued_amount(), false);
+            }
+        }
+        let quantity = bals
+            .account_balances(&account_obj)
+            .find(|a| a.unit().code() == unit)
+            .map(|a| a.quantity().to_string());
+        Ok(quantity)
+    }
+
+    #[pyo3(signature = (py_datetime, description, aux_datetime=None, write_time=true))]
     fn new_entry(
         &self,
         py_datetime: &PyDateTime,
-        write_time: bool,
         mut description: String,
+        aux_datetime: Option<&PyDateTime>,
+        write_time: bool,
     ) -> PyLedgerResult<JournalEntry> {
         let journal = self.journal.lock().unwrap();
         let rust_jf = journal.node(&self.edit_node_id.lock().unwrap());
@@ -223,7 +302,16 @@ impl Journal {
                 ),
                 None,
             ),
-            None,
+            aux_datetime.map(|d| {
+                let chrono_aux_date: DateTimeWrapper = d
+                    .extract()
+                    .expect("datetime must be constructed with a valid Python datetime object");
+                JDateTime::from_datetime(
+                    chrono_aux_date.0.with_timezone(&config.timezone()),
+                    Some(config.as_herd_ref().date_format()),
+                    if write_time { Some(config.as_herd_ref().time_format()) } else { None },
+                )
+            }),
         );
 
         description.insert_str(0, "  ");
@@ -235,11 +323,11 @@ impl Journal {
             Vec::new_in(&ALLOCATOR),
         );
 
-        Ok(JournalEntry {
-            journal: Arc::clone(&self.journal),
-            entry: Arc::new(Mutex::new(entry)),
-            node_id: *self.edit_node_id.lock().unwrap(),
-        })
+        Ok(JournalEntry::new(
+            Arc::clone(&self.journal),
+            Arc::new(Mutex::new(entry)),
+            *self.edit_node_id.lock().unwrap(),
+        ))
     }
 
     fn print(&self) -> PyLedgerResult<()> {
@@ -266,151 +354,6 @@ impl Journal {
 
 #[pyclass]
 struct Configuration {}
-
-#[pyclass(unsendable)]
-struct JournalEntry {
-    journal: Arc<Mutex<journ_core::journal::Journal<'static>>>,
-    entry: Arc<Mutex<journ_core::journal_entry::JournalEntry<'static>>>,
-    node_id: NodeId<'static>,
-}
-
-#[pymethods]
-impl JournalEntry {
-    fn file_id(&self) -> PyLedgerResult<u32> {
-        Ok(self.node_id.id())
-    }
-
-    fn append_posting(&self, account: &str, amount: Option<&str>) -> PyLedgerResult<Posting> {
-        let journal = self.journal.lock().unwrap();
-        let node = journal.node(&self.node_id);
-        let account = node.config().get_or_create_account(account);
-        let money = match amount {
-            Some(amount) => {
-                let alloc_amount = ALLOCATOR.alloc(amount.to_string());
-                Some(
-                    parse!(alloc_amount, parsing::amount::amount, node.config())
-                        .0
-                        .map(|r| r.1)
-                        .map_err(|e| err!(e; "append_posting()"))?,
-                )
-            }
-            None => None,
-        };
-        let mut entry = self.entry.lock().unwrap();
-        let pst = journ_core::posting::Posting::new(
-            "  ",
-            account,
-            money
-                .map(|a| ValuedAmount::new_in(AmountExpr::new(a, "  ", None), &ALLOCATOR))
-                .unwrap_or(ValuedAmount::nil()),
-            None,
-            None,
-        );
-        let posting_id = entry.append_posting(pst).id();
-        Ok(Posting {
-            journal: Arc::clone(&self.journal),
-            entry: Arc::clone(&self.entry),
-            posting_id,
-        })
-    }
-
-    fn append_metadata(&self, key: &str, value: &str) -> PyLedgerResult<()> {
-        let mut entry = self.entry.lock().unwrap();
-        let block_str = ALLOCATOR.alloc(if entry.objects().is_empty() {
-            format!("  +{}  {}", key, value)
-        } else {
-            format!("\n  +{}  {}", key, value)
-        });
-        let block = ALLOCATOR.alloc(TextBlock::from(block_str.as_str()));
-        entry.append_object(EntryObject::Metadata(Metadata::from(&*block)));
-        Ok(())
-    }
-
-    fn append_comment(&self, comment: &str) -> PyLedgerResult<()> {
-        let mut entry = self.entry.lock().unwrap();
-        if !comment.trim_start().starts_with(";") {
-            return Err(err!("Comments need to start with ';'").into());
-        }
-        entry.append_object(EntryObject::Comments(ALLOCATOR.alloc(comment.to_string())));
-        Ok(())
-    }
-
-    fn insert(&self) -> PyResult<()> {
-        let mut journal = self.journal.lock().unwrap();
-        let entry = self.entry.lock().unwrap().clone();
-        journal.insert_entry(entry, &self.node_id).map_err(|e| PyLedgerError(e))?;
-        Ok(())
-    }
-
-    fn append(&self) -> PyLedgerResult<()> {
-        let mut journal = self.journal.lock().unwrap();
-        let entry = self.entry.lock().unwrap().clone();
-        journal.append_entry(entry, &self.node_id)?;
-        Ok(())
-    }
-
-    fn print(&self) -> PyLedgerResult<()> {
-        println!("{}", self.entry.lock().unwrap());
-        Ok(())
-    }
-}
-
-#[pyclass(unsendable)]
-struct Posting {
-    journal: Arc<Mutex<journ_core::journal::Journal<'static>>>,
-    entry: Arc<Mutex<journ_core::journal_entry::JournalEntry<'static>>>,
-    posting_id: PostingId<'static>,
-}
-
-#[pymethods]
-impl Posting {
-    fn set_unit_value(&self, unit_value: &str) -> PyLedgerResult<()> {
-        let mut entry = self.entry.lock().unwrap();
-        let pst = entry.find_posting_mut(self.posting_id).unwrap();
-        let journal = self.journal.lock().unwrap();
-        let node = journal.node(self.posting_id.entry_id().node_id());
-        let node_config = node.config();
-        let unit_value_alloc = ALLOCATOR.alloc(unit_value.to_string());
-
-        let parse_res = parse!(unit_value_alloc, parsing::amount::amount, node_config).0?.1;
-
-        if !parse_res.is_positive() {
-            return Err(PyLedgerError(err!("Unit value must be positive")));
-        }
-        if pst.value_units().find(|u| *u == parse_res.unit()).is_some() {
-            return Err(PyLedgerError(err!(
-                "Valuation already set for unit: {}",
-                parse_res.unit()
-            )));
-        }
-
-        pst.set_valuation(Valuation::new_unit(parse_res));
-        Ok(())
-    }
-
-    fn set_total_value(&self, total_value: &str) -> PyLedgerResult<()> {
-        let mut entry = self.entry.lock().unwrap();
-        let pst = entry.find_posting_mut(self.posting_id).unwrap();
-        let journal = self.journal.lock().unwrap();
-        let node = journal.node(self.posting_id.entry_id().node_id());
-        let node_config = node.config();
-        let total_value_alloc = ALLOCATOR.alloc(total_value.to_string());
-
-        let parse_res = parse!(total_value_alloc, parsing::amount::amount, node_config).0?.1;
-        if !parse_res.is_positive() {
-            return Err(PyLedgerError(err!("Total value must be positive")));
-        }
-        if pst.value_units().find(|u| *u == parse_res.unit()).is_some() {
-            return Err(PyLedgerError(err!(
-                "Valuation already set for unit: {}",
-                parse_res.unit()
-            )));
-        }
-
-        pst.set_valuation(Valuation::new_total(parse_res, false));
-        Ok(())
-    }
-}
 
 /// Format's an amount using the unit's format specification, the unit and an amount.
 /// The `quantity` must be a string or an object that can be converted to one.

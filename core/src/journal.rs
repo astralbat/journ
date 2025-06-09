@@ -1,12 +1,12 @@
 /*
- * Copyright (c) 2019-2024. Mark Barrett
+ * Copyright (c) 2019-2025. Mark Barrett
  * This file is part of Journ.
  * Journ is free software: you can redistribute it and/or modify it under the terms of the GNU Affero General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::alloc::HerdAllocator;
-use crate::arguments::{Arguments, BalCommand, CsvCommand, RegCommand};
+use crate::arguments::{Arguments, CsvCommand, RegCommand};
 use crate::configuration::Configuration;
 use crate::configuration::Filter;
 use crate::directive::DirectiveKind;
@@ -22,8 +22,7 @@ use crate::postings_aggregation::{AggregatedPosting, PostingsAggregation};
 use crate::python::mod_ledger::PythonLedgerModule;
 use crate::reporting::balance::{AccountBalances, Balance};
 use crate::unit::NumberFormat;
-use crate::valuer::ValueResult::ValuationNeeded;
-use crate::valuer::{SystemValuer, ValueResult};
+use crate::valuer::ValueResult;
 use crate::{err, valuer};
 use ansi_term::Colour::{Blue, Red};
 use ansi_term::Style;
@@ -50,8 +49,6 @@ impl<'h> Journal<'h> {
         text_block: TextBlock<'h>,
         allocator: &'h HerdAllocator<'h>,
     ) -> JournResult<Journal<'h>> {
-        //PythonEnvironment::startup();
-
         let short_args = allocator.alloc(args);
         let node_id = allocator.alloc(NodeId::new_root());
         let config = Configuration::from_args(short_args, allocator, node_id);
@@ -75,12 +72,6 @@ impl<'h> Journal<'h> {
             let parse_node = JournalFileParseNode::new_root(node_copy, config, scope);
             parse_node.parse()
         })?;
-
-        /*
-        let parse_errors = node.parse_errors();
-        if !parse_errors.is_empty() {
-            return Err(JournError::Multiple(parse_errors));
-        }*/
 
         let using_aux_date = args.aux_date();
         let mut journal = Journal::new_in(node, allocator);
@@ -167,23 +158,6 @@ impl<'h> Journal<'h> {
         }
     }
 
-    /*
-    /// Gets the journal's configuration based on the root node's configuration
-    /// after parsing.
-    /// The configuration may not contain all accounts and units parsed if the
-    /// configuration was branched at any point.
-    pub fn config(&self) -> &Configuration<'h> {
-        &self.config
-    }*/
-
-    /*
-    /// Gets a mutable reference to the configuration that's based on the root node's
-    /// configuration after parsing. This allows dynamic modification, such as when
-    /// adding more accounts and units.
-    pub fn config_mut(&mut self) -> &mut Configuration<'h> {
-        &mut self.config
-    }*/
-
     pub fn nodes_recursive(&self) -> Vec<&JournalNode<'h>> {
         self.root.children_recursive()
     }
@@ -199,29 +173,6 @@ impl<'h> Journal<'h> {
         self.entries.range(range).map(|e| e.1 .1)
     }
 
-    /*
-    pub fn entry_range_mut<R>(
-        &mut self,
-        range: R,
-    ) -> Box<impl DoubleEndedIterator<Item = MutexGuard<ParsedDirective<'h, JournalEntry<'h>>>>>
-    where
-        R: RangeBounds<DateTime<Tz>>,
-    {
-        let range = JournalEntry::id_range(range);
-        Box::new(self.entries.range_mut(range).map(|e| e.1.lock().unwrap()))
-    }
-
-    pub fn entry_range_rc<R>(
-        &self,
-        range: R,
-    ) -> Box<impl DoubleEndedIterator<Item = Arc<Mutex<ParsedDirective<'h, JournalEntry<'h>>>>> + '_>
-    where
-        R: RangeBounds<DateTime<Tz>>,
-    {
-        let range = JournalEntry::id_range(range);
-        Box::new(self.entries.range(range).map(move |e| Arc::clone(e.1)))
-    }*/
-
     /// Searches for an entry whose start date and description match those specified
     pub fn contains_entry(&self, start_date: DateTime<Tz>, description: &str) -> bool {
         for entry in self.entry_range(&start_date..=&start_date) {
@@ -232,16 +183,17 @@ impl<'h> Journal<'h> {
         false
     }
 
-    /// Finds all entries whose start date and description match those specified
-    pub fn find_entries<'a, 'b>(
+    /// Finds all entries in `datetime_range`, and having a description equal to `description`.
+    pub fn find_entries<'a, 'b, R>(
         &'a self,
-        start_date: DateTime<Tz>,
+        datetime_range: R,
         description: &'b str,
     ) -> impl Iterator<Item = &'h JournalEntry<'h>> + 'a
     where
         'b: 'a,
+        R: RangeBounds<DateTime<Tz>>,
     {
-        self.entry_range(start_date..=start_date).filter(move |e| e.description() == description)
+        self.entry_range(datetime_range).filter(move |e| e.description() == description)
     }
 
     pub fn entry(&self, entry_id: EntryId<'h>) -> &'h JournalEntry<'h> {
@@ -260,7 +212,7 @@ impl<'h> Journal<'h> {
         entry.check()?;
 
         let pd = self.node(index).append_entry(entry);
-        self.add_entry(pd, index)?;
+        self.add_entries(&[pd])?;
         Ok(pd.1)
     }
 
@@ -273,48 +225,61 @@ impl<'h> Journal<'h> {
 
         // Set the date Id before inserting as it's used for comparing.
         let pd = self.node(index).insert_entry(entry);
-        self.add_entry(pd, index)?;
+        self.add_entries(&[pd])?;
         Ok(pd.1)
     }
 
-    /// Replaces an existing entry in the journal.
+    /// Replaces entries in the journal. The entries are all checked before being replaced but should
+    /// the balance assertions fail, recovery is not possible and the journal will be in an inconsistent
+    /// state. This situation may be manageable if such an error aborts the program.
     ///
     /// # Panics
     /// If the entry does not exist
-    pub fn replace_entry(
+    pub fn replace_entries(
         &mut self,
-        mut entry: JournalEntry<'h>,
+        mut entries: Vec<JournalEntry<'h>>,
         allocator: &'h HerdAllocator<'h>,
-    ) -> JournResult<&'h JournalEntry<'h>> {
-        entry.check().map_err(|e| {
-            err!(e; BlockContextError::new(BlockContext::from(&TextBlock::from(entry.to_string().as_str())), "Entry check failed".to_string()))
-        })?;
+    ) -> JournResult<Vec<(&'h TextBlock<'h>, &'h JournalEntry<'h>)>> {
+        for entry in entries.iter_mut() {
+            entry.check().map_err(|e| {
+                err!(e; BlockContextError::new(BlockContext::from(&TextBlock::from(entry.to_string().as_str())), "Entry check failed".to_string()))
+            })?;
+        }
 
-        let (old_entry, new_entry) =
-            self.node(entry.id().node_id()).replace_entry(entry, allocator);
-        // Make sure the old one is removed in case the date id has changed.
-        self.entries.remove(&old_entry.date_id());
+        // Recovery in case of error is not possible past this point as we don't have anyway to commit/rollback the
+        // insertions.
+        let mut new_entry_parts = vec![];
+        for entry in entries {
+            let (old_entry, new_entry) =
+                self.node(entry.id().node_id()).replace_entry(entry, allocator);
+            // Make sure the old one is removed in case the date id has changed.
+            self.entries.remove(&old_entry.date_id());
+            new_entry_parts.push(new_entry);
+        }
 
-        self.add_entry(new_entry, new_entry.1.id().node_id())?;
-        Ok(new_entry.1)
+        self.add_entries(&new_entry_parts)?;
+        Ok(new_entry_parts)
     }
 
-    /// Adds the entry to the `entries` map.
-    fn add_entry(
+    /// Adds entries to the `entries` map and checks the balance assertions. If the balance assertions
+    /// check fails, all entries are removed to restore the state as it was before the call.
+    fn add_entries(
         &mut self,
-        entry: (&'h TextBlock<'h>, &'h JournalEntry<'h>),
-        index: &NodeId<'h>,
+        entries: &[(&'h TextBlock<'h>, &'h JournalEntry<'h>)],
     ) -> JournResult<()> {
-        self.entries.insert(entry.1.date_id(), (entry.0, entry.1));
+        for (text_block, entry) in entries.iter() {
+            self.entries.insert(entry.date_id(), (text_block, entry));
+        }
 
         // Perform this check after the entry has been inserted into the file. If the result is erroneous,
         // we will need to back up and remove it again.
         let r = self.check_balance_assertions();
 
         if let Err(e) = r {
-            let date_id = entry.1.date_id();
-            self.entries.remove(&date_id);
-            self.node(index).remove_entry(date_id);
+            for (_, entry) in entries.iter() {
+                let date_id = entry.date_id();
+                self.entries.remove(&date_id);
+            }
             Err(e)
         } else {
             Ok(())
@@ -362,99 +327,6 @@ impl<'h> Journal<'h> {
         self.nodes_recursive().into_iter().find(|f| {
             f.canonical_filename().map(|f| f.ends_with(search.normalize())).unwrap_or(false)
         })
-    }
-
-    pub fn bal(&mut self, args: &'static Arguments) -> JournResult<AccountBalances<'h>> {
-        let cmd: &BalCommand = args.cast_cmd().unwrap();
-        let config = self.root.config();
-
-        let mut value_units = vec![];
-        for unit_code in cmd.value_units() {
-            if let Some(unit) = config.get_unit(unit_code) {
-                value_units.push(unit);
-            }
-        }
-        let mut bals = AccountBalances::new(value_units.clone());
-
-        let account_filter = cmd.account_filter();
-        let unit_filter = cmd.unit_filter();
-        let file_filter = cmd.file_filter();
-        let mut modified_entries = vec![];
-        for entry in self.entry_range(args.begin_end_range()) {
-            let mut cow_entry = Cow::Borrowed(entry);
-            if !file_filter.is_included(self.root.find_by_node_id(entry.id().node_id()).unwrap()) {
-                continue;
-            }
-
-            // First pass: Ensure postings can be valued in the desired units.
-            valuer::exec_optimistic(&mut cow_entry, |entry| {
-                for pst in entry.postings() {
-                    if !account_filter.is_included(pst.account()) {
-                        continue;
-                    }
-                    if !unit_filter.is_included(pst.unit()) {
-                        continue;
-                    }
-                    if args.real_postings() && pst.account().is_virtual() {
-                        continue;
-                    }
-
-                    for val_unit in value_units.iter().copied() {
-                        if pst.valued_amount().value_in(val_unit).is_none() {
-                            return ValueResult::ValuationNeeded(pst.unit(), val_unit);
-                        }
-                    }
-                }
-                return ValueResult::Ok(());
-            })?;
-
-            // Second pass: Update balances
-            for pst in cow_entry.postings() {
-                if !account_filter.is_included(pst.account()) {
-                    continue;
-                }
-                if !unit_filter.is_included(pst.unit()) {
-                    continue;
-                }
-                if args.real_postings() && pst.account().is_virtual() {
-                    continue;
-                }
-
-                bals.update_balance(pst.account(), pst.valued_amount(), false);
-            }
-
-            // Add to the list of entries to write back.
-            if !cow_entry.is_borrowed() {
-                modified_entries.push(cow_entry);
-            }
-        }
-
-        if cmd.write_file() {
-            let mut nodes = HashSet::new();
-            for entry in modified_entries {
-                nodes.insert(entry.id().node_id());
-                self.replace_entry(entry.into_owned(), self.allocator())?;
-            }
-            for node in nodes {
-                self.node(node).overwrite()?;
-            }
-        }
-
-        /*
-        if let Some(val_curr) = args.exchange_currency() {
-            for curr in bals.currencies() {
-                if curr != val_curr {
-                    bals.add_valuation_price(valuer::get_value(
-                        &mut self.root.config(),
-                        curr,
-                        val_curr,
-                        args.base().end().unwrap_or_else(|| Tz::UTC.from_utc_datetime(&Utc::now().naive_utc())),
-                    )?);
-                }
-            }
-        }
-         */
-        Ok(bals)
     }
 
     pub fn reg(&mut self, args: &'static Arguments) -> JournResult<()> {
