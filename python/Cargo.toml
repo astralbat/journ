@@ -1,6 +1,6 @@
 [package]
 name = "journ-python"
-version = "0.1.1-beta.5"
+version = "0.1.1-beta.6"
 authors = ["Mark Barrett <mark@barrett.uk>"]
 edition = "2018"
 
