@@ -1,7 +1,7 @@
 class Journ < Formula
   desc     "…"
   homepage "https://github.com/astralbat/journ"
-  url      "https://github.com/astralbat/journ/archive/refs/tags/v0.2.1-beta.7.tar.gz"
+  .2.1-beta.9.tar.gz""
   # url    "https://github.com/astralbat/journ/archive/refs/tag/v0.2.1-beta.7.tar.gz"
   sha256   "…"
   license  "MIT"
