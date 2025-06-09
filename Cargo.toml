@@ -1,6 +1,6 @@
 [package]
 name = "journ"
-version = "0.2.1-beta.4"
+version = "0.2.1-beta.5"
 description = "Plaintext Accounting Journal"
 authors = ["Mark Barrett <mark@barrett.uk>"]
 edition = "2024"
