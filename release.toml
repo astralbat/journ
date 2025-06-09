@@ -2,3 +2,4 @@ shared-version = false
 dependent-version = "upgrade"
 publish = false
 push = true
+tag = true
