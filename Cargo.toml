@@ -51,5 +51,5 @@ debug = true
 
 [package.metadata.release]
 pre-release-replacements = [
-    { file = "dist/homebrew/journ.rb", search = 'url "https://github.com/astralbat/journ/archive/refs/tags/v[^"]+\.tar\.gz"', replace = 'url "https://github.com/astralbat/journ/archive/refs/tags/v{{version}}.tar.gz"' }
+    { file = "dist/homebrew/journ.rb", search = 'url "https://github.com/astralbat/journ/archive/refs/tags/v[^"]+\.tar\.gz"', replace = 'url "https://github.com/astralbat/journ/archive/refs/tags/v{{version}}.tar.gz"', prerelease = true }
 ]
