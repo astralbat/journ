@@ -125,13 +125,13 @@ impl<'h> PriceDatabase<'h> {
     /// Writes to the backing file if the database has been modified since the last save,
     /// and if this database is file backed, otherwise this is a no-op.
     pub fn save(&self) -> JournResult<()> {
-        if self.modified.load(Ordering::Relaxed) {
-            if let Some(node) = self.node() {
-                // Initialise memory _before_ clearing directives.
-                let prices_lock = self.prices_init();
-                Self::overwrite_internal(node, prices_lock)?;
-                self.modified.store(false, Ordering::Relaxed);
-            }
+        if self.modified.load(Ordering::Relaxed)
+            && let Some(node) = self.node()
+        {
+            // Initialise memory _before_ clearing directives.
+            let prices_lock = self.prices_init();
+            Self::overwrite_internal(node, prices_lock)?;
+            self.modified.store(false, Ordering::Relaxed);
         }
         Ok(())
     }

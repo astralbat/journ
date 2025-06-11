@@ -2,14 +2,26 @@
 rustflags = [
     "-C", "link-arg=-Wl,-rpath,@executable_path/python",
     "-C", "link-arg=-Wl,-rpath,/opt/homebrew/Frameworks",
-    "-C", "link-arg=-undefined",
-    "-C", "link-arg=dynamic_lookup",
+    # A python is bundled by Xcode and can be picked up via /usr/bin/python3
+    "-C", "link-arg=-Wl,-rpath,/Applications/Xcode.app/Contents/Developer/Library/Frameworks",
+]
+rustdocflags = [
+    "-C", "link-arg=-Wl,-rpath,@executable_path/python",
+    "-C", "link-arg=-Wl,-rpath,/opt/homebrew/Frameworks",
+    # A python is bundled by Xcode and can be picked up via /usr/bin/python3
+    "-C", "link-arg=-Wl,-rpath,/Applications/Xcode.app/Contents/Developer/Library/Frameworks",
 ]
 
 [target.aarch64-apple-darwin]
 rustflags = [
     "-C", "link-arg=-Wl,-rpath,@executable_path/python",
     "-C", "link-arg=-Wl,-rpath,/opt/homebrew/Frameworks",
-    "-C", "link-arg=-undefined",
-    "-C", "link-arg=dynamic_lookup",
+    # A python is bundled by Xcode and can be picked up via /usr/bin/python3
+    "-C", "link-arg=-Wl,-rpath,/Applications/Xcode.app/Contents/Developer/Library/Frameworks",
+]
+rustdocflags = [
+    "-C", "link-arg=-Wl,-rpath,@executable_path/python",
+    "-C", "link-arg=-Wl,-rpath,/opt/homebrew/Frameworks",
+    # A python is bundled by Xcode and can be picked up via /usr/bin/python3
+    "-C", "link-arg=-Wl,-rpath,/Applications/Xcode.app/Contents/Developer/Library/Frameworks",
 ]

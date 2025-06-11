@@ -5,12 +5,12 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
-use crate::bal::BalColumn;
 use crate::ExecCommand;
+use crate::bal::BalColumn;
 use journ_core::account::Account;
 use journ_core::arguments::{Arguments, Command};
 use journ_core::configuration::{
-    create_unit_filter, AccountFilter, DescriptionFilter, FileFilter, Filter,
+    AccountFilter, DescriptionFilter, FileFilter, Filter, create_unit_filter,
 };
 use journ_core::error::JournResult;
 use journ_core::journal::Journal;
@@ -106,6 +106,7 @@ impl ExecCommand for BalCommand {
         // Get the value units. The unit to value in might not exist in the config,
         // and in this case, we'll just create a new object.
         let mut value_units = vec![];
+        let mut with_amount = false;
         for col in cmd.columns.iter() {
             if let BalColumn::Value(unit_code) = col {
                 value_units.push(
@@ -113,9 +114,11 @@ impl ExecCommand for BalCommand {
                         .get_unit(unit_code)
                         .unwrap_or_else(|| config.allocator().alloc(Unit::new(unit_code))),
                 );
+            } else if let BalColumn::Amount = col {
+                with_amount = true;
             }
         }
-        let mut bals = AccountBalances::new(value_units.clone());
+        let mut bals = AccountBalances::new(with_amount, value_units.clone());
 
         let account_filter = cmd.account_filter();
         let unit_filter = cmd.unit_filter();
@@ -195,7 +198,7 @@ impl ExecCommand for BalCommand {
         println!("{output}");
 
         // We only need to write the price database.
-        journ.root().config().price_databases().into_iter().for_each(|db| db.save().unwrap());
+        config.price_databases().into_iter().for_each(|db| db.save().unwrap());
         Ok(())
     }
 }

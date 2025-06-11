@@ -14,14 +14,14 @@ use crate::reporting::table::{Cell, WrapPolicy};
 use crate::reporting::term_style::Colour;
 use crate::unit::Unit;
 use crate::valuer::Valuer;
-use rust_decimal::prelude::{One, Zero};
 use rust_decimal::Decimal;
-use smallvec::{smallvec, SmallVec};
+use rust_decimal::prelude::{One, Zero};
+use smallvec::{SmallVec, smallvec};
 use std::iter::Sum;
 use std::ops::{Add, Div, Mul, Sub};
 use std::{fmt, iter};
-use yaml_rust::yaml::Hash;
 use yaml_rust::Yaml;
+use yaml_rust::yaml::Hash;
 
 /// A holder for the total value and whether it was originally elided when this posting was parsed.
 /// Valuations are always stored positively. I.e. negative valuations aren't possible.
@@ -398,11 +398,7 @@ impl<'h> ValuedAmount<'h> {
 
         let found = self.valuations().find_map(|t| match t {
             Valuation::Total(mon, _) if mon.unit() == in_unit => {
-                if !self.amount_expr.is_positive() {
-                    Some((**mon).negate())
-                } else {
-                    Some(**mon)
-                }
+                if !self.amount_expr.is_positive() { Some((**mon).negate()) } else { Some(**mon) }
             }
             Valuation::Unit(factor) if factor.unit() == in_unit => {
                 Some(**factor * self.amount().quantity())
@@ -410,11 +406,7 @@ impl<'h> ValuedAmount<'h> {
             _ => None,
         });
         found.or_else(|| {
-            if self.amount_expr.is_zero() {
-                Some(in_unit.with_quantity(0))
-            } else {
-                None
-            }
+            if self.amount_expr.is_zero() { Some(in_unit.with_quantity(0)) } else { None }
         })
     }
 
@@ -852,8 +844,7 @@ impl<'h> Add<&ValuedAmount<'h>> for &ValuedAmount<'h> {
     type Output = Option<ValuedAmount<'h>>;
 
     /// Gets the sum of two ValuedAmounts.
-    /// The valuations are summed for each unit only when both sides specify them, with the left side taking
-    /// precedence for unit valuations.
+    /// The valuations are summed for each unit only when both sides specify them.
     ///
     /// Return `None` if there are no units in common.
     ///
@@ -865,7 +856,7 @@ impl<'h> Add<&ValuedAmount<'h>> for &ValuedAmount<'h> {
     /// assert_eq!(&val!("£10 @@ $12") + &val!("£5 @@ $6"), Some(val!("£15 @@ $18")));
     /// assert_eq!(&val!("£10 @@ $12") + &val!("£5"), Some(val!("£15")));
     /// assert_eq!(&val!("-£10 @@ $12") + &val!("£5 @@ $6"), Some(val!("-£5 @@ $6")));
-    /// assert_eq!(&val!("£10 @ $1.2") + &val!("£5 @ $1.3"), Some(val!("£15 @ $1.2")));
+    /// assert_eq!(&val!("0.2U @ $10") + &val!("0.8U @ $20"), Some(val!("1U @ $18")));
     /// assert_eq!(&val!("£0") + &val!("£5 @ $1.3 @@ €6"), Some(val!("£5 @ $1.3 @@ €6")));
     /// assert_eq!(&val!("£10 @@ $12") + &val!("£5 @ $1.3"), Some(val!("£15 @@ $18.5")));
     /// assert_eq!(&val!("£10 @@ $12") + &val!("$12 @@ £10"), Some(val!("£20 @@ $24")));
@@ -903,7 +894,7 @@ impl<'h> Add<&ValuedAmount<'h>> for &ValuedAmount<'h> {
         let initial = unit_iter.next();
         match initial {
             Some(initial) => {
-                let mut va = ValuedAmount::new_in(
+                let mut va_accum = ValuedAmount::new_in(
                     AmountExpr::new(
                         self.value_in(initial).unwrap() + rhs.value_in(initial).unwrap(),
                         "",
@@ -915,34 +906,50 @@ impl<'h> Add<&ValuedAmount<'h>> for &ValuedAmount<'h> {
                 let self_amount_val = Valuation::new_total(self.amount_expr.amount().abs(), false);
                 let rhs_amount_val = Valuation::new_total(rhs.amount_expr.amount().abs(), false);
                 for cu in unit_iter {
-                    let val = self
-                        .valuations
-                        .iter()
-                        .flatten()
-                        .find(|v| v.unit() == cu)
-                        .or_else(|| rhs.valuations.iter().flatten().find(|v| v.unit() == cu))
-                        .or_else(|| {
+                    let lhs_val =
+                        self.valuations.iter().flatten().find(|v| v.unit() == cu).or_else(|| {
                             if self.amount_expr.unit() == cu {
                                 Some(&self_amount_val)
                             } else {
                                 None
                             }
-                        })
-                        .or_else(|| {
-                            if rhs.amount_expr.unit() == cu {
-                                Some(&rhs_amount_val)
+                        });
+                    let rhs_val =
+                        rhs.valuations.iter().flatten().find(|v| v.unit() == cu).or_else(|| {
+                            if rhs.amount_expr.unit() == cu { Some(&rhs_amount_val) } else { None }
+                        });
+                    match (lhs_val, rhs_val) {
+                        // When both sides have a unit valuation, we set the summed valuation to be the weighted sum.
+                        (Some(Valuation::Unit(lhs_uv)), Some(Valuation::Unit(rhs_uv))) => {
+                            let denom = (self.value_in(initial).unwrap().abs()
+                                + rhs.value_in(initial).unwrap().abs())
+                            .quantity();
+                            // If the denominator is zero, it means both sides are zero in the initial unit.
+                            // In that case, we'll average the two unit valuations.
+                            let sum_uv = if denom.is_zero() {
+                                (lhs_uv.amount() + rhs_uv.amount()) / 2
                             } else {
-                                None
-                            }
-                        })
-                        .unwrap();
-                    match val {
-                        Valuation::Unit(_) => va.set_valuation(val.clone()),
-                        Valuation::Total(expr, e) => {
+                                let l = lhs_uv.amount().abs()
+                                    * self.value_in(initial).unwrap().quantity().abs()
+                                    / denom;
+                                let r = rhs_uv.amount().abs()
+                                    * rhs.value_in(initial).unwrap().quantity().abs()
+                                    / denom;
+                                l + r
+                            };
+                            va_accum.set_valuation(Valuation::Unit(lhs_uv.with_amount(sum_uv)));
+                        }
+                        // When only one side has a unit valuation, we set it as the valuation.
+                        (Some(Valuation::Unit(uv)), None) | (None, Some(Valuation::Unit(uv))) => {
+                            va_accum.set_valuation(Valuation::Unit(uv.clone()));
+                        }
+                        // Otherwise we sum the total valuations.
+                        (Some(Valuation::Total(expr, e)), _)
+                        | (_, Some(Valuation::Total(expr, e))) => {
                             // Use `value_in` to account for potential negativity.
                             // Ignore the result as it may be a duplicate.
-                            if cu != va.unit() {
-                                va.set_valuation(Valuation::Total(
+                            if cu != va_accum.unit() {
+                                va_accum.set_valuation(Valuation::Total(
                                     expr.with_amount(
                                         (self.value_in(cu).unwrap() + rhs.value_in(cu).unwrap())
                                             .abs(),
@@ -951,9 +958,10 @@ impl<'h> Add<&ValuedAmount<'h>> for &ValuedAmount<'h> {
                                 ));
                             }
                         }
+                        (None, None) => unreachable!(),
                     }
                 }
-                Some(va)
+                Some(va_accum)
             }
             None => None,
         }

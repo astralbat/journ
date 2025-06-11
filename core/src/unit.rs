@@ -6,8 +6,8 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::amount::Amount;
-use crate::error::parsing::promote;
 use crate::error::JournError;
+use crate::error::parsing::promote;
 use crate::metadata::Metadata;
 use crate::parsing;
 use crate::price_db::PriceDatabase;
@@ -467,9 +467,16 @@ impl NumberFormat {
     /// * `"-1,000.00"`
     /// * `"(1,000.00)"`
     /// * `"1.000,00"`
-    pub fn format(&self, quantity: Decimal) -> String {
+    pub fn format(&self, quantity: Decimal, rounding_strategy: RoundingStrategy) -> String {
+        // Round the quantity first
+        let rounded_quantity = if let Some(max_scale) = self.max_scale {
+            quantity.round_dp_with_strategy(max_scale as u32, rounding_strategy.into())
+        } else {
+            quantity
+        };
+
         // plain number may start with '-' if negative
-        let mut num = quantity.to_string();
+        let mut num = rounded_quantity.to_string();
         Self::to_non_scientific(&mut num);
 
         if let Some(dec_point_pos) = num.rfind('.') {
@@ -767,7 +774,9 @@ impl UnitFormat {
         number_format: NumberFormat,
     ) -> String {
         let mut num = match amount {
-            Some(amount) => number_format.format(amount.quantity()),
+            Some(amount) => {
+                number_format.format(amount.quantity(), amount.unit().rounding_strategy())
+            }
             None => number_format.to_string(),
         };
 

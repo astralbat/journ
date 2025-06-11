@@ -132,7 +132,7 @@ impl<'h> Journal<'h> {
     // TODO: This is quite slow when inserting/replacing many entries. Could be sped up
     // perhaps by keeping track of them in a separate data structure.
     fn check_balance_assertions(&mut self) -> JournResult<()> {
-        let mut bals = AccountBalances::new(vec![]);
+        let mut bals = AccountBalances::new(true, vec![]);
         let mut errs = vec![];
 
         for (_, raw_and_entry) in self.entries.range(..) {
@@ -170,7 +170,7 @@ impl<'h> Journal<'h> {
         R: RangeBounds<DateTime<Tz>>,
     {
         let range = EntryId::id_range(range);
-        self.entries.range(range).map(|e| e.1 .1)
+        self.entries.range(range).map(|e| e.1.1)
     }
 
     /// Searches for an entry whose start date and description match those specified

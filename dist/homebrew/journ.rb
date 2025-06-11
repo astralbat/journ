@@ -10,6 +10,7 @@ class Journ < Formula
   depends_on "python@3.12"  # fixed-version runtime
 
   def install
+      # TODO: Use intall_name_tool to fix the Python library path as a post install action
     system "cargo", "install", "--locked", *std_cargo_args
   end
 end

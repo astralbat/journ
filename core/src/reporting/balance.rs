@@ -61,6 +61,7 @@ pub trait AccountBalance<'h> {
 }
 
 pub struct AccountBalances<'h> {
+    with_amount: bool,
     value_units: Vec<&'h Unit<'h>>,
     lines: Vec<BalanceLine<'h>>,
 }
@@ -84,8 +85,13 @@ impl<'h> BalanceLine<'h> {
 }
 
 impl<'h> AccountBalances<'h> {
-    pub fn new(value_units: Vec<&'h Unit<'h>>) -> AccountBalances<'h> {
-        AccountBalances { value_units, lines: vec![] }
+    pub fn new(with_amount: bool, value_units: Vec<&'h Unit<'h>>) -> AccountBalances<'h> {
+        assert!(
+            with_amount || !value_units.is_empty(),
+            "Either with_amount must be true or value_units must not be empty"
+        );
+
+        AccountBalances { with_amount, value_units, lines: vec![] }
     }
 
     pub fn account_balances<'a>(
@@ -130,12 +136,21 @@ impl<'h> AccountBalances<'h> {
             return;
         }
 
-        match self.find_line_mut(account, valued_amount.unit()) {
+        match self.find_line_mut(
+            account,
+            if self.with_amount { Some(valued_amount.unit()) } else { None },
+        ) {
             Ok(line) => {
                 if replace {
                     line.valued_amount = valued_amount.clone();
                 } else {
+                    debug!(
+                        "Updating balance for account {} with valued amount {}",
+                        account.name(),
+                        valued_amount,
+                    );
                     line.valued_amount = (&line.valued_amount + valued_amount).unwrap();
+                    debug!("New balance for account {} is {}", account.name(), line.valued_amount,);
                 }
             }
             Err(insert_pos) => {
@@ -143,6 +158,7 @@ impl<'h> AccountBalances<'h> {
                     insert_pos,
                     BalanceLine::new(Arc::clone(account), valued_amount.clone()),
                 );
+                debug!("New balance for account {} is {}", account.name(), valued_amount);
             }
         }
     }
@@ -176,12 +192,11 @@ impl<'h> AccountBalances<'h> {
     fn find_line_mut(
         &mut self,
         account: &Arc<Account<'h>>,
-        unit: &'h Unit<'h>,
+        unit: Option<&'h Unit<'h>>,
     ) -> Result<&mut BalanceLine<'h>, usize> {
-        match self
-            .lines
-            .binary_search_by_key(&(account, unit), |l| (&l.account, l.valued_amount.unit()))
-        {
+        match self.lines.binary_search_by_key(&(account, unit), |l| {
+            (&l.account, if unit.is_none() { None } else { Some(l.valued_amount.unit()) })
+        }) {
             Ok(i) => Ok(&mut self.lines[i]),
             Err(i) => Err(i),
         }
@@ -194,7 +209,7 @@ where
     'h: 'a,
 {
     fn balances(&mut self, account_part: Option<&str>) -> AccountBalances<'h> {
-        let mut bals = AccountBalances::new(vec![]);
+        let mut bals = AccountBalances::new(true, vec![]);
         for entry in self {
             for pst in entry.postings() {
                 if let Some(part) = &account_part {
