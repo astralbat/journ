@@ -106,7 +106,6 @@ impl ExecCommand for BalCommand {
         // Get the value units. The unit to value in might not exist in the config,
         // and in this case, we'll just create a new object.
         let mut value_units = vec![];
-        let mut with_amount = false;
         for col in cmd.columns.iter() {
             if let BalColumn::Value(unit_code) = col {
                 value_units.push(
@@ -114,10 +113,9 @@ impl ExecCommand for BalCommand {
                         .get_unit(unit_code)
                         .unwrap_or_else(|| config.allocator().alloc(Unit::new(unit_code))),
                 );
-            } else if let BalColumn::Amount = col {
-                with_amount = true;
             }
         }
+        let with_amount = cmd.columns.contains(&BalColumn::Amount) || value_units.is_empty();
         let mut bals = AccountBalances::new(with_amount, value_units.clone());
 
         let account_filter = cmd.account_filter();
@@ -184,7 +182,7 @@ impl ExecCommand for BalCommand {
                 journ.allocator(),
             )?;
             for node_id in node_ids {
-                journ.node(node_id).overwrite()?;
+                journ.node(node_id).write_nearest_file()?;
             }
         }
 
@@ -198,7 +196,7 @@ impl ExecCommand for BalCommand {
         println!("{output}");
 
         // We only need to write the price database.
-        config.price_databases().into_iter().for_each(|db| db.save().unwrap());
+        config.price_databases().into_iter().for_each(|db| db.write_file().unwrap());
         Ok(())
     }
 }

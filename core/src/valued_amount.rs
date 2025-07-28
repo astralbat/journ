@@ -123,13 +123,6 @@ impl fmt::Debug for Valuation<'_> {
     }
 }
 
-/*
-impl IntoCells for Valuation<'_> {
-    fn into_cells(self) -> impl IntoIterator<Item = table::Cell> {
-        self.expr().into_cells()
-    }
-}*/
-
 impl<'h, 'a> From<Valuation<'h>> for table::Cell<'a> {
     fn from(value: Valuation<'h>) -> Self {
         value.expr().amount().into()
@@ -638,7 +631,9 @@ impl<'h> ValuedAmount<'h> {
             return Some(smallvec![Decimal::zero(); valued_amounts.len()]);
         }
 
+        let mut has_common_unit = false;
         for common_unit in ValuedAmount::common_units(&valued_amounts) {
+            has_common_unit = true;
             let mut weights = smallvec![];
 
             // Sum the common unit
@@ -647,7 +642,7 @@ impl<'h> ValuedAmount<'h> {
                 let value = va.value_in(common_unit).unwrap();
                 sum += value.quantity().abs();
             }
-            // This common_unit is no good.
+            // All values were zero. This common_unit is no good.
             if sum == Decimal::zero() {
                 continue;
             }
@@ -660,6 +655,15 @@ impl<'h> ValuedAmount<'h> {
             weights.push(Decimal::one() - weights.iter().sum::<Decimal>());
             return Some(weights);
         }
+
+        // If there was at least one common unit, but we have not returned yet, it means that
+        // all values in the common units were zero. Therefore, we can say that they do in fact all
+        // weigh the same.
+        if has_common_unit {
+            let weight = Decimal::one() / Decimal::from(valued_amounts.len());
+            return Some(smallvec![weight; valued_amounts.len()]);
+        }
+
         None
     }
 

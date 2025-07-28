@@ -85,6 +85,7 @@ impl JournalEntry {
         };
         let mut entry = self.entry.lock().unwrap();
         let pst = journ_core::posting::Posting::new(
+            None,
             "  ",
             account,
             money

@@ -144,13 +144,7 @@ impl<'h> AccountBalances<'h> {
                 if replace {
                     line.valued_amount = valued_amount.clone();
                 } else {
-                    debug!(
-                        "Updating balance for account {} with valued amount {}",
-                        account.name(),
-                        valued_amount,
-                    );
                     line.valued_amount = (&line.valued_amount + valued_amount).unwrap();
-                    debug!("New balance for account {} is {}", account.name(), line.valued_amount,);
                 }
             }
             Err(insert_pos) => {
@@ -158,7 +152,6 @@ impl<'h> AccountBalances<'h> {
                     insert_pos,
                     BalanceLine::new(Arc::clone(account), valued_amount.clone()),
                 );
-                debug!("New balance for account {} is {}", account.name(), valued_amount);
             }
         }
     }

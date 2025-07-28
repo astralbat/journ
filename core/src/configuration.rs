@@ -8,7 +8,7 @@
 use crate::account::Account;
 use crate::alloc::HerdAllocator;
 use crate::arguments::Arguments;
-use crate::date_and_time::{DateFormat, TimeFormat, DEFAULT_DATE_FORMAT, DEFAULT_TIME_FORMAT};
+use crate::date_and_time::{DEFAULT_DATE_FORMAT, DEFAULT_TIME_FORMAT, DateFormat, TimeFormat};
 use crate::ext::StrExt;
 use crate::journal_node::{JournalNode, NodeId};
 use crate::module::MODULES;
@@ -18,8 +18,8 @@ use crate::price_db::PriceDatabase;
 use crate::unit::{NumberFormat, RoundingStrategy, Unit};
 use chrono_tz::Tz;
 use std::borrow::Cow;
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::fmt::{Debug, Formatter};
 use std::string::ToString;
 use std::sync::{Arc, MutexGuard, OnceLock};
@@ -606,7 +606,7 @@ impl<'h, S: AsRef<str>> Filter<JournalNode<'h>> for FileFilter<'_, S> {
             return true;
         }
 
-        if let Some(file_name) = node.filename() {
+        if let Some(file_name) = node.nearest_filename() {
             for file_part in self.0 {
                 if file_name.ends_with(file_part.as_ref()) {
                     return true;

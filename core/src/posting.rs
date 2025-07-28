@@ -42,7 +42,8 @@ impl<'h> PostingId<'h> {
 #[derive(Debug, Clone)]
 pub struct Posting<'h> {
     posting_id: OnceLock<PostingId<'h>>,
-    text_block: &'h TextBlock<'h>,
+    /// The block from which this posting was parsed, if it was parsed.
+    text_block: Option<&'h TextBlock<'h>>,
     // Account spacing prefix.
     account_spacing: &'h str,
     account: Arc<Account<'h>>,
@@ -54,7 +55,7 @@ pub struct Posting<'h> {
 
 impl<'h> Posting<'h> {
     pub fn new(
-        text_block: &'h TextBlock<'h>,
+        text_block: Option<&'h TextBlock<'h>>,
         account_spacing: &'h str,
         account: Arc<Account<'h>>,
         valued_amount: ValuedAmount<'h>,
@@ -82,7 +83,7 @@ impl<'h> Posting<'h> {
     }
 
     /// The block from which this posting was parsed.
-    pub fn block(&self) -> &'h TextBlock<'h> {
+    pub fn block(&self) -> Option<&'h TextBlock<'h>> {
         self.text_block
     }
 

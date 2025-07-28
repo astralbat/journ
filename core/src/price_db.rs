@@ -124,23 +124,23 @@ impl<'h> PriceDatabase<'h> {
 
     /// Writes to the backing file if the database has been modified since the last save,
     /// and if this database is file backed, otherwise this is a no-op.
-    pub fn save(&self) -> JournResult<()> {
+    pub fn write_file(&self) -> JournResult<()> {
         if self.modified.load(Ordering::Relaxed)
             && let Some(node) = self.node()
         {
             // Initialise memory _before_ clearing directives.
             let prices_lock = self.prices_init();
-            Self::overwrite_internal(node, prices_lock)?;
+            Self::write_file_internal(node, prices_lock)?;
             self.modified.store(false, Ordering::Relaxed);
         }
         Ok(())
     }
 
-    fn overwrite_internal(
+    fn write_file_internal(
         node: &'h JournalNode<'h>,
         prices: MutexGuard<(Vec<Arc<Price<'h>>>, bool)>,
     ) -> JournResult<()> {
-        if let Some(file) = node.filename() {
+        if let Some(file) = node.nearest_filename() {
             trace!("Writing prices to file: {}", file.file_name().unwrap().to_str().unwrap());
             node.clear_directives_filter(|d| matches!(d.kind(), DirectiveKind::Price(_)));
             let mut p_iter = prices.0.iter();
@@ -158,7 +158,7 @@ impl<'h> PriceDatabase<'h> {
                     )
                 })
             });
-            node.overwrite()?;
+            node.write_nearest_file()?;
         }
         Ok(())
     }

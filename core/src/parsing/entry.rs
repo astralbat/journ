@@ -8,7 +8,7 @@
 use crate::account::Account;
 use crate::amount::AmountExpr;
 use crate::date_and_time::{DateAndTime, JDate, JDateTime, JDateTimeRange, JTime};
-use crate::error::parsing::{tag_err, IErrorMsg, IParseError};
+use crate::error::parsing::{IErrorMsg, IParseError, tag_err};
 use crate::journal_entry::{EntryObject, JournalEntry};
 use crate::match_blocks;
 use crate::metadata::Metadata;
@@ -199,7 +199,7 @@ where
     Ok((
         input,
         Posting::new(
-            block,
+            Some(block),
             account_leading_space,
             account,
             valued_amount.unwrap_or_else(ValuedAmount::nil),

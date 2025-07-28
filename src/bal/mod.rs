@@ -16,7 +16,7 @@ use journ_core::journal::Journal;
 use std::fmt::Display;
 use std::str::FromStr;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BalColumn {
     Account,
     Amount,
@@ -61,7 +61,8 @@ pub struct BalArguments {
     #[arg(
         short = 'o',
         help = "A comma separated list of columns to print. This can be 'account', 'amount' or 'value:<unit>'. Any valuation will be looked up on the entry or evaluated on the date/time of the entry",
-        value_delimiter = ','
+        value_delimiter = ',',
+        default_value = "account,amount"
     )]
     columns: Vec<BalColumn>,
     #[arg(

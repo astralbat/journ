@@ -40,12 +40,13 @@ use journ_core::module::MODULES;
 use journ_core::parsing::text_block::TextBlock;
 use journ_core::python::environment::PythonEnvironment;
 use journ_core::{err, parsing};
-use std::env;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::exit;
 use std::sync::LazyLock;
 use std::time::SystemTime;
+use std::{env, mem};
+use sysinfo::Pid;
 
 static START: LazyLock<SystemTime> = LazyLock::new(SystemTime::now);
 
@@ -252,6 +253,14 @@ fn main() {
                     .as_nanos()
                     .to_formatted_string(&SystemLocale::default().unwrap())
             );
+            // Print memory usage of the journal.
+            let mut sys = sysinfo::System::new_all();
+            sys.refresh_all();
+            if let Some(process) = sys.process(Pid::from(std::process::id() as usize)) {
+                println!("Memory usage: {} MB", process.memory() / 1024 / 1024);
+                println!("Virtual memory: {} MB", process.virtual_memory() / 1024 / 1024);
+            }
+
             journ
         }
         Err(err) => {

@@ -1128,8 +1128,11 @@ impl<'h> From<SequenceDealHolding<'h>> for AverageDealHolding<'h> {
 
 impl<'h> From<&Deal<'h>> for AverageDealHolding<'h> {
     fn from(deal: &Deal<'h>) -> Self {
+        let mut valued_amount = deal.valued_amount().clone();
+        // Deal holdings don't work with unit valuations.
+        valued_amount.to_totalled_valuations();
         Self {
-            valued_amount: deal.valued_amount().clone(),
+            valued_amount,
             expenses: deal.expenses().clone(),
             datetime: deal.datetime(),
             balance: deal.total().clone(),
@@ -1152,11 +1155,7 @@ impl<'h> From<DealGroup<'h>> for DealHolding<'h> {
 
 impl<'h> From<SequenceDealHolding<'h>> for DealHolding<'h> {
     fn from(mut seq: SequenceDealHolding<'h>) -> Self {
-        if seq.sequence.len() == 1 {
-            seq.sequence.pop_back().unwrap()
-        } else {
-            Sequence(seq)
-        }
+        if seq.sequence.len() == 1 { seq.sequence.pop_back().unwrap() } else { Sequence(seq) }
     }
 }
 

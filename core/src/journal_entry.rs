@@ -25,10 +25,10 @@ use chrono::{
 };
 use chrono_tz::Tz;
 use linked_hash_set::LinkedHashSet;
-use rust_decimal::prelude::Zero;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::Zero;
 use rust_decimal_macros::*;
-use smallvec::{smallvec, SmallVec};
+use smallvec::{SmallVec, smallvec};
 use std::cell::Cell;
 use std::ops::{Add, Bound, Range, RangeBounds};
 use std::{cmp, fmt};
@@ -235,23 +235,15 @@ impl<'h> JournalEntry<'h> {
     }
 
     pub fn postings(&self) -> impl Iterator<Item = &Posting<'h>> + '_ {
-        self.objects.iter().filter_map(|obj| {
-            if let EntryObject::Posting(pst, _) = obj {
-                Some(pst)
-            } else {
-                None
-            }
-        })
+        self.objects
+            .iter()
+            .filter_map(|obj| if let EntryObject::Posting(pst, _) = obj { Some(pst) } else { None })
     }
 
     pub fn postings_mut(&mut self) -> impl Iterator<Item = &mut Posting<'h>> {
-        self.objects.iter_mut().filter_map(|obj| {
-            if let EntryObject::Posting(pst, _) = obj {
-                Some(pst)
-            } else {
-                None
-            }
-        })
+        self.objects
+            .iter_mut()
+            .filter_map(|obj| if let EntryObject::Posting(pst, _) = obj { Some(pst) } else { None })
     }
 
     pub fn balanced_postings(&self) -> impl Iterator<Item = &Posting<'h>> + Clone {
@@ -461,13 +453,9 @@ impl<'h> JournalEntry<'h> {
     }
 
     pub fn metadata<'a>(&'a self) -> impl DoubleEndedIterator<Item = &'a Metadata<'h>> {
-        self.objects.iter().filter_map(move |obj| {
-            if let EntryObject::Metadata(m) = obj {
-                Some(m)
-            } else {
-                None
-            }
-        })
+        self.objects
+            .iter()
+            .filter_map(move |obj| if let EntryObject::Metadata(m) = obj { Some(m) } else { None })
     }
 
     pub fn metadata_tag_values(&self, key: &str) -> LinkedHashSet<String> {
@@ -886,7 +874,18 @@ impl<'h> JournalEntry<'h> {
                         match entry.range.intersection(&pst_price_range) {
                             Some(intersection) => entry.range = intersection,
                             None => {
-                                return Err(err!(BlockContextError::new(BlockContext::from(pst.block()), format!("Posting valuation: {} @@ {} is not consistent with previous postings. Expected to be in range {}", pst.amount(), pst_value, entry.range.to_string()))));
+                                return Err(err!(BlockContextError::new(
+                                    BlockContext::from(
+                                        pst.block()
+                                            .unwrap_or(&TextBlock::from(pst.to_string().as_str()))
+                                    ),
+                                    format!(
+                                        "Posting valuation: {} @@ {} is not consistent with previous postings. Expected to be in range {}",
+                                        pst.amount(),
+                                        pst_value,
+                                        entry.range.to_string()
+                                    )
+                                )));
                                 /*return Err(err!(err!(
                                     "Inconsistent posting valuation: {} @@ {} not consistent with previous postings",
                                     pst.amount(),

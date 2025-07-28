@@ -99,8 +99,9 @@ where
                 filename.as_deref(),
             ) {
                 if let Some(bce) = e.msg_mut::<BlockContextError>() {
-                    bce.context_mut()
-                        .set_file(self.node.filename().map(|p| p.to_str().unwrap().to_string()));
+                    bce.context_mut().set_file(
+                        self.node.nearest_filename().map(|p| p.to_str().unwrap().to_string()),
+                    );
                 }
                 parse_errors = vec![e];
             }
@@ -143,7 +144,7 @@ where
             _ => {
                 let journ_errs = JournErrors::new(String::new(), parse_errors).flatten();
                 let num_errs = journ_errs.len();
-                match self.node.filename() {
+                match self.node.nearest_filename() {
                     Some(filename) => Err(err!(journ_errs.with_message(format!(
                         "Found {} errors in {}",
                         num_errs,
@@ -211,7 +212,7 @@ where
                 let inner_file = child;
                 let allocator = self.allocator();
                 let mut t_builder = thread::Builder::new();
-                if let Some(filename) = child.filename() {
+                if let Some(filename) = child.nearest_filename() {
                     t_builder = t_builder.name(filename.to_str().unwrap().to_string());
                 }
                 let join_handle = t_builder

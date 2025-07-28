@@ -8,7 +8,7 @@
 use crate::account::Account;
 use crate::date_and_time::{DateAndTime, DateFormat, JDateTime, TimeFormat};
 use crate::directive::{Directive, DirectiveKind};
-use crate::error::parsing::{promote, IParseError};
+use crate::error::parsing::{IParseError, promote};
 use crate::error::{JournErrors, JournResult};
 use crate::journal_node::JournalNodeKind;
 use crate::module::MODULES;
@@ -21,8 +21,8 @@ use crate::parsing::util::{
     double_quoted, line_value, multiline_value_string, param_value, repeat0, rest_line1,
     separated_field, word,
 };
-use crate::parsing::{entry, IParseResult};
-use crate::parsing::{util, JParseResult};
+use crate::parsing::{IParseResult, entry};
+use crate::parsing::{JParseResult, util};
 use crate::price::Price;
 use crate::price_db::PriceDatabase;
 use crate::python::lambda::Lambda;
@@ -396,7 +396,7 @@ where
 {
     let (rem, filename) =
         promote("Filename expected", map(rest_line1, |i: I| i.text()))(input.clone())?;
-    let parent_stream = input.parse_node().node().filename();
+    let parent_stream = input.parse_node().node().nearest_filename();
     let file_path = {
         let child_buf = PathBuf::from_str(filename.trim()).expect("infallible");
         if child_buf.is_absolute() {
@@ -522,11 +522,10 @@ where
         match modules_lock.iter().find_map(|m| m.directives().find(|d| d.name() == dir)) {
             Some(module_dir) => {
                 let (_, out) = module_dir.parse(tbi).finish().map_err(|e| {
-                    NomErr::Error(err!(JournErrors::new(
-                        format!("Failed to parse module '{}'", dir),
-                        vec![e]
-                    )
-                    .flatten()))
+                    NomErr::Error(err!(
+                        JournErrors::new(format!("Failed to parse module '{}'", dir), vec![e])
+                            .flatten()
+                    ))
                 })?;
                 Ok((rem, out))
             }

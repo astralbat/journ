@@ -268,8 +268,12 @@ impl<'h> JournalNode<'h> {
         None
     }
 
-    /// Gets the path of the file this node belongs to, if any.
     pub fn filename(&self) -> Option<&'h Path> {
+        self.filename
+    }
+
+    /// Gets the path of the file this node belongs to, if any.
+    pub fn nearest_filename(&self) -> Option<&'h Path> {
         if let Some(file) = self.filename {
             return Some(file);
         }
@@ -286,7 +290,7 @@ impl<'h> JournalNode<'h> {
 
     /// Gets the canonical path of the file this node belongs to, if any.
     pub fn canonical_filename(&self) -> Option<PathBuf> {
-        Some(fs::canonicalize(self.filename()?).expect("Failed to canonicalize filename"))
+        Some(fs::canonicalize(self.nearest_filename()?).expect("Failed to canonicalize filename"))
     }
 
     pub fn allocator(&self) -> &'h HerdAllocator<'h> {
@@ -515,13 +519,14 @@ impl<'h> JournalNode<'h> {
         panic!("Entry no longer exists")
     }
 
-    pub fn overwrite(&self) -> JournResult<()> {
-        match self.input.block().location().unwrap().file() {
+    pub fn write_file(&self) -> JournResult<()> {
+        match self.filename {
             Some(file) => {
-                debug!("Writing {}", file);
+                debug!("Writing {}", file.to_str().unwrap());
                 let mut writer = BufWriter::new(
                     OpenOptions::new()
                         .write(true)
+                        .create(true)
                         .truncate(true)
                         .open(file)
                         .map_err(|e| err!(e; "IO Error"))?,
@@ -529,18 +534,34 @@ impl<'h> JournalNode<'h> {
                 self.write(&mut writer, None, false)?;
                 Ok(())
             }
-            None => Err(err!("Cannot overwrite journal file: file represents a text stream")),
+            None => Err(err!("Cannot write journal file: file represents a text stream")),
         }
     }
 
-    /// Updates this file and all Entry type files below this one.
-    pub fn overwrite_all(&self) -> JournResult<()> {
-        self.overwrite()?;
+    /// Writes the nearest file to this node which is the node's file or the nearest file in the parent chain.
+    pub fn write_nearest_file(&self) -> JournResult<()> {
+        if self.filename.is_some() {
+            self.write_file()
+        } else {
+            match &self.parent {
+                Some(parent) => parent.write_nearest_file(),
+                None => Err(err!(
+                    "Cannot write journal node: node and its parents have no backing file"
+                )),
+            }
+        }
+    }
+
+    /// Writes the file backing this node if it has one, and recursively, all child nodes.
+    pub fn write_file_recursive(&self) -> JournResult<()> {
+        if self.filename.is_some() {
+            self.write_file()?;
+        }
 
         for dir in self.directives().iter() {
             match dir.kind() {
                 DirectiveKind::Branch(node) | DirectiveKind::Include(node) => {
-                    node.overwrite_all()?;
+                    node.write_file_recursive()?;
                 }
                 _ => {}
             }

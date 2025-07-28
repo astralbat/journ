@@ -24,6 +24,7 @@ env_logger = "0.11.3"
 ansi_term = "0.12.1"
 bumpalo-herd = "0.1.2"
 log = { version = "0.4", features = ["max_level_trace", "release_max_level_trace"] }
+sysinfo = { version = "0.32.0" }
 
 #[dependency-overrides]
 # Fixes build error with pyo3 including chrono-tz feature "no function or associated item named `default` found for struct `LineParser` in the current scope"

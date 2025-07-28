@@ -5,7 +5,7 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
-use crate::{print_jerror, read_date_time_args, ExecCommand, IntoExecCommand};
+use crate::{ExecCommand, IntoExecCommand, print_jerror, read_date_time_args};
 use journ_cag::cgt_configuration::{
     CagCommand, CapitalGainsColumn, CapitalGainsGroupBy, CapitalGainsOrderBy, EventPattern,
 };
@@ -138,32 +138,20 @@ impl ExecCommand for CagCommand {
         let args = Arguments::get();
 
         let mut computer = CapitalGainsComputer::new(args);
-        match computer.compute_gains(&journ) {
+        let result = computer.compute_gains(&journ);
+
+        // Always write the price databases.
+        journ.root().config().price_databases().into_iter().for_each(|db| db.write_file().unwrap());
+
+        match result {
             Ok(cg) => {
                 println!("{}", cg);
-
                 if self.write_valuations || self.write_metadata {
-                    journ.root().overwrite_all().unwrap();
-                    journ
-                        .root()
-                        .config()
-                        .price_databases()
-                        .into_iter()
-                        .for_each(|db| db.save().unwrap());
+                    journ.root().write_file_recursive()?;
                 }
+                Ok(())
             }
-            Err(cag_error) => {
-                print_jerror(cag_error);
-                // Still write the price databases.
-                journ
-                    .root()
-                    .config()
-                    .price_databases()
-                    .into_iter()
-                    .for_each(|db| db.save().unwrap());
-                exit(1);
-            }
+            Err(e) => Err(e),
         }
-        Ok(())
     }
 }

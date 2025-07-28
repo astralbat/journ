@@ -11,6 +11,8 @@ use crate::posting::Posting;
 use ansi_term::{Color, Style};
 use atty::Stream;
 use bumpalo_herd::Herd;
+use chrono::DateTime;
+use chrono_tz::Tz;
 use env_logger::Builder;
 use journ_core::alloc::HerdAllocator;
 use journ_core::amount::Amount;
@@ -26,13 +28,12 @@ use journ_core::reporting::balance::AccountBalances;
 use journ_core::unit::{Unit, UnitFormat};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::PyDateTime;
+use pyo3::types::{PyAnyMethods, PyDateTime, PyStringMethods};
 use rust_decimal::Decimal;
 use std::error::Error;
 use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::io::Write;
-use std::ops::Bound;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::{Arc, LazyLock, Mutex};
@@ -41,8 +42,12 @@ use std::time::SystemTime;
 static START: LazyLock<SystemTime> = LazyLock::new(|| SystemTime::now());
 
 #[pymodule]
-fn journ(py: Python, m: &PyModule) -> PyResult<()> {
-    std::env::set_var("RUST_BACKTRACE", "full");
+fn journ<'py>(m: &Bound<'py, PyModule>) -> PyResult<()> {
+    // Should be safe as we're not threaded ourselves.
+    unsafe {
+        std::env::set_var("RUST_BACKTRACE", "full");
+    }
+
     Builder::from_default_env()
         .format(|buf, record| {
             writeln!(
@@ -60,7 +65,7 @@ fn journ(py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<JournalEntry>()?;
     m.add_class::<Posting>()?;
     m.add_class::<EntryIterator>()?;
-    m.add("JournError", py.get_type::<JournPyError>())?;
+    m.add("JournError", m.py().get_type::<JournPyError>())?;
     m.add_function(wrap_pyfunction!(format_amount, m)?)?;
     Ok(())
 }
@@ -138,11 +143,11 @@ impl Journal {
             let sys_modules = py.import("sys").unwrap().getattr("modules").unwrap();
             if sys_modules.get_item("ledger").is_err() {
                 let mod_ledger = PyModule::new(py, "ledger").unwrap();
-                mod_ledger::ledger(py, mod_ledger).unwrap();
+                mod_ledger::ledger(py, &mod_ledger).unwrap();
                 // Insert the module into sys.modules
                 sys_modules.set_item("ledger", mod_ledger).unwrap();
             }
-
+            // Import the ledger module to ensure it is initialized.
             // The main script can exit with an exception during shutdown unless we import the
             // threading module in the main thread. See https://bugs.python.org/issue31517.
             python.import("threading").unwrap();
@@ -180,50 +185,41 @@ impl Journal {
         Ok(self.edit_node_id.lock().unwrap().id())
     }
 
-    fn with_entry_range<'a>(
-        &'a self,
-        py: Python,
-        start_time: &PyDateTime,
-        end_time: &PyDateTime,
-        callback: PyObject,
+    fn with_entry_range<'py>(
+        &self,
+        start_time: &Bound<'py, PyDateTime>,
+        end_time: &Bound<'py, PyDateTime>,
+        callback: &Bound<'py, PyAny>,
     ) -> PyResult<()> {
         let journal = self.journal.lock().unwrap();
-        let chrono_start: DateTimeWrapper = start_time
-            .extract()
-            .expect("datetime must be constructed with a valid Python datetime object");
-        let chrono_end: DateTimeWrapper = end_time
-            .extract()
-            .expect("datetime must be constructed with a valid Python datetime object");
+        let chrono_start: DateTime<Tz> = start_time.extract()?;
+        let chrono_end: DateTime<Tz> = end_time.extract()?;
 
-        for entry in journal.entry_range(chrono_start.0..chrono_end.0) {
+        for entry in journal.entry_range(chrono_start..chrono_end) {
             let entry = JournalEntry::new(
                 Arc::clone(&self.journal),
                 Arc::new(Mutex::new(journ_core::journal_entry::JournalEntry::clone(entry))),
                 *entry.id().node_id(),
             );
-            callback.call1(py, (entry,))?;
+            callback.call1((entry,))?;
         }
         Ok(())
     }
 
     /// Finds all entries between `start_time` and `end_time` exclusive, and having an entry description
     /// equal to `description`.
-    fn find_entries(
+    fn find_entries<'py>(
         &self,
-        start_time: &PyDateTime,
-        end_time: &PyDateTime,
+        start_time: &Bound<'py, PyDateTime>,
+        end_time: &Bound<'py, PyDateTime>,
         description: &str,
     ) -> PyResult<Vec<JournalEntry>> {
         let journal = self.journal.lock().unwrap();
-        let chrono_start: DateTimeWrapper = start_time
-            .extract()
-            .expect("datetime must be constructed with a valid Python datetime object");
-        let chrono_end: DateTimeWrapper = end_time
-            .extract()
-            .expect("datetime must be constructed with a valid Python datetime object");
+        let chrono_start: DateTime<Tz> = start_time.extract()?;
+        let chrono_end: DateTime<Tz> = end_time.extract()?;
 
         let mut entries = vec![];
-        for entry in journal.find_entries(chrono_start.0..chrono_end.0, description) {
+        for entry in journal.find_entries(chrono_start..chrono_end, description) {
             entries.push(JournalEntry::new(
                 Arc::clone(&self.journal),
                 Arc::new(Mutex::new(journ_core::journal_entry::JournalEntry::clone(entry))),
@@ -235,30 +231,32 @@ impl Journal {
 
     /// Gets the quantity balance of the specified `account`, in the specified `unit` between `start`..`end`.
     #[pyo3(signature = (account, unit, start=None, end=None))]
-    fn account_bal(
+    fn account_bal<'py>(
         &self,
         account: &str,
         unit: &str,
-        start: Option<&PyDateTime>,
-        end: Option<&PyDateTime>,
+        start: Option<&Bound<'py, PyDateTime>>,
+        end: Option<&Bound<'py, PyDateTime>>,
     ) -> PyLedgerResult<Option<String>> {
-        let mut bals = AccountBalances::new(vec![]);
+        let mut bals = AccountBalances::new(true, vec![]);
         let time_range = (
-            start
-                .map(|t| {
-                    let chrono_start: DateTimeWrapper = t
+            match start {
+                Some(t) => {
+                    let chrono_start: DateTime<Tz> = t
                         .extract()
-                        .expect("datetime must be constructed with a valid Python datetime object");
-                    Bound::Included(chrono_start.0)
-                })
-                .unwrap_or_else(|| Bound::Unbounded),
-            end.map(|t| {
-                let chrono_end: DateTimeWrapper = t
-                    .extract()
-                    .expect("datetime must be constructed with a valid Python datetime object");
-                Bound::Excluded(chrono_end.0)
-            })
-            .unwrap_or_else(|| Bound::Unbounded),
+                        .map_err(|e| PyLedgerError(err!("Invalid start time: {}", e)))?;
+                    std::ops::Bound::Included(chrono_start)
+                }
+                None => std::ops::Bound::Unbounded,
+            },
+            match end {
+                Some(t) => {
+                    let chrono_end: DateTime<Tz> =
+                        t.extract().map_err(|e| PyLedgerError(err!("Invalid end time: {}", e)))?;
+                    std::ops::Bound::Excluded(chrono_end)
+                }
+                None => std::ops::Bound::Unbounded,
+            },
         );
         let journal = self.journal.lock().unwrap();
         let account_obj = journal.root().config().get_or_create_account(account);
@@ -278,11 +276,11 @@ impl Journal {
     }
 
     #[pyo3(signature = (py_datetime, description, aux_datetime=None, write_time=true))]
-    fn new_entry(
+    fn new_entry<'py>(
         &self,
-        py_datetime: &PyDateTime,
+        py_datetime: &Bound<'py, PyDateTime>,
         mut description: String,
-        aux_datetime: Option<&PyDateTime>,
+        aux_datetime: Option<&Bound<'py, PyDateTime>>,
         write_time: bool,
     ) -> PyLedgerResult<JournalEntry> {
         let journal = self.journal.lock().unwrap();
@@ -290,28 +288,30 @@ impl Journal {
         let config = rust_jf.config().clone();
 
         // Convert the python datetime object in to a DateAndTime object.
-        let chrono_date: DateTimeWrapper = py_datetime
-            .extract()
-            .expect("datetime must be constructed with a valid Python datetime object");
+        let chrono_date: DateTime<Tz> =
+            py_datetime.extract().map_err(|e| PyLedgerError(err!("Invalid datetime: {}", e)))?;
         let dt = DateAndTime::new(
             JDateTimeRange::new(
                 JDateTime::from_datetime(
-                    chrono_date.0.with_timezone(&config.timezone()),
+                    chrono_date.with_timezone(&config.timezone()),
                     Some(config.as_herd_ref().date_format()),
                     if write_time { Some(config.as_herd_ref().time_format()) } else { None },
                 ),
                 None,
             ),
-            aux_datetime.map(|d| {
-                let chrono_aux_date: DateTimeWrapper = d
-                    .extract()
-                    .expect("datetime must be constructed with a valid Python datetime object");
-                JDateTime::from_datetime(
-                    chrono_aux_date.0.with_timezone(&config.timezone()),
-                    Some(config.as_herd_ref().date_format()),
-                    if write_time { Some(config.as_herd_ref().time_format()) } else { None },
-                )
-            }),
+            match aux_datetime {
+                Some(aux) => {
+                    let aux_date: DateTime<Tz> = aux
+                        .extract()
+                        .map_err(|e| PyLedgerError(err!("Invalid aux datetime: {}", e)))?;
+                    Some(JDateTime::from_datetime(
+                        aux_date.with_timezone(&config.timezone()),
+                        Some(config.as_herd_ref().date_format()),
+                        if write_time { Some(config.as_herd_ref().time_format()) } else { None },
+                    ))
+                }
+                None => None,
+            },
         );
 
         description.insert_str(0, "  ");
@@ -347,7 +347,7 @@ impl Journal {
 
     fn write(&self) -> PyLedgerResult<()> {
         let journal = self.journal.lock().unwrap();
-        journal.root().overwrite_all()?;
+        journal.root().write_file_recursive()?;
         Ok(())
     }
 }
@@ -361,14 +361,18 @@ struct Configuration {}
 /// # Examples
 /// * `format_amount(1234.56, "##,###.00 USD", "USD") -> "1,234.56 USD"`
 #[pyfunction]
-fn format_amount(quantity: &PyAny, format_spec: &str, unit: &str) -> PyResult<String> {
+fn format_amount<'py>(
+    quantity: &Bound<'py, PyAny>,
+    format_spec: &str,
+    unit: &str,
+) -> PyResult<String> {
     let uf: UnitFormat = format_spec.parse().map_err(|e| {
         PyValueError::new_err(format!("Invalid format specification: {}: {}", format_spec, e))
     })?;
 
-    let dec = match Decimal::from_str(quantity.str()?.to_str()?) {
+    let dec = match Decimal::from_str(&quantity.str()?.to_cow()?) {
         Ok(d) => d,
-        Err(e) => match Decimal::from_scientific(quantity.str()?.to_str()?) {
+        Err(e) => match Decimal::from_scientific(&quantity.str()?.to_cow()?) {
             Ok(d) => d,
             Err(_) => {
                 return Err(PyValueError::new_err(format!(

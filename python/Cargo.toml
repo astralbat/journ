@@ -9,15 +9,20 @@ name = "journ"
 crate-type = ["cdylib"]
 
 [dependencies]
-chrono = "0.4.34"
+chrono = "0.4.41"
+chrono-tz = "0.10.3"
 env_logger = "*"
 ansi_term = "0.12.1"
 atty = "0.2"
 bumpalo-herd = "0.1.2"
 nom = "7.1.3"
 rust_decimal = "1.34.2"
+
+[dependencies.pyo3]
+version = "0.25.0"
+default-features = false
 # As we're a python extension, we use an ABI3 compatible version of pyo3 to ensure that we can be loaded by any Python 3.9+ interpreter.
-pyo3 = { version = "0.25.0", features = ["extension-module", "abi3-py39", "chrono", "chrono-tz", "rust_decimal"] }
+features = ["extension-module", "abi3-py39", "chrono", "chrono-tz", "rust_decimal"]
 
 [dependencies.journ-core]
 path = "../core"

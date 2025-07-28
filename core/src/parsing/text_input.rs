@@ -10,11 +10,11 @@ use crate::configuration::Configuration;
 use crate::err;
 use crate::error::{BlockContext, BlockContextError, BlockContextLine, JournError};
 use crate::journal_node::JournalNode;
+use crate::parsing::DerefMutAndDebug;
 use crate::parsing::parser::JournalFileParseNode;
 use crate::parsing::text_block::TextBlock;
-use crate::parsing::DerefMutAndDebug;
-use nom::error::{ErrorKind, ParseError};
 use nom::Err as NomErr;
+use nom::error::{ErrorKind, ParseError};
 use nom::{
     AsBytes, Compare, IResult, InputIter, InputLength, InputTake, InputTakeAtPosition, Needed,
     Offset, Slice,
@@ -158,7 +158,7 @@ where
     's: 'p,
 {
     fn file(&self) -> Option<&'h str> {
-        self.extra.node().filename().map(|f| f.to_str().unwrap())
+        self.extra.node().nearest_filename().map(|f| f.to_str().unwrap())
     }
 
     fn line(&self) -> u32 {
@@ -561,7 +561,7 @@ where
     's: 'p,
 {
     fn file(&self) -> Option<&'h str> {
-        self.inner.extra.node().filename().map(|f| f.to_str().unwrap())
+        self.inner.extra.node().nearest_filename().map(|f| f.to_str().unwrap())
     }
 
     fn line(&self) -> u32 {
