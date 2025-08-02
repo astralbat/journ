@@ -11,7 +11,7 @@ use crate::err;
 use crate::error::{BlockContext, BlockContextError, BlockContextLine, JournError};
 use crate::journal_node::JournalNode;
 use crate::parsing::DerefMutAndDebug;
-use crate::parsing::parser::JournalFileParseNode;
+use crate::parsing::parser::JournalParseNode;
 use crate::parsing::text_block::TextBlock;
 use nom::Err as NomErr;
 use nom::error::{ErrorKind, ParseError};
@@ -31,18 +31,18 @@ pub trait JournalNodeAccess<'h> {
     fn node(&self) -> &JournalNode<'h>;
 }
 
-impl<'h, 'p, 's, 'e> JournalNodeAccess<'h> for &'p JournalFileParseNode<'h, 's, 'e>
+impl<'h, 'p, 's, 'e> JournalNodeAccess<'h> for &'p JournalParseNode<'h, 's, 'e>
 where
     'h: 'e,
     'e: 's,
 {
     fn node(&self) -> &JournalNode<'h> {
-        JournalFileParseNode::node(self)
+        JournalParseNode::node(self)
     }
 }
 
 impl<'h, 'p, 's, 'e> JournalNodeAccess<'h>
-    for LocatedSpan<&'h str, &'p JournalFileParseNode<'h, 's, 'e>>
+    for LocatedSpan<&'h str, &'p JournalParseNode<'h, 's, 'e>>
 where
     'h: 'e,
     'e: 's,
@@ -104,7 +104,7 @@ impl<'s, 'h> ConfigInput<'h>
 }
 
 pub trait NodeInput<'h, 's, 'e, 'p> {
-    fn parse_node(&self) -> &'p JournalFileParseNode<'h, 's, 'e>;
+    fn parse_node(&self) -> &'p JournalParseNode<'h, 's, 'e>;
 }
 
 impl<'h> TextInput<'h> for &'h str {
@@ -151,7 +151,7 @@ impl<'h, 's> LocatedInput<'h>
     }
 }
 
-impl<'h, 's, 'e, 'p> LocatedInput<'h> for LocatedSpan<&'h str, &'p JournalFileParseNode<'h, 's, 'e>>
+impl<'h, 's, 'e, 'p> LocatedInput<'h> for LocatedSpan<&'h str, &'p JournalParseNode<'h, 's, 'e>>
 where
     'h: 'e,
     'e: 's,
@@ -185,7 +185,7 @@ pub trait BlockInput<'h> {
     fn with_child(self, block: TextBlock<'h>) -> Self;
 }
 
-impl<'h, 'p, 's, 'e> TextInput<'h> for LocatedSpan<&'h str, &'p JournalFileParseNode<'h, 's, 'e>>
+impl<'h, 'p, 's, 'e> TextInput<'h> for LocatedSpan<&'h str, &'p JournalParseNode<'h, 's, 'e>>
 where
     'h: 'e,
     'e: 'e,
@@ -554,7 +554,7 @@ impl<'h, 's> LocatedInput<'h>
     }
 }
 
-impl<'h, 's, 'e, 'p> LocatedInput<'h> for TextBlockInput<'h, &'p JournalFileParseNode<'h, 's, 'e>>
+impl<'h, 's, 'e, 'p> LocatedInput<'h> for TextBlockInput<'h, &'p JournalParseNode<'h, 's, 'e>>
 where
     'h: 'e,
     'e: 's,
@@ -601,7 +601,7 @@ impl<'h, X> BlockInput<'h> for TextBlockInput<'h, X> {
     }
 }
 
-impl<'h, 's, 'e, 'p> ConfigInput<'h> for TextBlockInput<'h, &'p JournalFileParseNode<'h, 's, 'e>>
+impl<'h, 's, 'e, 'p> ConfigInput<'h> for TextBlockInput<'h, &'p JournalParseNode<'h, 's, 'e>>
 where
     'h: 'e,
     'e: 's,
@@ -629,9 +629,9 @@ impl<'h, 's> ConfigInput<'h>
 }
 
 impl<'h, 's, 'e, 'p> NodeInput<'h, 's, 'e, 'p>
-    for TextBlockInput<'h, &'p JournalFileParseNode<'h, 's, 'e>>
+    for TextBlockInput<'h, &'p JournalParseNode<'h, 's, 'e>>
 {
-    fn parse_node(&self) -> &'p JournalFileParseNode<'h, 's, 'e> {
+    fn parse_node(&self) -> &'p JournalParseNode<'h, 's, 'e> {
         self.inner.extra
     }
 }

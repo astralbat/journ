@@ -15,9 +15,9 @@ pub mod text_input;
 pub mod util;
 
 use crate::configuration::Configuration;
-use crate::error::parsing::IParseError;
 use crate::error::JournError;
-use crate::parsing::parser::JournalFileParseNode;
+use crate::error::parsing::IParseError;
+use crate::parsing::parser::JournalParseNode;
 use nom::Err as NomErr;
 use nom_locate::LocatedSpan;
 use std::cell::RefCell;
@@ -31,7 +31,7 @@ use std::ops::DerefMut;
 
 pub type StringInput<'h, 'p, 's> =
     LocatedSpan<&'h str, &'p RefCell<dyn DerefMutAndDebug<'h, 's, Configuration<'h>> + 's>>;
-pub type TextFileInput<'h, 's, 'e, 'p> = LocatedSpan<&'h str, &'p JournalFileParseNode<'h, 's, 'e>>;
+pub type TextFileInput<'h, 's, 'e, 'p> = LocatedSpan<&'h str, &'p JournalParseNode<'h, 's, 'e>>;
 
 //pub type IParseResult<'h, I, T> =
 //    Result<(I, T), NomErr<JournError<'h, InputErr<'h, <I as TextInput<'h>>::Error>>>>;
@@ -48,8 +48,8 @@ macro_rules! parse {
     ($str:expr, $func:expr, $config:expr) => {{
         use nom::Finish;
         use $crate::error::JournError;
-        use $crate::parsing::text_input::TextInput;
         use $crate::parsing::StringInput;
+        use $crate::parsing::text_input::TextInput;
 
         let wrapped_config = std::cell::RefCell::new($config);
         let input = StringInput::new_extra($str, &wrapped_config);
@@ -70,8 +70,8 @@ macro_rules! parse_block {
     ($block:expr, $func:expr, $config:expr) => {{
         use nom::Finish;
         use $crate::error::JournError;
-        use $crate::parsing::text_input::TextInput;
         use $crate::parsing::StringInput;
+        use $crate::parsing::text_input::TextInput;
 
         let wrapped_config = std::cell::RefCell::new($config);
         let block = $block;
@@ -181,11 +181,9 @@ macro_rules! parse_node {
             allocator.alloc($crate::parsing::text_block::TextBlock::from($str)),
             vec![],
         ));
-        $crate::parsing::parser::JournalFileParseNode::new_root(&node, $scope)
+        $crate::parsing::parser::JournalParseNode::new_root(&node, $scope)
     }};
-    ($str:expr, $scope:expr, $config:expr) => {{
-        parse_node!($str, $scope, $config, $crate::journal_node::JournalNodeKind::Entry)
-    }};
+    ($str:expr, $scope:expr, $config:expr) => {{ parse_node!($str, $scope, $config, $crate::journal_node::JournalNodeKind::Entry) }};
     // This uses a static allocator, and so should only be used for testing.
     ($str:expr, $scope:expr) => {{
         parse_node!(

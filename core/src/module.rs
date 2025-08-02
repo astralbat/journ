@@ -6,9 +6,9 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::directive::{Directive, DirectiveKind};
-use crate::parsing::parser::JournalFileParseNode;
-use crate::parsing::text_input::TextBlockInput;
 use crate::parsing::JParseResult;
+use crate::parsing::parser::JournalParseNode;
+use crate::parsing::text_input::TextBlockInput;
 use std::any::Any;
 use std::fmt::Debug;
 use std::sync::Mutex;
@@ -76,7 +76,7 @@ pub trait ModuleDirectiveObj:
 }
 
 pub type ModuleDirectiveInput<'h, 's, 'e, 'p> =
-    TextBlockInput<'h, &'p JournalFileParseNode<'h, 's, 'e>>;
+    TextBlockInput<'h, &'p JournalParseNode<'h, 's, 'e>>;
 
 pub trait ModuleDirective: Send {
     fn name(&self) -> &'static str;

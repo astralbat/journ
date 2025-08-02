@@ -141,7 +141,7 @@ impl ExecCommand for CagCommand {
         let result = computer.compute_gains(&journ);
 
         // Always write the price databases.
-        journ.root().config().price_databases().into_iter().for_each(|db| db.write_file().unwrap());
+        journ.config().price_databases().into_iter().for_each(|db| db.write_file().unwrap());
 
         match result {
             Ok(cg) => {

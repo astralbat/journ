@@ -32,7 +32,7 @@ use journ_core::valuer::ValueResult;
 use journ_core::{err, match_map, valuer};
 use log::info;
 use regex::Regex;
-use smallvec::{smallvec, SmallVec};
+use smallvec::{SmallVec, smallvec};
 use std::borrow::Cow;
 use std::collections::{HashSet, VecDeque};
 use std::ops::RangeBounds;
@@ -143,7 +143,7 @@ impl CapitalGainsComputer {
         pool_events.retain(|e| from_to_range.contains(&e.deal_datetime().start().datetime()));
 
         let cg = CapitalGains::new(
-            Configuration::clone(&journal.root().config()),
+            Configuration::clone(&journal.config()),
             pool_events,
             pool_manager.pools().iter().map(|p| (p.name(), p.balances().collect())).collect(),
         );

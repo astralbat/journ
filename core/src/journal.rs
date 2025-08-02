@@ -14,7 +14,7 @@ use crate::error::{BlockContext, BlockContextError, JournErrors, JournResult};
 use crate::ext::StrExt;
 use crate::journal_entry::{EntryId, JournalEntry};
 use crate::journal_node::{JournalNode, JournalNodeKind, NodeId};
-use crate::parsing::parser::JournalFileParseNode;
+use crate::parsing::parser::JournalParseNode;
 use crate::parsing::text_block::TextBlock;
 use crate::parsing::text_input::TextBlockInput;
 use crate::posting::Posting;
@@ -40,6 +40,7 @@ use std::{io, thread};
 pub struct Journal<'h> {
     root: &'h JournalNode<'h>,
     entries: BTreeMap<u64, (&'h TextBlock<'h>, &'h JournalEntry<'h>), &'h HerdAllocator<'h>>,
+    combined_config: &'h Configuration<'h>,
 }
 
 impl<'h> Journal<'h> {
@@ -63,13 +64,12 @@ impl<'h> Journal<'h> {
                 allocated_block,
                 allocator,
             ),
-            vec![],
             allocator,
         ));
 
         let node_copy = &*node;
         let node = thread::scope(move |scope| {
-            let parse_node = JournalFileParseNode::new_root(node_copy, config, scope);
+            let parse_node = JournalParseNode::new_root(node_copy, config, scope);
             parse_node.parse()
         })?;
 
@@ -122,7 +122,17 @@ impl<'h> Journal<'h> {
             }
         }
 
-        Journal { entries, root }
+        // Create a combined configuration that follows all branch paths in order,
+        // applying all configuration items in order.
+        let combined_config =
+            allocator.alloc(Configuration::from_args(Arguments::get(), allocator, root.id()));
+        let mut segment = Some(*root.segments().first().unwrap());
+        while let Some(seg) = segment {
+            combined_config.merge_config(seg.config());
+            segment = seg.next_segment();
+        }
+
+        Journal { entries, root, combined_config }
     }
 
     pub fn allocator(&self) -> &'h HerdAllocator<'h> {
@@ -286,29 +296,15 @@ impl<'h> Journal<'h> {
         }
     }
 
-    /// Searches and removes the entry whose unique `date_id` is equal to the one
-    /// specified.
-    pub fn remove_entry(&mut self, date_id: u64) -> Option<&'h JournalEntry<'h>> {
-        match self.entries.remove(&date_id) {
-            Some(pje) => {
-                for file in self.root.children_recursive() {
-                    file.directives().retain(|dir| {
-                        if let DirectiveKind::Entry(entry) = dir.kind() {
-                            if entry.date_id() == date_id {
-                                return false;
-                            }
-                        }
-                        true
-                    });
-                }
-                Some(pje.1)
-            }
-            None => None,
-        }
-    }
-
     pub fn root(&self) -> &'h JournalNode<'h> {
         self.root
+    }
+
+    /// Returns a combined configuration that includes all configuration items applied from each successive
+    /// journal segment in a depth-first fashion. I.e. descending into all branches and includes.
+    /// The configuration thus contains all accounts, units and other items at their last setting.
+    pub fn config(&self) -> &'h Configuration<'h> {
+        &self.combined_config
     }
 
     pub fn node(&self, index: &NodeId<'h>) -> &JournalNode<'h> {

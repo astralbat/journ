@@ -297,7 +297,7 @@ pub fn flatten_csv(field: &Vec<String>) -> Vec<String> {
 /// Converts date and time arguments to a `DateTimeArguments` struct.
 /// Uses the root configuration for fallback if the arguments are not specified.
 pub fn read_date_time_args(journ: &Journal) -> JournResult<DateTimeArguments> {
-    let config = journ.root().config();
+    let config = journ.config();
     let mut dt_args = DateTimeArguments::default();
     let main_args = MainArguments::parse();
     dt_args.date_format = match main_args.datetime_args.date_format {

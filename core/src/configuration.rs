@@ -49,6 +49,7 @@ impl<'h> ConfigurationVersion<'h> {
 struct BaseConfiguration<'h> {
     /// The version sequence of the `Configuration`. The version changes whenever the `BaseConfiguration`
     /// changes _and_ it is in use elsewhere (`Configuration::clone`).
+    parent: Option<Arc<BaseConfiguration<'h>>>,
     args: &'h Arguments,
     version: ConfigurationVersion<'h>,
     date_format: DateFormat<'h>,
@@ -63,8 +64,14 @@ struct BaseConfiguration<'h> {
 }
 
 impl<'h> BaseConfiguration<'h> {
-    fn new(args: &'h Arguments, allocator: &'h HerdAllocator<'h>, node_id: &'h NodeId<'h>) -> Self {
+    fn new(
+        parent: Option<Arc<BaseConfiguration<'h>>>,
+        args: &'h Arguments,
+        allocator: &'h HerdAllocator<'h>,
+        node_id: &'h NodeId<'h>,
+    ) -> Self {
         let mut bc = Self {
+            parent,
             args,
             number_format: Default::default(),
             date_format: DEFAULT_DATE_FORMAT.clone(),
@@ -73,7 +80,6 @@ impl<'h> BaseConfiguration<'h> {
             default_unit: allocator.alloc(Unit::none()),
             units: Default::default(),
             accounts: Default::default(),
-            //cgt_config: Default::default(),
             module_config: Default::default(),
             version: ConfigurationVersion::initial(node_id),
         };
@@ -88,9 +94,10 @@ impl<'h> BaseConfiguration<'h> {
     /// Gets a mutable reference to the configuration so that it can be updated.
     /// This works to ensure that the version is updated when the configuration is mutated,
     /// _and_ there are other references to it (`Configuration::clone`).
-    fn get_mut<'a>(self: &'a mut Arc<Self>) -> &'a mut Self {
+    fn get_mut(self: &mut Arc<Self>) -> &mut Self {
         if Arc::strong_count(self) > 1 {
             let mut new_base = Self {
+                parent: self.parent.clone(),
                 args: self.args,
                 version: ConfigurationVersion::next(self.version),
                 date_format: self.date_format.clone(),
@@ -101,7 +108,6 @@ impl<'h> BaseConfiguration<'h> {
                 units: self.units.clone(),
                 accounts: self.accounts.clone(),
                 module_config: HashMap::new(),
-                //cgt_config: self.cgt_config.clone(),
             };
             for (k, v) in self.module_config.iter() {
                 new_base.module_config.insert(k, v.clone_box());
@@ -112,6 +118,32 @@ impl<'h> BaseConfiguration<'h> {
         } else {
             Arc::get_mut(self).unwrap()
         }
+    }
+
+    pub fn get_unit(&self, code: &str) -> Option<&'h Unit<'h>> {
+        self.units.get(code).copied().or_else(|| {
+            // If the unit is not found, check the parent configuration if it exists.
+            self.parent.as_ref().and_then(|parent| parent.get_unit(code))
+        })
+    }
+
+    pub fn get_account(&self, full_name: &str) -> Option<&Arc<Account<'h>>> {
+        self.accounts.get(full_name).or_else(|| {
+            // If the account is not found, check the parent configuration if it exists.
+            self.parent.as_ref().and_then(|parent| parent.get_account(full_name))
+        })
+    }
+
+    pub fn get_module_config<T: ModuleConfiguration>(
+        &self,
+        module_name: &'static str,
+    ) -> Option<&T> {
+        self.module_config.get(module_name).map(|c| c.as_any().downcast_ref().unwrap()).or_else(
+            || {
+                // If the module configuration is not found, check the parent configuration if it exists.
+                self.parent.as_ref().and_then(|parent| parent.get_module_config(module_name))
+            },
+        )
     }
 }
 
@@ -196,8 +228,30 @@ impl<'h> Configuration<'h> {
         node_id: &'h NodeId<'h>,
     ) -> Self {
         Self {
-            base_config: Arc::new(BaseConfiguration::new(args, allocator, node_id)),
+            base_config: Arc::new(BaseConfiguration::new(None, args, allocator, node_id)),
             herd_allocator: allocator,
+            herd_ref: OnceLock::new(),
+        }
+    }
+
+    /// Creates a new `Configuration` that is a branch of the current one. The new configuration
+    /// is essentially the same as the current one.
+    pub fn branch(&self) -> Self {
+        Configuration {
+            base_config: Arc::new(BaseConfiguration {
+                parent: Some(self.base_config.clone()),
+                args: self.base_config.args,
+                version: self.base_config.version.next(),
+                date_format: self.base_config.date_format.clone(),
+                time_format: self.base_config.time_format.clone(),
+                timezone: self.base_config.timezone,
+                number_format: self.base_config.number_format,
+                default_unit: self.base_config.default_unit,
+                units: HashMap::new(),
+                accounts: HashMap::new(),
+                module_config: HashMap::new(),
+            }),
+            herd_allocator: self.herd_allocator,
             herd_ref: OnceLock::new(),
         }
     }
@@ -276,7 +330,7 @@ impl<'h> Configuration<'h> {
     }
 
     pub fn get_unit(&self, code: &str) -> Option<&'h Unit<'h>> {
-        self.base_config.units.get(code).copied()
+        self.base_config.get_unit(code)
     }
 
     /// An `Iterator` of all `Units` kept by this `Configuration`.
@@ -298,7 +352,7 @@ impl<'h> Configuration<'h> {
         // See if we already have a unit with the same code as any of the unit's aliases and merge with that.
         let mut merged_unit = None;
         for alias in unit.aliases() {
-            if let Some(entry) = mut_base.units.get(alias) {
+            if let Some(entry) = mut_base.get_unit(alias) {
                 merged_unit = Some(&*allocator.alloc(Self::merge_units(unit, entry)));
                 break;
             }
@@ -362,6 +416,27 @@ impl<'h> Configuration<'h> {
         );
 
         builder
+    }
+
+    /// Merges the specified `config` over the top of this configuration.
+    /// Parent and version are left unchanged.
+    pub fn merge_config(&mut self, config: &Configuration<'h>) {
+        let base_config = self.get_mut();
+        base_config.date_format = config.date_format().clone();
+        base_config.time_format = config.time_format().clone();
+        base_config.timezone = config.timezone();
+        base_config.number_format = config.number_format();
+        base_config.default_unit = config.default_unit();
+        base_config.args = config.args();
+        for (k, v) in config.base_config.units.iter() {
+            base_config.units.insert(k.clone(), *v);
+        }
+        for (k, v) in config.base_config.accounts.iter() {
+            base_config.accounts.insert(k.clone(), Arc::clone(v));
+        }
+        for (k, v) in config.base_config.module_config.iter() {
+            base_config.module_config.insert(k, v.clone_box());
+        }
     }
 
     /// The set of all unique price databases.
@@ -439,11 +514,11 @@ impl<'h> Configuration<'h> {
     }
 
     pub fn get_account(&self, full_name: &str) -> Option<&Arc<Account<'h>>> {
-        self.base_config.accounts.get(full_name)
+        self.base_config.get_account(full_name)
     }
 
     pub fn module_config<T: ModuleConfiguration>(&self, module_name: &'static str) -> Option<&T> {
-        self.base_config.module_config.get(module_name).map(|c| c.as_any().downcast_ref().unwrap())
+        self.base_config.get_module_config(module_name)
     }
 
     pub fn set_module_config<T: ModuleConfiguration>(

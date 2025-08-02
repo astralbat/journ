@@ -35,8 +35,8 @@ impl<'h> PriceDatabase<'h> {
         let mut prices_lock = self.prices.lock().unwrap();
         let (prices, initialised) = &mut *prices_lock;
         if !*initialised {
-            if let Some(node) = &self.node {
-                for dir in node.directives().iter() {
+            if let Some(node) = self.node {
+                for dir in node.all_directives_iter() {
                     if let DirectiveKind::Price(p) = dir.kind() {
                         prices.push(Arc::clone(p))
                     }
@@ -146,14 +146,15 @@ impl<'h> PriceDatabase<'h> {
             let mut p_iter = prices.0.iter();
             node.append_directives(|len, _leading_sp| {
                 p_iter.next().map(|p| (**p).clone()).map(|mut p| {
-                    p.set_date_format(node.config().as_herd_ref().date_format());
-                    p.set_time_format(node.config().as_herd_ref().time_format());
-                    p.set_timezone(node.config().timezone());
+                    let config = node.segments().last().unwrap().config();
+                    p.set_date_format(config.as_herd_ref().date_format());
+                    p.set_time_format(config.as_herd_ref().time_format());
+                    p.set_timezone(config.timezone());
 
                     let price_string = if len == 0 { p.to_string() } else { format!("\n{}", p) };
-                    let price_str = node.config().alloc(price_string);
+                    let price_str = node.segments().last().unwrap().config().alloc(price_string);
                     Directive::new(
-                        node.config().alloc(TextBlock::from(price_str.as_str())),
+                        config.alloc(TextBlock::from(price_str.as_str())),
                         DirectiveKind::Price(Arc::new(p)),
                     )
                 })

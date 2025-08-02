@@ -9,6 +9,7 @@ use crate::alloc::HerdAllocator;
 use crate::configuration::Configuration;
 use crate::error::{BlockContextError, JournErrors, JournResult};
 use crate::journal_node::{JournalNode, JournalNodeKind, NodeId};
+use crate::journal_node_segment::JournalNodeSegment;
 use crate::parsing::text_block::TextBlock;
 use crate::parsing::text_input::{BlockInput, LocatedInput, TextBlockInput, TextInput};
 use crate::parsing::util::interim_space;
@@ -16,7 +17,6 @@ use crate::python::environment::PythonEnvironment;
 use crate::{err, parsing};
 use nom_locate::LocatedSpan;
 use std::cell::RefCell;
-use std::ffi::CString;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Mutex;
@@ -32,11 +32,14 @@ impl<'h, 's> fmt::Debug for dyn ParseFunc<'h> + 's {
 }
 type ParseOperation<'h, 's> = Box<dyn ParseFunc<'h> + 's>;
 
-/// A JournalFileNode view used during parsing.
+/// A JournalNode view used during parsing.
 /// The main idea here is that this node stays on a single thread and does not require
 /// synchronisation.
 #[derive(Debug)]
-pub struct JournalFileParseNode<'h, 's, 'e> {
+pub struct JournalParseNode<'h, 's, 'e> {
+    /// The ongoing segments being parsed for the current node. The last segment is the current one.
+    /// The list is never empty.
+    segments: RefCell<Vec<&'h JournalNodeSegment<'h>>>,
     node: &'h JournalNode<'h>,
     input: TextBlockInput<'h, ()>,
     configuration: Rc<RefCell<Configuration<'h>>>,
@@ -44,7 +47,7 @@ pub struct JournalFileParseNode<'h, 's, 'e> {
     parent_scope: &'s Scope<'s, 'e>,
     allocator: &'h HerdAllocator<'h>,
 }
-impl<'h, 's, 'e> JournalFileParseNode<'h, 's, 'e>
+impl<'h, 's, 'e> JournalParseNode<'h, 's, 'e>
 where
     'h: 'e,
     'e: 's,
@@ -55,7 +58,8 @@ where
         parent_scope: &'s Scope<'s, 'e>,
     ) -> Self {
         let allocator = configuration.allocator();
-        JournalFileParseNode {
+        JournalParseNode {
+            segments: RefCell::new(vec![allocator.alloc(JournalNodeSegment::new(node))]),
             input: TextBlockInput::new(
                 LocatedSpan::new(node.block().text()),
                 node.block(),
@@ -85,33 +89,42 @@ where
         let mut parse_errors = vec![];
         let time = std::time::Instant::now();
 
-        if self.node.file_kind() == JournalNodeKind::Python {
-            let block = self.input.block();
-            let outdented = block.text_outdented(3);
-            let outdented_sans_python = outdented.strip_prefix("python").unwrap_or(&outdented);
-            let python_code = outdented_sans_python.trim_start_matches(interim_space);
+        match self.node.file_kind() {
+            JournalNodeKind::Python => {
+                let block = self.input.block();
+                let outdented = block.text_outdented(3);
+                let outdented_sans_python = outdented.strip_prefix("python").unwrap_or(&outdented);
+                let python_code = outdented_sans_python.trim_start_matches(interim_space);
 
-            let filename = self.node.canonical_filename().map(|p| p.to_str().unwrap().to_string());
-            if let Err(mut e) = PythonEnvironment::run(
-                python_code,
-                Some(self.node.id().journal_incarnation()),
-                None,
-                filename.as_deref(),
-            ) {
-                if let Some(bce) = e.msg_mut::<BlockContextError>() {
-                    bce.context_mut().set_file(
-                        self.node.nearest_filename().map(|p| p.to_str().unwrap().to_string()),
-                    );
+                let filename =
+                    self.node.canonical_filename().map(|p| p.to_str().unwrap().to_string());
+                if let Err(mut e) = PythonEnvironment::run(
+                    python_code,
+                    Some(self.node.id().journal_incarnation()),
+                    None,
+                    filename.as_deref(),
+                ) {
+                    if let Some(bce) = e.msg_mut::<BlockContextError>() {
+                        bce.context_mut().set_file(
+                            self.node.nearest_filename().map(|p| p.to_str().unwrap().to_string()),
+                        );
+                    }
+                    parse_errors = vec![e];
                 }
-                parse_errors = vec![e];
+                self.node.set_segments(self.segments.take());
             }
-        } else {
-            match parsing::directive::directives(self.input.map_extra(|_| &self)) {
-                Ok(dirs) => self.node.set_directives(dirs),
+            _ => match parsing::directive::directives(self.input.map_extra(|_| &self)) {
+                Ok(segment_dirs) => {
+                    let segments = self.segments.take();
+                    for (segment, dirs) in segments.iter().copied().zip(segment_dirs) {
+                        segment.set_directives(dirs);
+                    }
+                    self.node.set_segments(segments);
+                }
                 Err(err) => {
                     parse_errors = vec![err];
                 }
-            }
+            },
         }
 
         if let Some(filename) = self.node.filename() {
@@ -138,7 +151,11 @@ where
         let res = match parse_errors.len() {
             0 => {
                 self.node.set_children(children);
-                self.node.set_config(self.configuration.borrow().clone());
+                self.node
+                    .segments()
+                    .last()
+                    .unwrap()
+                    .set_config(self.configuration.borrow().clone());
                 Ok(self.node)
             }
             _ => {
@@ -174,8 +191,11 @@ where
                 // Parse the child in the same thread.
                 // Note that the underlying Configuration is not cloned.
                 let child_clone = child;
+                let branched_to_segment = self.branch_to_new_segment(child);
+
                 thread::scope(move |scope| {
-                    let jfp_node = JournalFileParseNode {
+                    let jfp_node = JournalParseNode {
+                        segments: RefCell::new(vec![branched_to_segment]),
                         input: child.input(),
                         node: child,
                         configuration: Rc::clone(&self.configuration),
@@ -206,11 +226,12 @@ where
         match Self::create_child_node(self, input.clone(), path, kind) {
             Err(file) => file,
             Ok(child) => {
-                // Cloning the configuration here causes an effective fork in the configuration.
-                let child_config = Configuration::clone(&self.configuration.borrow());
+                let child_config = self.configuration.borrow().branch();
 
-                let inner_file = child;
+                let inner_node = child;
                 let allocator = self.allocator();
+                let branched_to_segment = self.branch_to_new_segment(child);
+
                 let mut t_builder = thread::Builder::new();
                 if let Some(filename) = child.nearest_filename() {
                     t_builder = t_builder.name(filename.to_str().unwrap().to_string());
@@ -218,7 +239,8 @@ where
                 let join_handle = t_builder
                     .spawn_scoped(self.parent_scope, move || {
                         thread::scope(|scope| {
-                            let jfp_node = JournalFileParseNode {
+                            let jfp_node = JournalParseNode {
+                                segments: RefCell::new(vec![branched_to_segment]),
                                 input: child.input(),
                                 node: child,
                                 configuration: Rc::new(RefCell::new(child_config)),
@@ -235,9 +257,32 @@ where
                     Ok(node) => node,
                     Err(e) => panic::resume_unwind(e),
                 }));
-                inner_file
+                inner_node
             }
         }
+    }
+
+    /// Start new segments for the branched node and for the current node, and link them together
+    /// in depth-first fashion.
+    /// Return the segment that the child node branches to.
+    fn branch_to_new_segment(&self, child: &'h JournalNode<'h>) -> &'h JournalNodeSegment<'h> {
+        self.segments
+            .borrow_mut()
+            .last_mut()
+            .unwrap()
+            .set_config(self.configuration.borrow().clone());
+        let branched_config = self.configuration.borrow().clone().branch();
+        *self.configuration.borrow_mut() = branched_config;
+
+        let branched_to_segment: &_ = self.allocator.alloc(JournalNodeSegment::new(child));
+        let continuation_segment = self.allocator.alloc(JournalNodeSegment::new(self.node));
+        continuation_segment
+            .set_next_segment(self.segments.borrow().last().unwrap().next_segment());
+        self.segments.borrow().last().unwrap().set_next_segment(Some(branched_to_segment));
+        branched_to_segment.set_next_segment(Some(continuation_segment));
+        self.segments.borrow_mut().push(continuation_segment);
+
+        branched_to_segment
     }
 
     /// Compares the `stream` to the current node's stream and its parents to see if the stream is already being/been parsed.
@@ -290,7 +335,6 @@ where
                     path,
                     kind,
                     TextBlockInput::new(loc_span, input.block(), self.allocator),
-                    vec![],
                     self.allocator,
                 ));
                 Ok(child_node)
@@ -299,7 +343,7 @@ where
     }
 }
 
-impl PartialEq for JournalFileParseNode<'_, '_, '_> {
+impl PartialEq for JournalParseNode<'_, '_, '_> {
     fn eq(&self, other: &Self) -> bool {
         self.node == other.node
     }

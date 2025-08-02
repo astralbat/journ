@@ -101,7 +101,7 @@ impl ExecCommand for BalCommand {
         let args = Arguments::get();
 
         let cmd: &BalCommand = args.cast_cmd().unwrap();
-        let config = journ.root().config();
+        let config = journ.config();
 
         // Get the value units. The unit to value in might not exist in the config,
         // and in this case, we'll just create a new object.

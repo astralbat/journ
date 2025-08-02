@@ -489,7 +489,9 @@ where
     }
 }
 
-pub fn entry_file_directives<'h, 's, 'e, 'p, I>(input: I) -> JParseResult<I, Vec<Directive<'h>>>
+pub fn entry_file_directives<'h, 's, 'e, 'p, I>(
+    input: I,
+) -> JParseResult<I, Vec<Vec<Directive<'h>>>>
 where
     I: TextInput<'h>
         + BlockInput<'h>
@@ -535,52 +537,43 @@ where
         }
     };
 
-    let mut dirs = vec![];
+    let mut segments = vec![vec![]];
+    let mut push_directive =
+        |directive: Directive<'h>, start_new_segment: bool| -> Result<(), NomErr<_>> {
+            segments.last_mut().unwrap().push(directive);
+            if start_new_segment {
+                segments.push(vec![]);
+            }
+            Ok(())
+        };
 
     let rem = match_blocks!(input,
         entry::entry_date_and_remainder => |(date_and_time, input)| {
-            Ok(dirs.push(entry(input, date_and_time)?.1))
+            push_directive(entry(input, date_and_time)?.1, false)
         },
-        util::comment => |c: I| Ok(dirs.push(Directive::new(c.block(), DirectiveKind::Comment(c.text())))),
-        param_value("account") => |input| Ok(dirs.push(account_directive(input)?.1)),
-        param_value("unit") => |input| Ok(dirs.push(unit_directive(input)?.1)),
-        param_value("branch") => |input| Ok(dirs.push(branch(JournalNodeKind::Entry)(input)?.1)),
-        param_value("include") => |input| Ok(dirs.push(include(JournalNodeKind::Entry)(input)?.1)),
-        param_value("dateformat") => |input| Ok(dirs.push(dateformat_directive(input)?.1)),
-        param_value("timeformat") => |input| Ok(dirs.push(timeformat_directive(input)?.1)),
-        param_value("timezone") => |input| Ok(dirs.push(timezone_directive(input)?.1)),
-        param_value("python") => |input| Ok(dirs.push(python_directive(input)?.1)),
-        param_value("units") => |input| Ok(dirs.push(units_directive(input)?.1)),
-        plugin_dir => |(dir, input)| Ok(dirs.push(plugin_directive(dir, input)?.1)),
+        util::comment => |c: I| push_directive(Directive::new(c.block(), DirectiveKind::Comment(c.text())), false),
+        param_value("account") => |input| push_directive(account_directive(input)?.1, false),
+        param_value("unit") => |input| push_directive(unit_directive(input)?.1, false),
+        param_value("branch") => |input| {
+            push_directive(branch(JournalNodeKind::Entry)(input)?.1, true)
+        },
+        param_value("include") => |input| {
+            push_directive(include(JournalNodeKind::Entry)(input)?.1, true)
+        },
+        param_value("dateformat") => |input| push_directive(dateformat_directive(input)?.1, false),
+        param_value("timeformat") => |input| push_directive(timeformat_directive(input)?.1, false),
+        param_value("timezone") => |input| push_directive(timezone_directive(input)?.1, false),
+        param_value("python") => |input| push_directive(python_directive(input)?.1, false),
+        param_value("units") => |input| push_directive(units_directive(input)?.1, false),
+        plugin_dir => |(dir, input)| push_directive(plugin_directive(dir, input)?.1, false),
         rest => |input: I| Err(NomErr::Error(input.into_err("Unknown directive")))
-
-        /*
-        rest => |input: I| {
-            if let Ok((_, entry)) = entry(input.clone()) {
-                Ok(dirs.push(entry))
-            } else {
-                match_parser!(input,
-                    util::comment => |c: I| Ok(dirs.push(Directive::new(c.block(), DirectiveKind::Comment(c.text())))),
-                    param_value("account") => |input| Ok(dirs.push(account_directive(input)?.1)),
-                    param_value("unit") => |input| Ok(dirs.push(unit_directive(input)?.1)),
-                    param_value("branch") => |input| Ok(dirs.push(branch(JournalNodeKind::Entry)(input)?.1)),
-                    param_value("include") => |input| Ok(dirs.push(include(JournalNodeKind::Entry)(input)?.1)),
-                    param_value("dateformat") => |input| Ok(dirs.push(dateformat_directive(input)?.1)),
-                    param_value("timeformat") => |input| Ok(dirs.push(timeformat_directive(input)?.1)),
-                    param_value("timezone") => |input| Ok(dirs.push(timezone_directive(input)?.1)),
-                    param_value("python") => |input| Ok(dirs.push(python_directive(input)?.1)),
-                    param_value("default unit") => |input| Ok(dirs.push(default_unit_directive(input)?.1)),
-                    plugin_dir => |(dir, input)| Ok(dirs.push(plugin_directive(dir, input)?.1)),
-                    rest => |input: I| Err(NomErr::Error(input.into_err("Unknown directive")))
-                )?;
-                Ok(())
-            }
-        }*/
     )?.0;
-    Ok((rem, dirs))
+    Ok((rem, segments))
 }
 
-pub fn price_file_directives<'h, 's, 'e, 'p, I>(input: I) -> JParseResult<I, Vec<Directive<'h>>>
+pub fn price_file_directives<'h, 's, 'e, 'p, I>(
+    input: I,
+) -> JParseResult<I, Vec<Vec<Directive<'h>>>>
 where
     I: TextInput<'h>
         + ConfigInput<'h>
@@ -629,10 +622,10 @@ where
         rest => |input: I| Err(NomErr::Error(input.into_err("Unknown directive")))
     )?
         .0;
-    Ok((rem, dirs))
+    Ok((rem, vec![dirs]))
 }
 
-pub fn directives<'h, 's, 'e, 'p, I>(input: I) -> JournResult<Vec<Directive<'h>>>
+pub fn directives<'h, 's, 'e, 'p, I>(input: I) -> JournResult<Vec<Vec<Directive<'h>>>>
 where
     I: TextInput<'h>
         + BlockInput<'h>

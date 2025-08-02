@@ -19,6 +19,7 @@
 #![feature(once_cell_get_mut)]
 #![feature(cow_is_borrowed)]
 #![feature(try_trait_v2)]
+#![feature(mapped_lock_guards)]
 extern crate chrono_tz;
 #[macro_use]
 extern crate rust_decimal_macros;
@@ -51,6 +52,7 @@ pub mod valued_amount;
 
 pub mod alloc;
 //pub mod apportionment;
+mod journal_node_segment;
 pub mod journal_util;
 pub mod module;
 #[cfg(test)]
