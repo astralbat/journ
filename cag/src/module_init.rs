@@ -10,26 +10,31 @@ use crate::cgt_configuration::{AssignExpenses, MatchMethod};
 use crate::cgt_configuration::{CgtConfiguration, PoolConfiguration};
 use crate::ruleset;
 use chrono_tz::Tz;
+use env_logger::DEFAULT_WRITE_STYLE_ENV;
+use journ_core::alloc::HerdAllocator;
 use journ_core::directive::{Directive, DirectiveKind};
-use journ_core::error::parsing::promote;
 use journ_core::error::parsing::IErrorMsg;
+use journ_core::error::parsing::promote;
 use journ_core::module::{Module, ModuleDirective, ModuleDirectiveInput};
+use journ_core::parsing::JParseResult;
 use journ_core::parsing::text_input::{BlockInput, ConfigInput, LocatedInput, TextInput};
 use journ_core::parsing::util::rest_line1;
 use journ_core::parsing::util::{line_value, param_value};
-use journ_core::parsing::JParseResult;
 use journ_core::parsing::{amount, entry};
 use journ_core::unit::Unit;
 use journ_core::{err, match_blocks};
 use nom::combinator::{map, rest};
 use std::str::FromStr;
+use std::sync::LazyLock;
 
 pub static MODULE_NAME: &str = "capital_gains";
+pub static DEFAULT_CGT_CONFIG: LazyLock<CgtConfiguration> =
+    LazyLock::new(|| CgtConfiguration::default());
 
 pub fn initialize() -> Module {
     let mut module = Module::new(MODULE_NAME);
     module.add_directive(Box::new(CgtDirective));
-    module.set_default_config(Box::<CgtConfiguration>::default());
+    module.set_default_config(&*DEFAULT_CGT_CONFIG);
     module
 }
 
@@ -110,11 +115,9 @@ impl ModuleDirective for CgtDirective {
             input.config().module_config(MODULE_NAME).cloned().unwrap();
         match existing.merge(&config) {
             Ok(new_config) => {
-                input.config_mut().set_module_config(MODULE_NAME, new_config.clone());
-                Ok((
-                    rem,
-                    Directive::new(input.block(), DirectiveKind::Module(Box::new(new_config))),
-                ))
+                let allocated = input.allocator().alloc(new_config);
+                input.config_mut().set_module_config(MODULE_NAME, allocated);
+                Ok((rem, Directive::new(input.block(), DirectiveKind::Module(allocated))))
             }
             Err(_e) => unreachable!("Merge infallible right now"),
         }

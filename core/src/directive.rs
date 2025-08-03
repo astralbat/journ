@@ -36,7 +36,7 @@ pub enum DirectiveKind<'h> {
     TimeFormat(&'h TimeFormat<'h>) = 9,
     TimeZone(Tz) = 10,
     //Cgt(CgtConfiguration<'h>) = 11,
-    Module(Box<dyn ModuleDirectiveObj>) = 12,
+    Module(&'h dyn ModuleDirectiveObj) = 12,
     Comment(&'h str) = 13,
 }
 

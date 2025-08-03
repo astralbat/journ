@@ -35,7 +35,7 @@ pub fn date<'h, I>(input: I) -> IParseResult<'h, I, JDate<'h>>
 where
     I: TextInput<'h> + ConfigInput<'h>,
 {
-    let df = input.config().as_herd_ref().date_format();
+    let df = input.config().date_format();
     JDate::parse(df)(input)
 }
 
@@ -43,7 +43,7 @@ pub fn time<'h, I>(input: I) -> IParseResult<'h, I, JTime<'h>>
 where
     I: TextInput<'h> + ConfigInput<'h>,
 {
-    let tf = input.config().as_herd_ref().time_format();
+    let tf = input.config().time_format();
     JTime::parse(tf)(input)
 }
 
@@ -53,8 +53,8 @@ where
     I: TextInput<'h> + ConfigInput<'h>,
 {
     move |input: I| {
-        let df = input.config().as_herd_ref().date_format();
-        let tf = input.config().as_herd_ref().time_format();
+        let df = input.config().date_format();
+        let tf = input.config().time_format();
         JDateTime::parse(df, tf, tz)(input)
     }
 }
@@ -63,7 +63,7 @@ pub fn date_and_time<'h, I>(input: I) -> IParseResult<'h, I, DateAndTime<'h>>
 where
     I: TextInput<'h> + ConfigInput<'h>,
 {
-    let df = input.config().as_herd_ref().date_format();
+    let df = input.config().date_format();
     let tz = input.config().timezone();
 
     // Date from is required

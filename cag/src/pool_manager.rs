@@ -62,24 +62,27 @@ impl<'h> PoolManager<'h> {
     ///
     /// # Panics
     /// If the pool does not exist and `pool_uoa` is `None`.
-    fn get_or_create_pool(&mut self, name: &str, pool_uoa: &'h Unit<'h>) -> &mut Pool<'h> {
-        let cgt_config =
-            self.config.as_ref().unwrap().module_config::<CgtConfiguration>(MODULE_NAME).unwrap();
+    fn get_or_create_pool<'a>(
+        config: &'a Configuration<'h>,
+        pools: &'a mut Vec<Pool<'h>, &'h HerdAllocator<'h>>,
+        name: &'h str,
+        pool_uoa: &'h Unit<'h>,
+    ) -> &'a mut Pool<'h> {
+        let cgt_config = config.module_config::<CgtConfiguration>(MODULE_NAME).unwrap();
         let pool_config = cgt_config.find_pool(name).unwrap();
-        let pos = self.pools.iter_mut().position(|p| p.id() == pool_config.id().unwrap());
+        let pos = pools.iter_mut().position(|p| p.id() == pool_config.id().unwrap());
         match pos {
-            Some(pos) => &mut self.pools[pos],
+            Some(pos) => &mut pools[pos],
             None => {
-                let allocated_name =
-                    self.config.as_ref().unwrap().allocator().alloc(name.to_string());
+                let allocated_name = config.allocator().alloc(name.to_string());
                 let pool = Pool::new(
                     pool_config.id().unwrap(),
                     allocated_name.as_str(),
                     pool_uoa,
-                    self.config.as_ref().unwrap().allocator(),
+                    config.allocator(),
                 );
-                self.pools.push(pool);
-                self.pools.last_mut().unwrap()
+                pools.push(pool);
+                pools.last_mut().unwrap()
             }
         }
     }
@@ -231,7 +234,12 @@ impl<'h> PoolManager<'h> {
             match group.advance_rule() {
                 Some(Rule::Action(action)) => match action {
                     ActionRule::Match(pool_name) => {
-                        let pool = self.get_or_create_pool(pool_name, self.default_unit_of_account);
+                        let pool = PoolManager::get_or_create_pool(
+                            self.config.as_ref().unwrap(),
+                            &mut self.pools,
+                            pool_name,
+                            self.default_unit_of_account,
+                        );
                         match pool.try_match(group, event_datetime)? {
                             Ok((match_events, remainder)) => {
                                 events.extend(match_events);
@@ -250,7 +258,12 @@ impl<'h> PoolManager<'h> {
                             continue;
                         }
 
-                        let pool = self.get_or_create_pool(pool_name, self.default_unit_of_account);
+                        let pool = PoolManager::get_or_create_pool(
+                            self.config.as_ref().unwrap(),
+                            &mut self.pools,
+                            pool_name,
+                            self.default_unit_of_account,
+                        );
                         let pool_id = pool.id();
                         let deal_id = group.id();
 
@@ -344,7 +357,12 @@ impl<'h> PoolManager<'h> {
             if self.cgt_config().unwrap().find_pool(pool).is_none() {
                 return Err(err!("Pool not found: '{}'", pool));
             }
-            let pool = self.get_or_create_pool(pool, adj.unit());
+            let pool = PoolManager::get_or_create_pool(
+                self.config.as_ref().unwrap(),
+                &mut self.pools,
+                pool,
+                adj.unit(),
+            );
             if !pool.is_empty(adj.unit()) || !adj.is_scalar() {
                 events.push(pool.push_adjustment(adj.clone())?);
             }
@@ -368,7 +386,7 @@ impl<'h> PoolManager<'h> {
         // Detect configuration change
         if self.config.as_ref() != Some(new_config) {
             self.config = Some(new_config.clone());
-            let new_config = self.config.as_ref().unwrap().as_herd_ref();
+            let new_config = self.config.as_ref().unwrap();
             let new_cgt_config = new_config.module_config::<CgtConfiguration>(MODULE_NAME).unwrap();
             let default_uoa = new_cgt_config
                 .unit_of_account_change()
@@ -383,7 +401,12 @@ impl<'h> PoolManager<'h> {
                     .map(|uoac| new_config.get_unit(uoac.unit_of_account()).unwrap())
                     .unwrap_or(default_uoa);
 
-                let pool = self.get_or_create_pool(new_pool_config.name(), pool_uoa);
+                let pool = PoolManager::get_or_create_pool(
+                    self.config.as_ref().unwrap(),
+                    &mut self.pools,
+                    new_pool_config.name(),
+                    pool_uoa,
+                );
                 pool.set_methods(new_pool_config.methods());
                 if let Some(new_name) = new_pool_config.new_name() {
                     pool.set_name(new_name);

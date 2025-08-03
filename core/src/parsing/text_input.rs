@@ -165,12 +165,12 @@ where
         self.location_line()
     }
 
-    fn location_offset(&self) -> usize {
-        self.location_offset()
-    }
-
     fn column(&self) -> u32 {
         self.naive_get_utf8_column() as u32
+    }
+
+    fn location_offset(&self) -> usize {
+        self.location_offset()
     }
 
     fn into_located_span<X2>(self, extra: X2) -> LocatedSpan<&'h str, X2> {
@@ -183,6 +183,8 @@ pub trait BlockInput<'h> {
 
     /// Changes the current block of the input.
     fn with_child(self, block: TextBlock<'h>) -> Self;
+
+    fn allocator(&self) -> &'h HerdAllocator<'h>;
 }
 
 impl<'h, 'p, 's, 'e> TextInput<'h> for LocatedSpan<&'h str, &'p JournalParseNode<'h, 's, 'e>>
@@ -271,6 +273,10 @@ impl<'h, X> TextBlockInput<'h, X> {
 
     pub fn block(&self) -> &'h TextBlock<'h> {
         self.block
+    }
+
+    pub fn allocator(&self) -> &'h HerdAllocator<'h> {
+        self.allocator
     }
 
     pub fn map_extra<X2, F: FnOnce(X) -> X2>(self, f: F) -> TextBlockInput<'h, X2> {
@@ -598,6 +604,10 @@ impl<'h, X> BlockInput<'h> for TextBlockInput<'h, X> {
         };
 
         Self { block: allocated, inner, allocator: self.allocator }
+    }
+
+    fn allocator(&self) -> &'h HerdAllocator<'h> {
+        self.allocator
     }
 }
 

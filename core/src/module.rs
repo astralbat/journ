@@ -16,7 +16,7 @@ use std::sync::Mutex;
 pub struct Module {
     name: &'static str,
     directives: Vec<Box<dyn ModuleDirective>>,
-    default_config: Option<Box<dyn ModuleConfiguration>>,
+    default_config: Option<&'static dyn ModuleConfiguration>,
 }
 
 pub static MODULES: Mutex<Vec<Module>> = Mutex::new(vec![]);
@@ -38,11 +38,11 @@ impl Module {
         self.directives.iter().map(|d| d.as_ref())
     }
 
-    pub fn default_config(&self) -> Option<Box<dyn ModuleConfiguration>> {
-        self.default_config.as_ref().map(|c| c.clone_box())
+    pub fn default_config(&self) -> Option<&'static dyn ModuleConfiguration> {
+        self.default_config
     }
 
-    pub fn set_default_config(&mut self, config: Box<dyn ModuleConfiguration>) {
+    pub fn set_default_config(&mut self, config: &'static dyn ModuleConfiguration) {
         self.default_config = Some(config);
     }
 

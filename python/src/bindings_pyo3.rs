@@ -129,7 +129,7 @@ impl Journal {
         let filename = &**ALLOCATOR.alloc(PathBuf::from(filename));
 
         if MODULES.lock().unwrap().is_empty() {
-            MODULES.lock().unwrap().push(journ_cag::module_init::initialize());
+            MODULES.lock().unwrap().push(journ_cag::module_init::initialize(*ALLOCATOR));
         }
         /*
         let rust_journal = TextBlock::from_file(filename, &ALLOCATOR, None).and_then(|block| {

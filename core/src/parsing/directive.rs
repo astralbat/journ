@@ -77,14 +77,8 @@ where
 {
     let (rem, df) = DateFormat::parse_format(input.clone())?;
     let mut config = input.config_mut();
-    config.set_date_format(df);
-    Ok((
-        rem,
-        Directive::new(
-            input.block(),
-            DirectiveKind::DateFormat(config.as_herd_ref().date_format()),
-        ),
-    ))
+    config.set_date_format(input.allocator().alloc(df));
+    Ok((rem, Directive::new(input.block(), DirectiveKind::DateFormat(config.date_format()))))
 }
 
 fn timeformat_directive<'h, I>(input: I) -> JParseResult<I, Directive<'h>>
@@ -93,14 +87,8 @@ where
 {
     let (rem, tf) = TimeFormat::parse_format(input.clone())?;
     let mut config = input.config_mut();
-    config.set_time_format(tf);
-    Ok((
-        rem,
-        Directive::new(
-            input.block(),
-            DirectiveKind::TimeFormat(config.as_herd_ref().time_format()),
-        ),
-    ))
+    config.set_time_format(input.allocator().alloc(tf));
+    Ok((rem, Directive::new(input.block(), DirectiveKind::TimeFormat(config.time_format()))))
 }
 
 pub const E_BAD_TIMEZONE: &str = "Bad timezone";

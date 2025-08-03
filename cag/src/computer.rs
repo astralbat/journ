@@ -90,9 +90,7 @@ impl CapitalGainsComputer {
                     break 'outer;
                 }
             }
-            if let Some(config) =
-                entry.config().as_herd_ref().module_config::<CgtConfiguration>(MODULE_NAME)
-            {
+            if let Some(config) = entry.config().module_config::<CgtConfiguration>(MODULE_NAME) {
                 if let Some(uoac) = config.unit_of_account_change() {
                     default_unit_of_account =
                         Some(entry.config().get_unit(uoac.unit_of_account()).unwrap());

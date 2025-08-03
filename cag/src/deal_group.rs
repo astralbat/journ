@@ -53,12 +53,8 @@ pub struct DealGroup<'h> {
 impl<'h> DealGroup<'h> {
     /// Creates a new group with the given initial deal and criteria.
     pub fn new(criteria: DealGroupCriteria, deal: Deal<'h>) -> Self {
-        let cgt_config = deal
-            .entry()
-            .config()
-            .as_herd_ref()
-            .module_config::<CgtConfiguration>(MODULE_NAME)
-            .unwrap();
+        let cgt_config =
+            deal.entry().config().module_config::<CgtConfiguration>(MODULE_NAME).unwrap();
         let next_rule = cgt_config.ruleset();
         let id = deal.id();
         let holding = AverageDealHolding::from(&deal);
@@ -423,8 +419,8 @@ impl<'h> DealGroup<'h> {
                 config.clone(),
                 JDateTime::from_datetime(
                     value_date,
-                    Some(config.as_herd_ref().date_format()),
-                    Some(config.as_herd_ref().time_format()),
+                    Some(config.date_format()),
+                    Some(config.time_format()),
                 ),
             )
             .value(base_amount, quote_unit)?

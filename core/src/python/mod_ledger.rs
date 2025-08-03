@@ -336,8 +336,8 @@ impl PyPrice {
         let chrono_date: DateTimeWrapper = self.datetime;
         let date = JDateTime::from_datetime(
             chrono_date.0,
-            Some(config.as_herd_ref().date_format()),
-            Some(config.as_herd_ref().time_format()),
+            Some(config.date_format()),
+            Some(config.time_format()),
         );
 
         /*

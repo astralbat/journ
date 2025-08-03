@@ -147,8 +147,8 @@ impl<'h> PriceDatabase<'h> {
             node.append_directives(|len, _leading_sp| {
                 p_iter.next().map(|p| (**p).clone()).map(|mut p| {
                     let config = node.segments().last().unwrap().config();
-                    p.set_date_format(config.as_herd_ref().date_format());
-                    p.set_time_format(config.as_herd_ref().time_format());
+                    p.set_date_format(config.date_format());
+                    p.set_time_format(config.time_format());
                     p.set_timezone(config.timezone());
 
                     let price_string = if len == 0 { p.to_string() } else { format!("\n{}", p) };

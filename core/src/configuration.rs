@@ -21,6 +21,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::fmt::{Debug, Formatter};
+use std::ops::Deref;
 use std::string::ToString;
 use std::sync::{Arc, MutexGuard, OnceLock};
 
@@ -52,15 +53,15 @@ struct BaseConfiguration<'h> {
     parent: Option<Arc<BaseConfiguration<'h>>>,
     args: &'h Arguments,
     version: ConfigurationVersion<'h>,
-    date_format: DateFormat<'h>,
-    time_format: TimeFormat<'h>,
+    date_format: &'h DateFormat<'h>,
+    time_format: &'h TimeFormat<'h>,
     timezone: Tz,
     number_format: NumberFormat,
     default_unit: &'h Unit<'h>,
     units: HashMap<String, &'h Unit<'h>>,
     accounts: HashMap<String, Arc<Account<'h>>>,
     /// Maps module names to their configuration.
-    module_config: HashMap<&'static str, Box<dyn ModuleConfiguration>>,
+    module_config: HashMap<&'static str, &'h dyn ModuleConfiguration>,
 }
 
 impl<'h> BaseConfiguration<'h> {
@@ -74,8 +75,8 @@ impl<'h> BaseConfiguration<'h> {
             parent,
             args,
             number_format: Default::default(),
-            date_format: DEFAULT_DATE_FORMAT.clone(),
-            time_format: DEFAULT_TIME_FORMAT.clone(),
+            date_format: DEFAULT_DATE_FORMAT.deref(),
+            time_format: DEFAULT_TIME_FORMAT.deref(),
             timezone: Tz::UTC,
             default_unit: allocator.alloc(Unit::none()),
             units: Default::default(),
@@ -96,23 +97,19 @@ impl<'h> BaseConfiguration<'h> {
     /// _and_ there are other references to it (`Configuration::clone`).
     fn get_mut(self: &mut Arc<Self>) -> &mut Self {
         if Arc::strong_count(self) > 1 {
-            let mut new_base = Self {
-                parent: self.parent.clone(),
+            let new_base = Self {
+                parent: Some(self.clone()),
                 args: self.args,
                 version: ConfigurationVersion::next(self.version),
-                date_format: self.date_format.clone(),
-                time_format: self.time_format.clone(),
+                date_format: self.date_format,
+                time_format: self.time_format,
                 timezone: self.timezone,
                 number_format: self.number_format,
                 default_unit: self.default_unit,
-                units: self.units.clone(),
-                accounts: self.accounts.clone(),
+                units: HashMap::new(),
+                accounts: HashMap::new(),
                 module_config: HashMap::new(),
             };
-            for (k, v) in self.module_config.iter() {
-                new_base.module_config.insert(k, v.clone_box());
-            }
-
             *self = Arc::new(new_base);
             Arc::get_mut(self).unwrap()
         } else {
@@ -137,7 +134,7 @@ impl<'h> BaseConfiguration<'h> {
     pub fn get_module_config<T: ModuleConfiguration>(
         &self,
         module_name: &'static str,
-    ) -> Option<&T> {
+    ) -> Option<&'h T> {
         self.module_config.get(module_name).map(|c| c.as_any().downcast_ref().unwrap()).or_else(
             || {
                 // If the module configuration is not found, check the parent configuration if it exists.
@@ -163,7 +160,7 @@ impl PartialEq for BaseConfiguration<'_> {
         for (k, v) in self.module_config.iter() {
             match other.module_config.get(k) {
                 Some(other_v) => {
-                    if (v.as_ref() as &dyn ModuleConfigurationEq).eq(&**other_v) {
+                    if (*v as &dyn ModuleConfigurationEq).eq(&**other_v) {
                         return false;
                     }
                 }
@@ -212,7 +209,6 @@ pub enum MergeCgtError {
 pub struct Configuration<'h> {
     herd_allocator: &'h HerdAllocator<'h>,
     base_config: Arc<BaseConfiguration<'h>>,
-    herd_ref: OnceLock<&'h Configuration<'h>>,
 }
 
 impl<'h> Configuration<'h> {
@@ -230,7 +226,6 @@ impl<'h> Configuration<'h> {
         Self {
             base_config: Arc::new(BaseConfiguration::new(None, args, allocator, node_id)),
             herd_allocator: allocator,
-            herd_ref: OnceLock::new(),
         }
     }
 
@@ -242,8 +237,8 @@ impl<'h> Configuration<'h> {
                 parent: Some(self.base_config.clone()),
                 args: self.base_config.args,
                 version: self.base_config.version.next(),
-                date_format: self.base_config.date_format.clone(),
-                time_format: self.base_config.time_format.clone(),
+                date_format: self.base_config.date_format,
+                time_format: self.base_config.time_format,
                 timezone: self.base_config.timezone,
                 number_format: self.base_config.number_format,
                 default_unit: self.base_config.default_unit,
@@ -252,20 +247,6 @@ impl<'h> Configuration<'h> {
                 module_config: HashMap::new(),
             }),
             herd_allocator: self.herd_allocator,
-            herd_ref: OnceLock::new(),
-        }
-    }
-
-    /// Gets this configuration as a herd reference. This can be useful when fetching some
-    /// configuration item to ensure its lifetime is bounded to that of the herd.
-    pub fn as_herd_ref(&self) -> &'h Configuration<'h> {
-        match self.herd_ref.get() {
-            Some(herd_ref) => herd_ref,
-            None => {
-                let herd_ref = self.herd_allocator.alloc(self.clone());
-                self.herd_ref.set(herd_ref).unwrap();
-                herd_ref
-            }
         }
     }
 
@@ -278,25 +259,25 @@ impl<'h> Configuration<'h> {
     }
 
     /// Gets the date format in use.
-    pub fn date_format(&self) -> &DateFormat<'h> {
+    pub fn date_format(&self) -> &'h DateFormat<'h> {
         &self.base_config.date_format
     }
 
     /// Sets the date format for reading subsequent entries. The date format can be overridden
     /// multiple times to accommodate different entry styles.
-    pub fn set_date_format(&mut self, df: DateFormat<'h>) {
+    pub fn set_date_format(&mut self, df: &'h DateFormat<'h>) {
         let base_config = self.get_mut();
         base_config.date_format = df;
     }
 
     /// Gets the time format in use.
-    pub fn time_format(&self) -> &TimeFormat<'h> {
+    pub fn time_format(&self) -> &'h TimeFormat<'h> {
         &self.base_config.time_format
     }
 
     /// Sets the time format for reading subsequent entries. The time format can be overridden
     /// multiple times to accommodate different entry styles.
-    pub fn set_time_format(&mut self, tf: TimeFormat<'h>) {
+    pub fn set_time_format(&mut self, tf: &'h TimeFormat<'h>) {
         let base_config = self.get_mut();
         base_config.time_format = tf;
     }
@@ -422,8 +403,8 @@ impl<'h> Configuration<'h> {
     /// Parent and version are left unchanged.
     pub fn merge_config(&mut self, config: &Configuration<'h>) {
         let base_config = self.get_mut();
-        base_config.date_format = config.date_format().clone();
-        base_config.time_format = config.time_format().clone();
+        base_config.date_format = config.date_format();
+        base_config.time_format = config.time_format();
         base_config.timezone = config.timezone();
         base_config.number_format = config.number_format();
         base_config.default_unit = config.default_unit();
@@ -435,7 +416,7 @@ impl<'h> Configuration<'h> {
             base_config.accounts.insert(k.clone(), Arc::clone(v));
         }
         for (k, v) in config.base_config.module_config.iter() {
-            base_config.module_config.insert(k, v.clone_box());
+            base_config.module_config.insert(k, *v);
         }
     }
 
@@ -517,17 +498,20 @@ impl<'h> Configuration<'h> {
         self.base_config.get_account(full_name)
     }
 
-    pub fn module_config<T: ModuleConfiguration>(&self, module_name: &'static str) -> Option<&T> {
+    pub fn module_config<T: ModuleConfiguration>(
+        &self,
+        module_name: &'static str,
+    ) -> Option<&'h T> {
         self.base_config.get_module_config(module_name)
     }
 
     pub fn set_module_config<T: ModuleConfiguration>(
         &mut self,
         module_name: &'static str,
-        config: T,
+        config: &'h T,
     ) {
         let bc = self.get_mut();
-        bc.module_config.insert(module_name, Box::new(config));
+        bc.module_config.insert(module_name, config);
     }
 
     /*
@@ -577,8 +561,6 @@ impl<'h> Configuration<'h> {
     }
 
     fn get_mut(&mut self) -> &mut BaseConfiguration<'h> {
-        // Invalidate the herd reference.
-        self.herd_ref = OnceLock::new();
         self.base_config.get_mut()
     }
 }

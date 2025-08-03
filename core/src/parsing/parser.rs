@@ -266,13 +266,11 @@ where
     /// in depth-first fashion.
     /// Return the segment that the child node branches to.
     fn branch_to_new_segment(&self, child: &'h JournalNode<'h>) -> &'h JournalNodeSegment<'h> {
-        self.segments
-            .borrow_mut()
-            .last_mut()
-            .unwrap()
-            .set_config(self.configuration.borrow().clone());
-        let branched_config = self.configuration.borrow().clone().branch();
-        *self.configuration.borrow_mut() = branched_config;
+        let branched_config = self.configuration.borrow().branch();
+        // Set self.configuration to be a branched version, ready for parsing a new segment.
+        // The old configuration can then be set on the current segment in the process of finalising it.
+        let old_config = self.configuration.replace(branched_config);
+        self.segments.borrow_mut().last_mut().unwrap().set_config(old_config);
 
         let branched_to_segment: &_ = self.allocator.alloc(JournalNodeSegment::new(child));
         let continuation_segment = self.allocator.alloc(JournalNodeSegment::new(self.node));

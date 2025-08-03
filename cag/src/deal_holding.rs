@@ -961,8 +961,8 @@ impl<'h> AverageDealHolding<'h> {
                     config.clone(),
                     JDateTime::from_datetime(
                         date,
-                        Some(config.as_herd_ref().date_format()),
-                        Some(config.as_herd_ref().time_format()),
+                        Some(config.date_format()),
+                        Some(config.time_format()),
                     ),
                 )
                 .value(self.valued_amount.amount(), uoa)?
