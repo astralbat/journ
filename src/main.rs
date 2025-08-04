@@ -40,12 +40,12 @@ use journ_core::module::MODULES;
 use journ_core::parsing::text_block::TextBlock;
 use journ_core::python::environment::PythonEnvironment;
 use journ_core::{err, parsing};
+use std::env;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::exit;
 use std::sync::LazyLock;
 use std::time::SystemTime;
-use std::{env, mem};
 use sysinfo::Pid;
 
 static START: LazyLock<SystemTime> = LazyLock::new(SystemTime::now);
@@ -146,7 +146,7 @@ pub trait ExecCommand: Command {
 fn main() {
     use num_format::{SystemLocale, ToFormattedString};
 
-    /// Safe because there are no other threads.
+    // Safe because there are no other threads.
     unsafe {
         env::set_var("RUST_BACKTRACE", "full");
     }

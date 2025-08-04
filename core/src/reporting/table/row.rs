@@ -9,9 +9,9 @@ use crate::reporting::table::cell::sequence::CellSequence;
 use crate::reporting::table::cell::{Cell, CellNodeKind};
 use crate::reporting::term_style::Style;
 use std::cell::{Ref, RefCell, RefMut};
+use std::fmt;
 use std::iter::FromIterator;
 use std::rc::Rc;
-use std::{fmt, io};
 
 /// A logical table row containing a number of columns, each having a number of lines.
 pub struct Row<'cell> {

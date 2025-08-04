@@ -10,8 +10,6 @@ use crate::cgt_configuration::{AssignExpenses, MatchMethod};
 use crate::cgt_configuration::{CgtConfiguration, PoolConfiguration};
 use crate::ruleset;
 use chrono_tz::Tz;
-use env_logger::DEFAULT_WRITE_STYLE_ENV;
-use journ_core::alloc::HerdAllocator;
 use journ_core::directive::{Directive, DirectiveKind};
 use journ_core::error::parsing::IErrorMsg;
 use journ_core::error::parsing::promote;
@@ -115,9 +113,9 @@ impl ModuleDirective for CgtDirective {
             input.config().module_config(MODULE_NAME).cloned().unwrap();
         match existing.merge(&config) {
             Ok(new_config) => {
-                let allocated = input.allocator().alloc(new_config);
+                let allocated = &*input.allocator().alloc(new_config);
                 input.config_mut().set_module_config(MODULE_NAME, allocated);
-                Ok((rem, Directive::new(input.block(), DirectiveKind::Module(allocated))))
+                Ok((rem, Directive::new(Some(input.block()), DirectiveKind::Module(allocated))))
             }
             Err(_e) => unreachable!("Merge infallible right now"),
         }

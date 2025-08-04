@@ -10,6 +10,7 @@ use crate::arguments::{Arguments, CsvCommand, RegCommand};
 use crate::configuration::Configuration;
 use crate::configuration::Filter;
 use crate::directive::DirectiveKind;
+use crate::err;
 use crate::error::{BlockContext, BlockContextError, JournErrors, JournResult};
 use crate::ext::StrExt;
 use crate::journal_entry::{EntryId, JournalEntry};
@@ -22,16 +23,13 @@ use crate::postings_aggregation::{AggregatedPosting, PostingsAggregation};
 use crate::python::mod_ledger::PythonLedgerModule;
 use crate::reporting::balance::{AccountBalances, Balance};
 use crate::unit::NumberFormat;
-use crate::valuer::ValueResult;
-use crate::{err, valuer};
 use ansi_term::Colour::{Blue, Red};
 use ansi_term::Style;
 use chrono::DateTime;
 use chrono_tz::Tz;
 use nom_locate::LocatedSpan;
 use normalize_path::NormalizePath;
-use std::borrow::Cow;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::ops::RangeBounds;
 use std::path::Path;
@@ -39,7 +37,8 @@ use std::{io, thread};
 
 pub struct Journal<'h> {
     root: &'h JournalNode<'h>,
-    entries: BTreeMap<u64, (&'h TextBlock<'h>, &'h JournalEntry<'h>), &'h HerdAllocator<'h>>,
+    entries:
+        BTreeMap<u64, (Option<&'h TextBlock<'h>>, &'h JournalEntry<'h>), &'h HerdAllocator<'h>>,
     combined_config: &'h Configuration<'h>,
 }
 
@@ -91,13 +90,13 @@ impl<'h> Journal<'h> {
         // without a race condition.
         let mut entries: BTreeMap<
             u64,
-            (&'h TextBlock<'h>, &'h JournalEntry<'h>),
+            (Option<&'h TextBlock<'h>>, &'h JournalEntry<'h>),
             &'h HerdAllocator<'h>,
         > = BTreeMap::new_in(allocator);
         for dir in root.all_directives_iter() {
             match dir.kind() {
                 DirectiveKind::Entry(e) => {
-                    entries.insert(e.date_id(), (dir.raw(), e));
+                    entries.insert(e.date_id(), (dir.parsed(), e));
                 }
                 DirectiveKind::Unit(unit) => {
                     if let Some(db) = unit.prices() {
@@ -157,7 +156,11 @@ impl<'h> Journal<'h> {
                             asserted_balance,
                             account_bal
                         );
-                        errs.push(err!(err; "{}", raw_and_entry.0.location().unwrap()));
+                        if let Some(raw) = raw_and_entry.0 {
+                            errs.push(err!("{}", raw.location().unwrap()).with_source(err));
+                        } else {
+                            errs.push(err);
+                        }
                     }
                 }
             }
@@ -221,9 +224,9 @@ impl<'h> Journal<'h> {
     ) -> JournResult<&'h JournalEntry<'h>> {
         entry.check()?;
 
-        let pd = self.node(index).append_entry(entry);
-        self.add_entries(&[pd])?;
-        Ok(pd.1)
+        let entry = self.node(index).append_entry(entry);
+        self.add_entries(&[entry])?;
+        Ok(entry)
     }
 
     pub fn insert_entry(
@@ -234,9 +237,9 @@ impl<'h> Journal<'h> {
         entry.check()?;
 
         // Set the date Id before inserting as it's used for comparing.
-        let pd = self.node(index).insert_entry(entry);
-        self.add_entries(&[pd])?;
-        Ok(pd.1)
+        let entry = self.node(index).insert_entry(entry);
+        self.add_entries(&[entry])?;
+        Ok(entry)
     }
 
     /// Replaces entries in the journal. The entries are all checked before being replaced but should
@@ -249,7 +252,7 @@ impl<'h> Journal<'h> {
         &mut self,
         mut entries: Vec<JournalEntry<'h>>,
         allocator: &'h HerdAllocator<'h>,
-    ) -> JournResult<Vec<(&'h TextBlock<'h>, &'h JournalEntry<'h>)>> {
+    ) -> JournResult<Vec<&'h JournalEntry<'h>>> {
         for entry in entries.iter_mut() {
             entry.check().map_err(|e| {
                 err!(e; BlockContextError::new(BlockContext::from(&TextBlock::from(entry.to_string().as_str())), "Entry check failed".to_string()))
@@ -273,12 +276,9 @@ impl<'h> Journal<'h> {
 
     /// Adds entries to the `entries` map and checks the balance assertions. If the balance assertions
     /// check fails, all entries are removed to restore the state as it was before the call.
-    fn add_entries(
-        &mut self,
-        entries: &[(&'h TextBlock<'h>, &'h JournalEntry<'h>)],
-    ) -> JournResult<()> {
-        for (text_block, entry) in entries.iter() {
-            self.entries.insert(entry.date_id(), (text_block, entry));
+    fn add_entries(&mut self, entries: &[&'h JournalEntry<'h>]) -> JournResult<()> {
+        for entry in entries.iter() {
+            self.entries.insert(entry.date_id(), (None, entry));
         }
 
         // Perform this check after the entry has been inserted into the file. If the result is erroneous,
@@ -286,7 +286,7 @@ impl<'h> Journal<'h> {
         let r = self.check_balance_assertions();
 
         if let Err(e) = r {
-            for (_, entry) in entries.iter() {
+            for entry in entries.iter() {
                 let date_id = entry.date_id();
                 self.entries.remove(&date_id);
             }

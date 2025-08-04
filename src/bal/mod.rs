@@ -7,10 +7,8 @@
  */
 mod bal_command;
 
+use crate::IntoExecCommand;
 use crate::bal::bal_command::BalCommand;
-use crate::{ExecCommand, IntoExecCommand};
-use clap::ValueEnum;
-use journ_core::configuration::Filter;
 use journ_core::error::JournResult;
 use journ_core::journal::Journal;
 use std::fmt::Display;
@@ -56,6 +54,15 @@ pub struct BalArguments {
     account_filter: Vec<String>,
     #[arg(short = 'u', long = "unit", value_name = "UNIT", help = "Filter by unit expression")]
     unit_filter: Vec<String>,
+    #[arg(
+        short = 'd',
+        long = "description",
+        value_name = "DESCRIPTION",
+        help = "Filter by description"
+    )]
+    description_filter: Vec<String>,
+    #[arg(short = 'f', long = "file", value_name = "FILE", help = "Filter by file")]
+    file_filter: Vec<String>,
     #[arg(long = "csv", help = "write the output in CSV format")]
     write_csv: bool,
     #[arg(
@@ -79,6 +86,8 @@ impl IntoExecCommand for BalArguments {
         let mut bal_cmd = BalCommand::default();
         bal_cmd.set_account_filter(self.account_filter);
         bal_cmd.set_unit_filter(self.unit_filter);
+        bal_cmd.set_description_filter(self.description_filter);
+        bal_cmd.set_file_filter(self.file_filter);
         bal_cmd.set_write_csv(self.write_csv);
         bal_cmd.set_columns(self.columns);
         bal_cmd.set_write_file(self.write_file);

@@ -12,9 +12,9 @@ use crate::reporting::table::cell::sequence::CellSequence;
 use crate::reporting::term_style::{Colour, Style};
 use std::borrow::Cow;
 use std::cell::RefCell;
+use std::fmt;
 use std::iter::FromIterator;
 use std::rc::Rc;
-use std::{fmt, io};
 
 #[derive(Clone)]
 pub enum CellNodeKind<'cell> {

@@ -66,7 +66,7 @@ where
         Account::parent_str(full_name.text()).map(|s| config_mut.get_or_create_account(&s));
     let acc = Arc::new(Account::new(full_name.text().to_string(), parent, metadata));
     let merged = config_mut.merge_account(acc);
-    Ok((rem, Directive::new(input.block(), DirectiveKind::Account(merged))))
+    Ok((rem, Directive::new(Some(input.block()), DirectiveKind::Account(merged))))
 }
 
 pub const E_INVALID_DATE_FORMAT: &str = "Invalid date format";
@@ -78,7 +78,7 @@ where
     let (rem, df) = DateFormat::parse_format(input.clone())?;
     let mut config = input.config_mut();
     config.set_date_format(input.allocator().alloc(df));
-    Ok((rem, Directive::new(input.block(), DirectiveKind::DateFormat(config.date_format()))))
+    Ok((rem, Directive::new(Some(input.block()), DirectiveKind::DateFormat(config.date_format()))))
 }
 
 fn timeformat_directive<'h, I>(input: I) -> JParseResult<I, Directive<'h>>
@@ -88,7 +88,7 @@ where
     let (rem, tf) = TimeFormat::parse_format(input.clone())?;
     let mut config = input.config_mut();
     config.set_time_format(input.allocator().alloc(tf));
-    Ok((rem, Directive::new(input.block(), DirectiveKind::TimeFormat(config.time_format()))))
+    Ok((rem, Directive::new(Some(input.block()), DirectiveKind::TimeFormat(config.time_format()))))
 }
 
 pub const E_BAD_TIMEZONE: &str = "Bad timezone";
@@ -101,7 +101,7 @@ where
     let tz = Tz::from_str(input.text())
         .map_err(|_| NomErr::Failure(input.clone().into_err(E_BAD_TIMEZONE)))?;
     input.config_mut().set_time_zone(tz);
-    Ok((rem, Directive::new(input.block(), DirectiveKind::TimeZone(tz))))
+    Ok((rem, Directive::new(Some(input.block()), DirectiveKind::TimeZone(tz))))
 }
 
 fn read_unit<'h, 's, 'e, 'p, 'a, I>(
@@ -222,7 +222,7 @@ where
         units.push(r.1);
     }*/
 
-    Ok((rem, Directive::new(input.block(), DirectiveKind::Unit(primary))))
+    Ok((rem, Directive::new(Some(input.block()), DirectiveKind::Unit(primary))))
 }
 
 fn units_directive<'h, 's, 'e, 'p, I>(input: I) -> JParseResult<I, Directive<'h>>
@@ -266,7 +266,7 @@ where
     let def_unit = input.config_mut().merge_default_unit(&def_unit, input.parse_node().allocator());
     units.set_default_unit(Some(def_unit));
 
-    Ok((rem, Directive::new(input.block(), DirectiveKind::Units(units))))
+    Ok((rem, Directive::new(Some(input.block()), DirectiveKind::Units(units))))
 }
 
 fn python_directive<'h, 's, 'e, 'p, I>(input: I) -> JParseResult<I, Directive<'h>>
@@ -283,7 +283,7 @@ where
     Ok((
         rem,
         Directive::new(
-            orig_block,
+            Some(orig_block),
             DirectiveKind::Python(
                 input
                     .parse_node()
@@ -348,7 +348,7 @@ where
         .1;
 
     let price = Price::new(datetime, base_unit, price, sources);
-    Ok((dir_rem, Directive::new(input.block(), DirectiveKind::Price(Arc::new(price)))))
+    Ok((dir_rem, Directive::new(Some(input.block()), DirectiveKind::Price(Arc::new(price)))))
 }
 
 fn entry<'h, 's, 'e, 'p, I>(
@@ -369,7 +369,7 @@ where
     Ok((
         rem,
         Directive::new(
-            input.block(),
+            Some(input.block()),
             DirectiveKind::Entry(input.parse_node().allocator().alloc(entry)),
         ),
     ))
@@ -444,7 +444,7 @@ where
         Ok((
             rem,
             Directive::new(
-                orig_block,
+                Some(orig_block),
                 DirectiveKind::Branch(input.parse_node().branch_kind(input, filename, kind)),
             ),
         ))
@@ -465,7 +465,7 @@ where
         Ok((
             rem.clone(),
             (Directive::new(
-                orig_block,
+                Some(orig_block),
                 DirectiveKind::Include(
                     input
                         .parse_node()
@@ -539,7 +539,7 @@ where
         entry::entry_date_and_remainder => |(date_and_time, input)| {
             push_directive(entry(input, date_and_time)?.1, false)
         },
-        util::comment => |c: I| push_directive(Directive::new(c.block(), DirectiveKind::Comment(c.text())), false),
+        util::comment => |c: I| push_directive(Directive::new(Some(c.block()), DirectiveKind::Comment(c.text())), false),
         param_value("account") => |input| push_directive(account_directive(input)?.1, false),
         param_value("unit") => |input| push_directive(unit_directive(input)?.1, false),
         param_value("branch") => |input| {
@@ -591,7 +591,7 @@ where
             amongst_prices = true;
             Ok(dirs.push(pd))
         },
-        util::comment => |c: I| Ok(dirs.push(Directive::new(c.block(), DirectiveKind::Comment(c.text())))),
+        util::comment => |c: I| Ok(dirs.push(Directive::new(Some(c.block()), DirectiveKind::Comment(c.text())))),
         param_value("dateformat") => |input| {
             let (cons, df) = consumed(dateformat_directive)(input)?.1;
             bad_dir_check(cons, amongst_prices)?;

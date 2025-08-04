@@ -309,7 +309,7 @@ impl<'h> JournalNode<'h> {
         self.input
     }
 
-    pub fn block(&self) -> &'h TextBlock<'h> {
+    pub fn block(&self) -> &TextBlock<'h> {
         self.input.block()
     }
 
@@ -323,63 +323,31 @@ impl<'h> JournalNode<'h> {
     }
 
     /// Appends a new entry directive to the end of the node.
-    pub(crate) fn append_entry(
-        &self,
-        entry: JournalEntry<'h>,
-    ) -> (&'h TextBlock<'h>, &'h JournalEntry<'h>) {
+    pub(crate) fn append_entry(&self, entry: JournalEntry<'h>) -> &'h JournalEntry<'h> {
         let alloc_entry: &'h JournalEntry<'h> = self.allocator.alloc(entry);
-        let mut tb: Option<&'h TextBlock<'h>> = None;
-        self.append_directives(|_len, leading_sp| match tb {
-            None => {
-                let entry_string = format!("{}{}", leading_sp, alloc_entry);
-                let entry_str = self.allocator.alloc(entry_string);
-                tb = Some(self.allocator.alloc(TextBlock::from(entry_str.as_str())));
-                Some(Directive::new(tb.unwrap(), DirectiveKind::Entry(alloc_entry)))
-            }
-            _ => None,
-        });
-        (tb.unwrap(), alloc_entry)
+        self.append_directive(DirectiveKind::Entry(alloc_entry));
+        alloc_entry
     }
 
-    pub(crate) fn append_directives<F>(&self, mut dir_fn: F)
-    where
-        F: FnMut(usize, &'h str) -> Option<Directive<'h>>,
-    {
+    pub(crate) fn append_directive(&self, dir_kind: DirectiveKind<'h>) {
         let mut dir_lock = self.segments().last().unwrap().directives();
-        loop {
-            match dir_lock.len() {
-                0 => match dir_fn(0, "") {
-                    Some(dir) => dir_lock.push(dir),
-                    None => break,
-                },
-                n => {
-                    let leading_space = dir_lock[n - 1].raw().leading_blank_lines();
-                    match dir_fn(n, leading_space) {
-                        Some(dir) => dir_lock.push(dir),
-                        None => break,
-                    }
-                }
-            }
-        }
+        dir_lock.push(Directive::new(None, dir_kind));
     }
 
     /// Performs a binary search, looking for an insert position.
     /// Directives aren't expected to be ordered within a node, but this will make a reasonable attempt
     /// to find a good insert position.
-    pub(crate) fn insert_directive<F>(&self, dir_kind: &DirectiveKind<'h>, dir_fn: F)
-    where
-        F: FnOnce(usize, &'h str) -> Directive<'h>,
-    {
+    pub(crate) fn insert_directive(&self, dir_kind: DirectiveKind<'h>) {
         // First, find the segment we need to be in by searching each in turn.
         for seg in self.segments() {
             if let Some(last_dir) = seg.directives().last() {
-                match last_dir.kind().partial_cmp(dir_kind) {
+                match last_dir.kind().partial_cmp(&dir_kind) {
                     None | Some(cmp::Ordering::Less) => {
                         // This segment is not the right one, so continue to the next.
                         continue;
                     }
                     _ => {
-                        self.insert_directive_in_segment(seg, dir_kind, dir_fn);
+                        self.insert_directive_in_segment(seg, dir_kind);
                         break;
                     }
                 }
@@ -387,14 +355,11 @@ impl<'h> JournalNode<'h> {
         }
     }
 
-    pub(crate) fn insert_directive_in_segment<F>(
+    pub(crate) fn insert_directive_in_segment(
         &self,
         segment: &JournalNodeSegment<'h>,
-        dir_kind: &DirectiveKind<'h>,
-        dir_fn: F,
-    ) where
-        F: FnOnce(usize, &'h str) -> Directive<'h>,
-    {
+        dir_kind: DirectiveKind<'h>,
+    ) {
         // This is the segment we need to insert into.
         // Perform a binary search to find the right position.
 
@@ -409,7 +374,7 @@ impl<'h> JournalNode<'h> {
             // Walking back as opposed to forwards is preferred as new kinds of directives will be
             // inserted at the end of the file.
             for i in (min..mid).rev() {
-                match dir_lock[i].kind().partial_cmp(dir_kind) {
+                match dir_lock[i].kind().partial_cmp(&dir_kind) {
                     Some(cmp::Ordering::Greater) => max = i,
                     Some(cmp::Ordering::Less) => min = i + 1,
                     Some(cmp::Ordering::Equal) => {
@@ -426,37 +391,23 @@ impl<'h> JournalNode<'h> {
         }
 
         match max {
-            0 => dir_lock.insert(0, dir_fn(0, "")),
-            n => {
-                let leading_space = dir_lock[n - 1].raw().leading_blank_lines();
-                dir_lock.insert(n, dir_fn(n, leading_space));
-            }
+            0 => dir_lock.insert(0, Directive::new(None, dir_kind)),
+            n => dir_lock.insert(n, Directive::new(None, dir_kind)),
         }
     }
 
     /// Inserts a JournalEntry within the specified file and in the correct date position.
-    pub(crate) fn insert_entry(
-        &self,
-        entry: JournalEntry<'h>,
-    ) -> (&'h TextBlock<'h>, &'h JournalEntry<'h>) {
+    pub(crate) fn insert_entry(&self, entry: JournalEntry<'h>) -> &'h JournalEntry<'h> {
         let entry: &'h JournalEntry<'h> = self.allocator.alloc(entry);
-        let kind = &DirectiveKind::Entry(entry);
-        let mut tb: Option<&'h TextBlock<'h>> = None;
-        self.insert_directive(kind, |_pos, leading_sp| {
-            let entry_string = format!("{}{}", leading_sp, entry);
-            let entry_str = self.allocator.alloc(entry_string);
-            tb = Some(self.allocator.alloc(TextBlock::from(entry_str.as_str())));
-            Directive::new(tb.as_ref().unwrap(), DirectiveKind::Entry(entry))
-        });
-        (tb.unwrap(), entry)
+        self.insert_directive(DirectiveKind::Entry(entry));
+        entry
     }
 
     pub fn replace_entry(
         &self,
         entry: JournalEntry<'h>,
         allocator: &'h HerdAllocator<'h>,
-    ) -> (&'h JournalEntry<'h>, (&'h TextBlock<'h>, &'h JournalEntry<'h>)) {
-        let mut entry_string = entry.to_string();
+    ) -> (&'h JournalEntry<'h>, &'h JournalEntry<'h>) {
         let entry = allocator.alloc(entry);
         for seg in self.segments() {
             for dir in seg.directives().iter_mut() {
@@ -464,12 +415,8 @@ impl<'h> JournalNode<'h> {
                     if curr_entry.id() == entry.id() {
                         let curr_entry = *curr_entry;
 
-                        entry_string.insert_str(0, dir.raw().leading_blank_lines());
-                        let entry_str = allocator.alloc(entry_string);
-                        let tb = allocator.alloc(TextBlock::from(entry_str.as_str()));
-
-                        *dir = Directive::new(tb, DirectiveKind::Entry(entry));
-                        return (curr_entry, (tb, entry));
+                        *dir = Directive::new(None, DirectiveKind::Entry(entry));
+                        return (curr_entry, entry);
                     }
                 }
             }
@@ -510,7 +457,7 @@ impl<'h> JournalNode<'h> {
         panic!("Entry no longer exists")
     }
 
-    pub fn write_file(&self) -> JournResult<()> {
+    fn write_file(&self) -> JournResult<()> {
         match self.filename {
             Some(file) => {
                 debug!("Writing {}", file.to_str().unwrap());
@@ -563,8 +510,13 @@ impl<'h> JournalNode<'h> {
     }
 
     pub fn write<W: Write>(&self, writer: &mut W, account_filter: Option<&str>) -> JournResult<()> {
-        for seg in self.segments() {
-            self.write_from_dir_iter(Box::new(seg.directives().iter()), writer, account_filter)?;
+        for (i, seg) in self.segments().iter().enumerate() {
+            self.write_from_dir_iter(
+                Box::new(seg.directives().iter()),
+                writer,
+                account_filter,
+                if i == 0 { "" } else { "\n" },
+            )?;
         }
         Ok(())
     }
@@ -574,7 +526,7 @@ impl<'h> JournalNode<'h> {
         writer: &mut W,
         account_filter: Option<&str>,
     ) -> JournResult<()> {
-        self.write_from_dir_iter(Box::new(self.all_directives_iter()), writer, account_filter)
+        self.write_from_dir_iter(Box::new(self.all_directives_iter()), writer, account_filter, "")
     }
 
     fn write_from_dir_iter<'a, W: Write>(
@@ -582,6 +534,7 @@ impl<'h> JournalNode<'h> {
         dir_iter: Box<dyn Iterator<Item = &'a Directive> + 'a>,
         writer: &mut W,
         account_filter: Option<&str>,
+        initial_leading_space: &str,
     ) -> JournResult<()> {
         let dir_iter: Box<dyn Iterator<Item = &'a Directive>> = Box::new(dir_iter.filter(|d| {
             if let Some(filter) = &account_filter {
@@ -591,8 +544,35 @@ impl<'h> JournalNode<'h> {
             }
             true
         }));
-        for dir in dir_iter {
-            write!(writer, "{dir}").map_err(|e| err!(e; "IO Error"))?;
+        let mut last_leading_space = initial_leading_space;
+        for (i, dir) in dir_iter.enumerate() {
+            // For the second directive onwards, the minimal leading space is a newline.
+            if i > 0 && last_leading_space == "" {
+                last_leading_space = "\n";
+            }
+            match dir.parsed() {
+                Some(parsed) => {
+                    write!(writer, "{parsed}").map_err(|e| err!(e; "IO Error"))?;
+                    last_leading_space = parsed.leading_blank_lines()
+                }
+                None => {
+                    // If there is no raw text, it is expected to be because these are added/changed directives.
+                    // In this case, we copy the last leading space from the previous raw directive.
+                    match dir.kind() {
+                        DirectiveKind::Entry(entry) => {
+                            write!(writer, "{last_leading_space}{entry}")
+                                .map_err(|e| err!(e; "IO Error"))?;
+                        }
+                        DirectiveKind::Price(price) => {
+                            write!(writer, "{last_leading_space}{price}")
+                                .map_err(|e| err!(e; "IO Error"))?;
+                        }
+                        _ => panic!(
+                            "The only objects that can be written are entries and prices; write parsed text for other directives"
+                        ),
+                    }
+                }
+            }
         }
         // Ensure a newline at the end of the file
         writeln!(writer).map_err(|e| err!(e; "IO Error"))?;

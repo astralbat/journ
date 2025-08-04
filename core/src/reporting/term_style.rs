@@ -7,7 +7,7 @@
  */
 use crate::arguments::Arguments;
 use std::cell::RefCell;
-use std::{fmt, io};
+use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]

@@ -69,6 +69,10 @@ impl<'h> JournalNodeSegment<'h> {
         self.configuration.set(configuration).expect("Configuration should only be set once");
     }
 
+    pub fn node(&self) -> &'h JournalNode<'h> {
+        self.node
+    }
+
     pub fn next_segment(&self) -> Option<&'h JournalNodeSegment<'h>> {
         self.next_segment.lock().unwrap().clone()
     }

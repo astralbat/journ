@@ -90,7 +90,7 @@ impl<'h> MoneyPot<'h> {
     pub fn split_weighted<'w, D>(
         mut self,
         weights: &'w [D],
-    ) -> impl Iterator<Item = Amount<'h>> + '_
+    ) -> impl Iterator<Item = Amount<'h>> + 'w
     where
         D: Into<Decimal> + Copy,
         'h: 'w,

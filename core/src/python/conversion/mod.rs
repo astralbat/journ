@@ -11,9 +11,7 @@ use chrono::{DateTime, Datelike, TimeZone, Timelike};
 use chrono_tz::Tz;
 use pyo3::prelude::PyAnyMethods;
 use pyo3::types::{PyDateTime, PyTzInfo};
-use pyo3::{
-    Bound, BoundObject, FromPyObject, IntoPyObject, Py, PyAny, PyErr, PyObject, PyResult, Python,
-};
+use pyo3::{Bound, BoundObject, FromPyObject, IntoPyObject, PyAny, PyErr, PyResult, Python};
 
 #[derive(Copy, Clone)]
 pub struct DateTimeWrapper(pub DateTime<Tz>);

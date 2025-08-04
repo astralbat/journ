@@ -9,10 +9,10 @@ use crate::reporting::table::cell::node::Cell;
 use crate::reporting::term_style::Style;
 use smallvec::SmallVec;
 use std::cell::{Ref, RefCell, RefMut};
+use std::fmt;
 use std::iter::FromIterator;
 use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
-use std::{fmt, io};
 
 #[derive(Clone, Default)]
 pub struct CellSequence<'cell> {
@@ -77,11 +77,7 @@ impl<'cell> CellSequence<'cell> {
 
     /// Attempts to unwrap the sequence as a single cell.
     pub fn try_into_cell(mut self) -> Result<Rc<RefCell<Cell<'cell>>>, Self> {
-        if self.cells.len() == 1 {
-            Ok(self.cells.pop().unwrap())
-        } else {
-            Err(self)
-        }
+        if self.cells.len() == 1 { Ok(self.cells.pop().unwrap()) } else { Err(self) }
     }
 
     pub fn insert(&mut self, index: usize, cell: Rc<RefCell<Cell<'cell>>>) {

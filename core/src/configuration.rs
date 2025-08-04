@@ -23,7 +23,7 @@ use std::collections::hash_map::Entry;
 use std::fmt::{Debug, Formatter};
 use std::ops::Deref;
 use std::string::ToString;
-use std::sync::{Arc, MutexGuard, OnceLock};
+use std::sync::{Arc, MutexGuard};
 
 #[derive(Debug, PartialEq, Eq, Hash, Copy, Clone)]
 pub struct ConfigurationVersion<'h> {

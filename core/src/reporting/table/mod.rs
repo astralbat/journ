@@ -8,17 +8,17 @@
 mod cell;
 pub mod row;
 
-pub use cell::content::Alignment;
 pub use cell::Cell;
 pub use cell::WrapPolicy;
+pub use cell::content::Alignment;
 
 use crate::reporting::table::cell::column::{CellColumn, ColumnTreeNode};
 //use crate::reporting::table::Cell;
 use crate::reporting::term_style::Style;
 pub use row::Row;
 use std::cell::RefCell;
+use std::fmt;
 use std::rc::Rc;
-use std::{fmt, io};
 
 pub struct Table<'cell> {
     heading_row: Option<RefCell<Row<'cell>>>,

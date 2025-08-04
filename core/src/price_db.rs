@@ -5,15 +5,13 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
-use crate::directive::{Directive, DirectiveKind};
+use crate::directive::DirectiveKind;
 use crate::error::JournResult;
 use crate::journal_node::JournalNode;
-use crate::parsing::text_block::TextBlock;
 use crate::price::Price;
 use crate::unit::Unit;
 use chrono::DateTime;
 use chrono_tz::Tz;
-use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -143,22 +141,14 @@ impl<'h> PriceDatabase<'h> {
         if let Some(file) = node.nearest_filename() {
             trace!("Writing prices to file: {}", file.file_name().unwrap().to_str().unwrap());
             node.clear_directives_filter(|d| matches!(d.kind(), DirectiveKind::Price(_)));
-            let mut p_iter = prices.0.iter();
-            node.append_directives(|len, _leading_sp| {
-                p_iter.next().map(|p| (**p).clone()).map(|mut p| {
-                    let config = node.segments().last().unwrap().config();
-                    p.set_date_format(config.date_format());
-                    p.set_time_format(config.time_format());
-                    p.set_timezone(config.timezone());
-
-                    let price_string = if len == 0 { p.to_string() } else { format!("\n{}", p) };
-                    let price_str = node.segments().last().unwrap().config().alloc(price_string);
-                    Directive::new(
-                        config.alloc(TextBlock::from(price_str.as_str())),
-                        DirectiveKind::Price(Arc::new(p)),
-                    )
-                })
-            });
+            let config = node.segments().last().unwrap().config();
+            for price in prices.0.iter() {
+                let mut p = (**price).clone();
+                p.set_date_format(config.date_format());
+                p.set_time_format(config.time_format());
+                p.set_timezone(config.timezone());
+                node.append_directive(DirectiveKind::Price(Arc::new(p)))
+            }
             node.write_nearest_file()?;
         }
         Ok(())

@@ -10,7 +10,7 @@ use crate::cgt_configuration::{
 };
 use crate::pool::PoolBalance;
 use crate::pool_event::{AggregatedPoolEvent, PoolEvent};
-use chrono_tz::{OffsetName, TzOffset};
+use chrono_tz::OffsetName;
 use itertools::Itertools;
 use journ_core::arguments::Arguments;
 use journ_core::configuration::Configuration;

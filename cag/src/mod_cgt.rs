@@ -9,10 +9,10 @@ use crate::deal::Deal;
 use journ_core::err;
 use journ_core::error::JournResult;
 use journ_core::python::conversion::DateTimeWrapper;
+use pyo3::IntoPyObject;
 use pyo3::prelude::PyModule;
 use pyo3::types::{PyAnyMethods, PyDict, PyDictMethods, PyModuleMethods};
 use pyo3::{Bound, PyResult, Python, pyclass, pymethods, pymodule, wrap_pymodule};
-use pyo3::{IntoPyObject, PyObject};
 use std::convert::Infallible;
 
 /*

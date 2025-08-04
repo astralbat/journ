@@ -9,18 +9,12 @@ use crate::error::{BlockContext, BlockContextError, JournError, JournResult};
 use crate::parsing::text_block::TextBlock;
 use crate::python::conversion::{DateTimeWrapper, DeferredArg};
 use crate::{err, pyerr};
-use chrono::DateTime;
-use chrono_tz::Tz;
 use nom::bytes::complete::take_while1;
-use pyo3::BoundObject;
 use pyo3::prelude::{PyAnyMethods, PyDictMethods, PyModuleMethods, PyTracebackMethods};
-use pyo3::types::{PyDateTime, PyDict};
-use pyo3::{
-    Bound, IntoPyObject, IntoPyObjectExt, Py, PyAny, PyErr, PyObject, PyResult, Python, intern,
-};
+use pyo3::types::PyDict;
+use pyo3::{Bound, Py, PyErr, PyObject, PyResult, Python, intern};
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
-use std::hash::Hash;
 use std::path::Path;
 use std::sync::{Arc, Condvar, LazyLock, Mutex};
 use std::thread;
@@ -56,7 +50,7 @@ impl<T> FromPyObjectOwned for Vec<T>
 where
     T: FromPyObjectOwned,
 {
-    fn extract<'py>(ob: PyObject, py: Python<'py>) -> PyResult<Self> {
+    fn extract(ob: PyObject, py: Python) -> PyResult<Self> {
         let l = ob.extract::<Vec<PyObject>>(py)?;
         let mut ret = Vec::with_capacity(l.len());
         for o in l {
@@ -91,19 +85,19 @@ impl PythonEnvironment {
             *starting_lock = true;
             drop(starting_lock);
             thread::spawn(|| {
-                #[cfg(feature = "python-embedded")]
-                Self::startup_embedded();
-                #[cfg(not(feature = "python-embedded"))]
+                //#[cfg(feature = "python-embedded")]
+                //Self::startup_embedded();
+                //#[cfg(not(feature = "python-embedded"))]
                 Self::startup_external();
 
                 Python::with_gil(|py| {
                     let startup_code = c"
                     # Import datetime in to the system namespace. This is called from `valuer`.\n\
                     from datetime import datetime\n\
-
+                    \
                     # Import Decimal. This is called in mod_ledger.\n\
                     from decimal import Decimal\n\
-
+                    \
                     # Add the current directory to the path so that we can import modules from the current directory (journ.so).\n\
                     # The command line interpreter normally does this anyway.\n\
                     import sys\n\
@@ -121,42 +115,43 @@ impl PythonEnvironment {
         }
     }
 
-    /// When building with this feature enabled, it is necessary to set the PYO3_CONFIG_FILE environment
-    /// variable to the absolute location of the pyo3-build-config-file.txt file located in she
-    /// resources/embedded_python directory.
-    #[cfg(feature = "python-embedded")]
-    fn startup_embedded() {
-        use pyembed::{MainPythonInterpreter, OxidizedPythonInterpreterConfig};
+    /*
+        /// When building with this feature enabled, it is necessary to set the PYO3_CONFIG_FILE environment
+        /// variable to the absolute location of the pyo3-build-config-file.txt file located in she
+        /// resources/embedded_python directory.
+        #[cfg(feature = "python-embedded")]
+        fn startup_embedded() {
+            use pyembed::{MainPythonInterpreter, OxidizedPythonInterpreterConfig};
 
-        debug!("Embedded Python: initialising");
+            debug!("Embedded Python: initialising");
 
-        // This way the ledger module will get initialised when the module is next imported.
-        // This has to be done before the interpreter is created.
-        pyo3::append_to_inittab!(ledger);
+            // This way the ledger module will get initialised when the module is next imported.
+            // This has to be done before the interpreter is created.
+            pyo3::append_to_inittab!(ledger);
 
-        // Create the interpreter.
-        let config = OxidizedPythonInterpreterConfig {
-            // Use no arguments, otherwise they get copied from the current process which
-            // causes python to immediately barf.
-            argv: Some(vec![]),
-            // Need this to be true to get the embedded resources to work.
-            oxidized_importer: true,
-            // This includes what should have been built for the local build machine using
-            // the pyoxidizer command.
-            packed_resources: vec![pyembed::PackedResourcesSource::Memory(include_bytes!(
-                r#"../../resources/embedded_python/packed-resources"#
-            ))],
-            ..OxidizedPythonInterpreterConfig::default()
-        };
-        let interpreter = MainPythonInterpreter::new(config)
-            .expect("Unable to initialise the embedded python interpreter");
+            // Create the interpreter.
+            let config = OxidizedPythonInterpreterConfig {
+                // Use no arguments, otherwise they get copied from the current process which
+                // causes python to immediately barf.
+                argv: Some(vec![]),
+                // Need this to be true to get the embedded resources to work.
+                oxidized_importer: true,
+                // This includes what should have been built for the local build machine using
+                // the pyoxidizer command.
+                packed_resources: vec![pyembed::PackedResourcesSource::Memory(include_bytes!(
+                    r#"../../resources/embedded_python/packed-resources"#
+                ))],
+                ..OxidizedPythonInterpreterConfig::default()
+            };
+            let interpreter = MainPythonInterpreter::new(config)
+                .expect("Unable to initialise the embedded python interpreter");
 
-        // The interpreter is not `Send` nor `Sync`. We can't keep it in a static variable,
-        // so we'll just forget it to ensure that we can still use it.
-        Box::leak(Box::new(interpreter));
-    }
-
-    #[cfg(not(feature = "python-embedded"))]
+            // The interpreter is not `Send` nor `Sync`. We can't keep it in a static variable,
+            // so we'll just forget it to ensure that we can still use it.
+            Box::leak(Box::new(interpreter));
+        }
+    */
+    //#[cfg(not(feature = "python-embedded"))]
     fn startup_external() {
         use crate::python::mod_ledger::ledger;
         use pyo3::prepare_freethreaded_python;

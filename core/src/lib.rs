@@ -14,7 +14,6 @@
 #![feature(type_alias_impl_trait)]
 #![feature(negative_impls)]
 #![feature(iter_intersperse)]
-#![feature(trait_upcasting)]
 #![feature(box_into_inner)]
 #![feature(once_cell_get_mut)]
 #![feature(cow_is_borrowed)]

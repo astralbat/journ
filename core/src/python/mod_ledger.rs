@@ -8,7 +8,6 @@
 use crate::amount::Amount;
 use crate::configuration::Configuration;
 use crate::date_and_time::JDateTime;
-use crate::err;
 use crate::error::JournResult;
 use crate::ext::StrExt;
 use crate::price::Price;
@@ -323,7 +322,7 @@ impl<'h, 'source> FromPyObject<'source> for Price<'h> {
 impl PyPrice {
     pub fn as_price<'h>(
         self,
-        py: Python,
+        _py: Python,
         config: &mut Configuration<'h>,
     ) -> JournResult<Price<'h>> {
         let allocator = config.allocator();

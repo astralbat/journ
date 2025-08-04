@@ -14,7 +14,7 @@ use crate::parsing::{IParseResult, JParseResult};
 use crate::reporting::table;
 use crate::reporting::table::WrapPolicy;
 use crate::{err, match_parser, match_parsers};
-use chrono::format::{parse, DelayedFormat, Fixed, Item, Numeric, Pad, Parsed};
+use chrono::format::{DelayedFormat, Fixed, Item, Numeric, Pad, Parsed, parse};
 use chrono::{
     DateTime, Datelike, Duration, LocalResult, Months, NaiveDate, NaiveDateTime, NaiveTime,
     TimeZone, Timelike, Utc,
@@ -32,8 +32,8 @@ use std::ops::{Add, Deref, Range, Sub};
 use std::str::FromStr;
 use std::sync::LazyLock;
 use std::{fmt, iter};
-use yaml_rust::yaml::Hash;
 use yaml_rust::Yaml;
+use yaml_rust::yaml::Hash;
 
 pub static DEFAULT_DATE_FORMAT: LazyLock<DateFormat<'static>> =
     LazyLock::new(|| "yyyy-mm-dd".parse().unwrap());
@@ -720,11 +720,7 @@ impl<'h> fmt::Display for JDateTimeRange<'h> {
     /// Formats the common components in the date range. E.g. just the year, or the range if there
     /// are no components in common.
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        if self.brief_format() {
-            self.format_brief(f)
-        } else {
-            self.format_full(f)
-        }
+        if self.brief_format() { self.format_brief(f) } else { self.format_full(f) }
     }
 }
 
@@ -1030,7 +1026,10 @@ impl<'h> DateTimeFormatInner<'h> {
         max_width
     }
 
-    fn items_filtered<'a, F>(&'a self, filtered: F) -> impl Iterator<Item = &Item<'h>> + Clone + 'a
+    fn items_filtered<'a, F>(
+        &'a self,
+        filtered: F,
+    ) -> impl Iterator<Item = &'a Item<'h>> + Clone + 'a
     where
         F: Fn(usize) -> bool + Clone + 'a,
     {

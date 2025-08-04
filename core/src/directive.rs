@@ -6,7 +6,6 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::account::Account;
-use crate::alloc::HerdAllocator;
 use crate::date_and_time::{DateFormat, TimeFormat};
 use crate::journal_entry::JournalEntry;
 use crate::journal_node::JournalNode;
@@ -16,7 +15,6 @@ use crate::price::Price;
 use crate::unit::{Unit, Units};
 use chrono_tz::Tz;
 use std::cmp::Ordering;
-use std::fmt;
 use std::sync::Arc;
 
 //pub type ParsedJournalEntry<'h> = Arc<Mutex<ParsedDirective<'h, JournalEntry<'h>>>>;
@@ -111,17 +109,20 @@ impl PartialOrd for DirectiveKind<'_> {
 
 #[derive(Debug)]
 pub struct Directive<'h> {
-    raw: &'h TextBlock<'h>,
+    parsed: Option<&'h TextBlock<'h>>,
     kind: DirectiveKind<'h>,
 }
 
 impl<'h> Directive<'h> {
-    pub fn new(raw: &'h TextBlock<'h>, kind: DirectiveKind<'h>) -> Self {
-        Self { raw, kind }
+    pub fn new(raw: Option<&'h TextBlock<'h>>, kind: DirectiveKind<'h>) -> Self {
+        Self { parsed: raw, kind }
     }
 
-    pub fn raw(&self) -> &'h TextBlock<'h> {
-        self.raw
+    /// Gets the raw text block from which this directive was parsed.
+    /// A `None` indicates that the directive was not parsed from a raw text block, but rather
+    /// created after parsing the journal.
+    pub fn parsed(&self) -> Option<&'h TextBlock<'h>> {
+        self.parsed
     }
 
     pub fn kind(&self) -> &DirectiveKind<'h> {
@@ -132,95 +133,31 @@ impl<'h> Directive<'h> {
         &mut self.kind
     }
 
-    pub fn into_inner(self) -> (&'h TextBlock<'h>, DirectiveKind<'h>) {
-        (self.raw, self.kind)
-    }
-
-    /*
-    fn raw_op<F, R>(&self, op: F) -> R
-    where
-        F: FnOnce(&TextBlock<'h>) -> R,
-    {
-        match self {
-            Directive::Entry(dir) => op(&dir.lock().unwrap().raw),
-            Directive::Price(dir) => op(&dir.raw),
-            Directive::Account(dir) => op(&dir.raw),
-            Directive::Unit(dir) => op(&dir.raw),
-            Directive::DefaultUnit(dir) => op(&dir.raw),
-            Directive::Branch(dir) => op(&dir.raw),
-            Directive::Include(dir) => op(&dir.raw),
-            Directive::Python(dir) => op(&dir.raw),
-            Directive::DateFormat(dir) => op(&dir.raw),
-            Directive::TimeFormat(dir) => op(&dir.raw),
-            Directive::TimeZone(dir) => op(&dir.raw),
-            Directive::Cgt(dir) => op(&dir.raw),
-            Directive::Comment(dir) => op(&dir.raw),
-            Directive::Raw(raw) => op(raw),
-        }
-    }
-
-    fn raw_op_mut<F, R>(&mut self, op: F) -> R
-    where
-        F: FnOnce(&mut TextBlock<'h>) -> R,
-    {
-        match self {
-            Directive::Entry(dir) => op(&mut dir.lock().unwrap().raw),
-            Directive::Price(dir) => op(&mut dir.raw),
-            Directive::Account(dir) => op(&mut dir.raw),
-            Directive::Unit(dir) => op(&mut dir.raw),
-            Directive::DefaultUnit(dir) => op(&mut dir.raw),
-            Directive::Branch(dir) => op(&mut dir.raw),
-            Directive::Include(dir) => op(&mut dir.raw),
-            Directive::Python(dir) => op(&mut dir.raw),
-            Directive::DateFormat(dir) => op(&mut dir.raw),
-            Directive::TimeFormat(dir) => op(&mut dir.raw),
-            Directive::TimeZone(dir) => op(&mut dir.raw),
-            Directive::Cgt(dir) => op(&mut dir.raw),
-            Directive::Comment(dir) => op(&mut dir.raw),
-            Directive::Raw(dir) => op(dir),
-        }
-    }*/
-
-    /*
-    pub fn leading_whitespace<F, R>(&self, op: F) -> R
-    where
-        F: FnOnce(&str) -> R,
-    {
-        self.raw_op(|raw| {
-            let contents = raw.text();
-            op(&contents[0..contents.trim_start().len() - contents.len()])
-        })
-    }*/
-
-    pub fn leading_whitespace(&self) -> &'h str {
-        let contents = self.raw.text();
-        &contents[0..contents.len() - contents.trim_start().len()]
-    }
-
-    pub fn set_leading_whitespace(
-        &mut self,
-        space: impl AsRef<str> + Sync + Send + 'static,
-        allocator: &'h HerdAllocator<'h>,
-    ) {
-        self.raw = allocator.alloc(self.raw.with_leading_whitespace(space.as_ref(), allocator));
-    }
-
-    /// Gets the whitespace at the end of this directive
-    pub fn trailing_white_space(&self) -> &'h str {
-        let contents = self.raw.text();
-        &contents[contents.trim_end().len()..]
-    }
-
-    pub fn line_count(&self) -> usize {
-        self.raw.text().lines().count()
+    pub fn into_inner(self) -> (Option<&'h TextBlock<'h>>, DirectiveKind<'h>) {
+        (self.parsed, self.kind)
     }
 }
 
+/*
 impl<'h> fmt::Display for Directive<'h> {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        write!(f, "{}", self.raw.text())
+        match &self.parsed {
+            Some(raw) => write!(f, "{}", raw.text()),
+            None => match self.kind() {
+                DirectiveKind::Entry(entry) => {
+                    write!(f, "{}", entry)
+                }
+                DirectiveKind::Price(price) => {
+                    write!(f, "{}", **price)
+                }
+                _ => panic!(
+                    "Cannot display directive without raw text: {:?}; Only entry and price objects may be written",
+                    self.kind
+                ),
+            },
+        }
     }
-}
+}*/
 
 impl<'h> PartialEq<Directive<'h>> for Directive<'h> {
     fn eq(&self, other: &Directive<'h>) -> bool {

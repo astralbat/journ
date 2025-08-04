@@ -7,19 +7,20 @@
  */
 use crate::alloc::HerdAllocator;
 use crate::err;
-use crate::error::parsing::{IErrorMsg, IParseError};
 use crate::error::JournResult;
+use crate::error::parsing::{IErrorMsg, IParseError};
 use crate::ext::StrExt;
+use crate::parsing::IParseResult;
 use crate::parsing::text_input::{BlockInput, LocatedInput, TextInput};
 use crate::parsing::util::{
     blank_lines0, comment, indented, recognize_rtrim, repeat0, rest_line0, rest_line1,
 };
-use crate::parsing::IParseResult;
 use nom::character::complete::{multispace0, space0};
 use nom::combinator::rest;
 use nom::sequence::{pair, preceded};
 use nom::{Err as NomErr, Parser};
 use nom_locate::LocatedSpan;
+use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::fmt;
 use std::path::Path;
@@ -74,7 +75,7 @@ impl<'h> fmt::Display for TextBlockLocation<'h> {
 /// 4. A block always terminates before spaces or newlines (these are part of the next block).
 #[derive(Debug, Clone)]
 pub struct TextBlock<'h> {
-    text: &'h str,
+    text: Cow<'h, str>,
     parent: Option<&'h TextBlock<'h>>,
     /// All blocks will have a location when `parent` is `Some`.
     location: Option<TextBlockLocation<'h>>,
@@ -106,7 +107,7 @@ impl<'h> TextBlock<'h> {
     }
 
     fn new_root(text: &'h str, location: Option<TextBlockLocation<'h>>) -> Self {
-        TextBlock { text, location, parent: None }
+        TextBlock { text: Cow::Borrowed(text), location, parent: None }
     }
 
     pub(super) fn new_child(
@@ -114,7 +115,7 @@ impl<'h> TextBlock<'h> {
         location: TextBlockLocation<'h>,
         parent: &'h TextBlock<'h>,
     ) -> Self {
-        Self { text, location: Some(location), parent: Some(parent) }
+        Self { text: Cow::Borrowed(text), location: Some(location), parent: Some(parent) }
     }
 
     pub fn parent(&self) -> Option<&'h TextBlock<'h>> {
@@ -162,7 +163,7 @@ impl<'h> TextBlock<'h> {
     pub fn column(&self) -> u32 {
         match self.location {
             Some(loc) => unsafe {
-                LocatedSpan::new_from_raw_offset(loc.offset, loc.line, self.text, ())
+                LocatedSpan::new_from_raw_offset(loc.offset, loc.line, &*self.text, ())
                     .naive_get_utf8_column() as u32
             },
             // No location means there's no parent, so we're the root block.
@@ -171,7 +172,7 @@ impl<'h> TextBlock<'h> {
     }
 
     pub fn trimmed_start_lines(&self) -> TextBlock {
-        let (rem, blanks) = blank_lines0(self.text).unwrap();
+        let (rem, blanks) = blank_lines0(&*self.text).unwrap();
         let blank_lines_count = blanks.lines().count();
 
         let location = match &self.location {
@@ -188,7 +189,7 @@ impl<'h> TextBlock<'h> {
             }
             None => TextBlockLocation::new(None, 1 + blank_lines_count as u32, blanks.len()),
         };
-        TextBlock { text: rem, parent: self.parent, location: Some(location) }
+        TextBlock { text: Cow::Borrowed(rem), parent: self.parent, location: Some(location) }
     }
 
     /// Gets the line number after any leading blank lines.
@@ -203,8 +204,8 @@ impl<'h> TextBlock<'h> {
     }
 
     /// Gets the text of the block, including any leading whitespace.
-    pub fn text(&self) -> &'h str {
-        self.text
+    pub fn text(&self) -> &str {
+        &*self.text
     }
 
     /// Gets the amount of indentation for this block. This is usually the amount of spaces
@@ -314,7 +315,7 @@ impl<'h> TextBlock<'h> {
         t.push_str(self.text.trim_start());
 
         let mut block = self.clone();
-        block.text = allocator.alloc(t);
+        block.text = Cow::Borrowed(allocator.alloc(t));
         block
     }
 
@@ -362,7 +363,7 @@ where
     I: TextInput<'h> + LocatedInput<'h> + BlockInput<'h>,
 {
     let orig_input = input.clone();
-    let rem = blank_lines0(input).unwrap().0;
+    let rem = blank_lines0(input).expect("Infallible").0;
 
     // Read the preceding whitespace of the block's first content line. This will tell us its
     // indent.
@@ -370,7 +371,7 @@ where
     let min_indent = rem.column() as u16;
 
     // A block is at least till the end of the line.
-    let rem = recognize_rtrim(rest_line0)(rem).unwrap().0;
+    let rem = recognize_rtrim(rest_line0)(rem).expect("Infallible").0;
 
     // Read all subsequent lines that are indented at least one more than the first line.
     // This should mean that the block ends with a single newline character for all but the last block which may not have.
@@ -378,7 +379,7 @@ where
         pair(blank_lines0, indented(min_indent)),
         rest_line1,
     )))(rem)
-    .unwrap()
+    .expect("Infallible")
     .0;
 
     let block_text = orig_input.slice(..orig_input.input_len() - rem.input_len());

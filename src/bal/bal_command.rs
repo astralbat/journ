@@ -23,7 +23,6 @@ use journ_core::valuer;
 use journ_core::valuer::ValueResult;
 use std::borrow::Cow;
 use std::collections::HashSet;
-use std::fmt;
 
 #[derive(Default, Debug)]
 pub struct BalCommand {
@@ -106,7 +105,7 @@ impl ExecCommand for BalCommand {
         // Get the value units. The unit to value in might not exist in the config,
         // and in this case, we'll just create a new object.
         let mut value_units = vec![];
-        for col in cmd.columns.iter() {
+        for col in cmd.columns().iter() {
             if let BalColumn::Value(unit_code) = col {
                 value_units.push(
                     config
@@ -120,6 +119,7 @@ impl ExecCommand for BalCommand {
 
         let account_filter = cmd.account_filter();
         let unit_filter = cmd.unit_filter();
+        let description_filter = cmd.description_filter();
         let file_filter = cmd.file_filter();
         let mut modified_entries = vec![];
         for entry in journ.entry_range(args.begin_end_range()) {
@@ -131,6 +131,9 @@ impl ExecCommand for BalCommand {
 
             // First pass: Ensure postings can be valued in the desired units.
             valuer::exec_optimistic(&mut cow_entry, |entry| {
+                if !description_filter.is_included(entry.description()) {
+                    return ValueResult::Ok(());
+                }
                 for pst in entry.postings() {
                     if !account_filter.is_included(pst.account()) {
                         continue;
@@ -187,7 +190,7 @@ impl ExecCommand for BalCommand {
         }
 
         let mut output = String::new();
-        let mut table = create_table(&bals);
+        let table = create_table(&bals);
         if cmd.write_csv() {
             table.print_csv(&mut output).unwrap();
         } else {
@@ -212,7 +215,6 @@ fn create_table<'a>(bals: &'a AccountBalances) -> Table<'a> {
     }
 
     // Account Rows
-    let mut num_rows = 0;
     for line in bals.iter().filter(|l| !l.valued_amount().is_zero()) {
         let mut row = vec![];
         for col in cmd.columns.iter() {
@@ -231,7 +233,6 @@ fn create_table<'a>(bals: &'a AccountBalances) -> Table<'a> {
                 }
             }
         }
-        num_rows += 1;
         table.add_row(row);
     }
 

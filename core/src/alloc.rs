@@ -107,6 +107,6 @@ unsafe impl<'h> std::alloc::Allocator for HerdAllocator<'h> {
     }
 
     unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
-        self.member.get_or(|| self.herd.get()).as_bump().deallocate(ptr, layout)
+        unsafe { self.member.get_or(|| self.herd.get()).as_bump().deallocate(ptr, layout) }
     }
 }

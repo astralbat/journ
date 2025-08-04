@@ -5,18 +5,18 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
-use crate::error::parsing::{tag_err, IErrorMsg, IParseError};
 use crate::error::JournError;
+use crate::error::parsing::{IErrorMsg, IParseError, tag_err};
 use crate::ext::StrExt;
 use crate::parsing::text_input::TextInput;
 use crate::parsing::{IParseResult, JParseResult};
+use nom::Finish;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, tag_no_case, take, take_till1, take_while, take_while1};
 use nom::character::complete::{char, line_ending, multispace0, space0};
 use nom::combinator::{eof, iterator, map, opt, peek, recognize, rest, verify};
 use nom::error::ParseError;
 use nom::sequence::{delimited, preceded, terminated};
-use nom::Finish;
 use nom::{Err as NomErr, Slice};
 use nom::{IResult, Parser};
 use std::ops::RangeFrom;
