@@ -247,7 +247,7 @@ fn main() {
     {
         Ok(journ) => {
             info!(
-                "Parsing took {} ns",
+                "Parsing took {}ns",
                 now.elapsed()
                     .unwrap()
                     .as_nanos()
@@ -257,8 +257,8 @@ fn main() {
             let mut sys = sysinfo::System::new_all();
             sys.refresh_all();
             if let Some(process) = sys.process(Pid::from(std::process::id() as usize)) {
-                println!("Memory usage: {} MB", process.memory() / 1024 / 1024);
-                println!("Virtual memory: {} MB", process.virtual_memory() / 1024 / 1024);
+                debug!("Memory usage: {} MB", process.memory() / 1024 / 1024);
+                debug!("Virtual memory: {} MB", process.virtual_memory() / 1024 / 1024);
             }
 
             journ

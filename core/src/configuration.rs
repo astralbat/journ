@@ -17,6 +17,7 @@ use crate::parsing::DerefMutAndDebug;
 use crate::price_db::PriceDatabase;
 use crate::unit::{NumberFormat, RoundingStrategy, Unit};
 use chrono_tz::Tz;
+use regex::{Regex, RegexBuilder};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
@@ -616,18 +617,37 @@ pub fn create_unit_filter<S: AsRef<str>>(units: &[S]) -> impl for<'t> Filter<Uni
     UnitFilter(units)
 }
 
-/// The standard account filter is a prefix filter.
-pub struct AccountFilter<'a, S: AsRef<str>>(pub &'a [S]);
+/// The standard account filter. The filter will match accounts exactly (case insensitive) except where '..' sequence is used
+/// to represent a wildcard match for any number of characters in the account name.
+pub struct AccountFilter {
+    expressions: Vec<Regex>,
+}
+impl AccountFilter {
+    /// Creates a new account filter from the given slice of strings.
+    pub fn new<S: AsRef<str>>(accounts: &'_ [S]) -> Self {
+        let mut expressions = vec![];
+        for acc in accounts {
+            // Replace the escaped '..' with a regex that matches any characters.
+            let mut s = regex::escape(acc.as_ref()).replace("\\.\\.", ".*");
+            // The whole account has to match.
+            s.insert(0, '^');
+            s.push('$');
 
-impl<S: AsRef<str>> Filter<Account<'_>> for AccountFilter<'_, S> {
+            expressions.push(RegexBuilder::new(&s).case_insensitive(true).build().unwrap());
+        }
+        Self { expressions }
+    }
+}
+
+impl Filter<Account<'_>> for AccountFilter {
     fn is_included(&self, item: &Account) -> bool {
         // When the filter is empty, all accounts are included.
-        if self.0.is_empty() {
+        if self.expressions.is_empty() {
             return true;
         }
 
-        for account_str in self.0 {
-            if item.name_exact().starts_with(account_str.as_ref()) {
+        for account_expr in &self.expressions {
+            if account_expr.is_match(item.name()) {
                 return true;
             }
         }

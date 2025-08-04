@@ -7,10 +7,10 @@
  */
 use crate::account::Account;
 use crate::configuration::{
-    create_unit_filter, AccountFilter, DescriptionFilter, FileFilter, Filter,
+    AccountFilter, DescriptionFilter, FileFilter, Filter, create_unit_filter,
 };
 use crate::date_and_time::{
-    DateFormat, JDateTime, TimeFormat, DEFAULT_DATE_FORMAT, DEFAULT_TIME_FORMAT,
+    DEFAULT_DATE_FORMAT, DEFAULT_TIME_FORMAT, DateFormat, JDateTime, TimeFormat,
 };
 use crate::err;
 use crate::error::JournResult;
@@ -177,7 +177,7 @@ pub struct RegCommand {
 
 impl RegCommand {
     pub fn account_filter(&self) -> impl for<'t> Filter<Account<'t>> + '_ {
-        AccountFilter(&self.account_filter)
+        AccountFilter::new(&self.account_filter)
     }
 
     pub fn set_account_filter(&mut self, accounts: Vec<String>) {
@@ -233,7 +233,7 @@ pub struct CsvCommand {
 
 impl CsvCommand {
     pub fn account_filter(&self) -> impl for<'t> Filter<Account<'t>> + '_ {
-        AccountFilter(&self.account_filter)
+        AccountFilter::new(&self.account_filter)
     }
 
     pub fn set_account_filter(&mut self, accounts: Vec<String>) {

@@ -11,7 +11,7 @@ use chrono::{DateTime, Duration};
 use chrono_tz::Tz;
 use journ_core::account::Account;
 use journ_core::arguments::{Command, DateTimeArguments};
-use journ_core::configuration::{create_unit_filter, AccountFilter, Filter};
+use journ_core::configuration::{AccountFilter, Filter, create_unit_filter};
 use journ_core::directive::DirectiveKind;
 use journ_core::err;
 use journ_core::error::JournError;
@@ -24,8 +24,8 @@ use journ_core::unit::Unit;
 use std::any::Any;
 use std::ops::{Bound, Deref, RangeBounds};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::LazyLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{cmp, fmt, mem};
 
 pub static DEFAULT_POOL: &str = "Pool_1";
@@ -404,7 +404,9 @@ impl FromStr for CapitalGainsColumn {
             value if value.starts_with('+') => {
                 Ok(CapitalGainsColumn::Metadata(value[1..].to_string()))
             }
-            _ => Err(err!("valid values are 'event-date', 'deal-date', 'unit', 'event', 'pool', 'acquired', 'total-cost', 'disposed', 'net-proceeds', 'gain', 'loss', 'pool-bal-before', 'pool-bal-after', 'description' or '+<METADATA_TAG>")),
+            _ => Err(err!(
+                "valid values are 'event-date', 'deal-date', 'unit', 'event', 'pool', 'acquired', 'total-cost', 'disposed', 'net-proceeds', 'gain', 'loss', 'pool-bal-before', 'pool-bal-after', 'description' or '+<METADATA_TAG>"
+            )),
         }
     }
 }
@@ -432,7 +434,7 @@ pub struct CagCommand {
 
 impl CagCommand {
     pub fn account_filter(&self) -> impl for<'h> Filter<Account<'h>> + '_ {
-        AccountFilter(&self.account_filter)
+        AccountFilter::new(&self.account_filter)
     }
 
     pub fn set_account_filter(&mut self, account_filter: Vec<String>) {
@@ -507,7 +509,9 @@ impl FromStr for EventPattern {
         if valid {
             Ok(Self(lower))
         } else {
-            Err(err!("must be one of 'pooled [pool]', 'unpooled [pool]', 'matched [pool]' or 'adjusted [pool]' where [pool] is an optional name of a pool"))
+            Err(err!(
+                "must be one of 'pooled [pool]', 'unpooled [pool]', 'matched [pool]' or 'adjusted [pool]' where [pool] is an optional name of a pool"
+            ))
         }
     }
 }

@@ -37,7 +37,7 @@ pub struct BalCommand {
 
 impl BalCommand {
     pub fn account_filter(&self) -> impl for<'h> Filter<Account<'h>> + '_ {
-        AccountFilter(&self.account_filter)
+        AccountFilter::new(&self.account_filter)
     }
 
     pub fn set_account_filter(&mut self, accounts: Vec<String>) {
