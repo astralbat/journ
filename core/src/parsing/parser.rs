@@ -148,9 +148,15 @@ where
             }
         }
 
-        let res = match parse_errors.len() {
+        match parse_errors.len() {
             0 => {
                 self.node.set_children(children);
+                trace!(
+                    "Setting segment #{} configuration in file: {:?}",
+                    self.node.segments().len(),
+                    self.node.nearest_filename()
+                );
+                trace!("{:?}", self.configuration.borrow());
                 self.node
                     .segments()
                     .last()
@@ -167,13 +173,10 @@ where
                         num_errs,
                         filename.to_str().unwrap()
                     ),))),
-                    None => {
-                        Err(err!(journ_errs.with_message(format!("Found {} errors", num_errs),)))
-                    }
+                    None => Err(err!(journ_errs.with_message(format!("Found {num_errs} errors"),))),
                 }
             }
-        };
-        res
+        }
     }
 
     pub fn include_kind<I>(

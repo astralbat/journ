@@ -304,7 +304,7 @@ impl<'h> Journal<'h> {
     /// journal segment in a depth-first fashion. I.e. descending into all branches and includes.
     /// The configuration thus contains all accounts, units and other items at their last setting.
     pub fn config(&self) -> &'h Configuration<'h> {
-        &self.combined_config
+        self.combined_config
     }
 
     pub fn node(&self, index: &NodeId<'h>) -> &JournalNode<'h> {

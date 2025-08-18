@@ -6,23 +6,21 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::ExecCommand;
-use crate::bal::BalColumn;
+use crate::column_expr::{ColumnValue, DataContext, EvalContext, PostingGroup};
+use crate::grouping::GroupKey;
+use crate::report::parse_columns;
 use journ_core::account::Account;
 use journ_core::arguments::{Arguments, Command};
 use journ_core::configuration::{
     AccountFilter, DescriptionFilter, FileFilter, Filter, create_unit_filter,
 };
+use journ_core::err;
 use journ_core::error::JournResult;
 use journ_core::journal::Journal;
+use journ_core::journal_entry::JournalEntry;
 use journ_core::journal_node::JournalNode;
-use journ_core::reporting::balance::AccountBalances;
-use journ_core::reporting::table::{Cell, Table};
-use journ_core::reporting::term_style::Colour;
+use journ_core::reporting::table::Cell;
 use journ_core::unit::Unit;
-use journ_core::valuer;
-use journ_core::valuer::ValueResult;
-use std::borrow::Cow;
-use std::collections::HashSet;
 
 #[derive(Default, Debug)]
 pub struct BalCommand {
@@ -32,11 +30,11 @@ pub struct BalCommand {
     description_filter: Vec<String>,
     write_csv: bool,
     write_file: bool,
-    columns: Vec<BalColumn>,
+    column_spec: String,
 }
 
 impl BalCommand {
-    pub fn account_filter(&self) -> impl for<'h> Filter<Account<'h>> + '_ {
+    pub fn account_filter<'a>(&'a self) -> impl for<'h> Filter<'a, Account<'h>> + Clone {
         AccountFilter::new(&self.account_filter)
     }
 
@@ -44,13 +42,18 @@ impl BalCommand {
         self.account_filter = accounts;
     }
 
-    pub fn unit_filter(&self) -> impl for<'h> Filter<Unit<'h>> + '_ {
+    pub fn unit_filter<'a>(&'a self) -> impl for<'h> Filter<'a, Unit<'h>> + Clone {
         create_unit_filter(&self.unit_filter)
     }
 
     pub fn set_unit_filter(&mut self, units: Vec<String>) {
         self.unit_filter = units;
     }
+
+    /*
+    pub fn posting_filter(&self) -> impl for<'h> Filter<Posting<'h>> + '_ {
+        PostingFilter::new(self.unit_filter(), self.account_filter())
+    }*/
 
     pub fn write_csv(&self) -> bool {
         self.write_csv
@@ -60,7 +63,7 @@ impl BalCommand {
         self.write_csv = write_csv;
     }
 
-    pub fn file_filter(&self) -> impl for<'h> Filter<JournalNode<'h>> + '_ {
+    pub fn file_filter(&self) -> impl for<'h> Filter<'_, JournalNode<'h>> + '_ {
         FileFilter(&self.file_filter)
     }
 
@@ -68,7 +71,7 @@ impl BalCommand {
         self.file_filter = files;
     }
 
-    pub fn description_filter(&self) -> impl Filter<str> + '_ {
+    pub fn description_filter(&self) -> impl Filter<'_, str> + '_ {
         DescriptionFilter(&self.description_filter)
     }
 
@@ -76,12 +79,12 @@ impl BalCommand {
         self.description_filter = descriptions
     }
 
-    pub fn columns(&self) -> &[BalColumn] {
-        &self.columns
+    pub fn column_spec(&self) -> &str {
+        &self.column_spec
     }
 
-    pub fn set_columns(&mut self, columns: Vec<BalColumn>) {
-        self.columns = columns;
+    pub fn set_column_spec(&mut self, column_spec: String) {
+        self.column_spec = column_spec;
     }
 
     pub fn write_file(&self) -> bool {
@@ -96,12 +99,86 @@ impl BalCommand {
 impl Command for BalCommand {}
 
 impl ExecCommand for BalCommand {
-    fn execute(&self, mut journ: Journal) -> JournResult<()> {
+    fn execute<'h>(&self, journ: Journal<'h>) -> JournResult<()> {
         let args = Arguments::get();
 
         let cmd: &BalCommand = args.cast_cmd().unwrap();
         let config = journ.config();
 
+        // Parse the column specification.
+        let lowercase_spec = cmd.column_spec.to_ascii_lowercase();
+        let columns = parse_columns(&lowercase_spec)?;
+
+        // Get all the accounts to balance for.
+        let description_filter = cmd.description_filter();
+        let file_filter = cmd.file_filter();
+        let account_filter = cmd.account_filter();
+        let unit_filter = cmd.unit_filter();
+        let filtered_entries = Box::new(|| {
+            Box::new(
+                journ
+                    .entry_range(args.begin_end_range())
+                    .filter(|e| description_filter.is_included(e.description()))
+                    .filter(|e| {
+                        file_filter
+                            .is_included(journ.root().find_by_node_id(e.id().node_id()).unwrap())
+                    }),
+            ) as Box<dyn Iterator<Item = &'h JournalEntry<'h>>>
+        });
+
+        let mut table = journ_core::reporting::table::Table::default();
+        // Heading Row
+        let headings = columns.iter().map(|col| Cell::from(col)).collect();
+        table.set_heading_row(headings);
+
+        for acc in config.accounts() {
+            if account_filter.is_included(&**acc) {
+                let account_filter_with_group_acc =
+                    account_filter.clone().and(|a: &Account| a == &**acc);
+                let context = EvalContext::new(
+                    &journ,
+                    DataContext::Group(PostingGroup::new(
+                        filtered_entries.clone(),
+                        Box::new(unit_filter.clone()),
+                        Box::new(account_filter_with_group_acc),
+                        Some(GroupKey::Account(acc.name())),
+                    )),
+                );
+
+                let mut row = vec![];
+                let mut found_non_zero = false;
+                for col in columns.iter() {
+                    let value = col.expr.eval(&context).map_err(|e| {
+                        err!("Invalid column expression: '{}'", cmd.column_spec).with_source(e)
+                    })?;
+                    if let ColumnValue::Amount(a) = value
+                        && !a.is_zero()
+                    {
+                        found_non_zero = true;
+                    }
+                    row.push(Cell::from(value));
+                }
+                if found_non_zero {
+                    table.add_row(row);
+                }
+            }
+        }
+        // Total row
+        table.add_separator_row('-', columns.len() as u16);
+
+        // Print the table
+        let mut output = String::new();
+        if cmd.write_csv() {
+            table.print_csv(&mut output).unwrap();
+        } else {
+            table.print(&mut output).unwrap();
+        }
+        println!("{output}");
+
+        // We only need to write the price database.
+        config.price_databases().into_iter().for_each(|db| db.write_file().unwrap());
+
+        /*
         // Get the value units. The unit to value in might not exist in the config,
         // and in this case, we'll just create a new object.
         let mut value_units = vec![];
@@ -114,7 +191,7 @@ impl ExecCommand for BalCommand {
                 );
             }
         }
-        let with_amount = cmd.columns.contains(&BalColumn::Amount) || value_units.is_empty();
+        let with_amount = columns.contains(&BalColumn::Amount) || value_units.is_empty();
         let mut bals = AccountBalances::new(with_amount, value_units.clone());
 
         let account_filter = cmd.account_filter();
@@ -200,10 +277,13 @@ impl ExecCommand for BalCommand {
 
         // We only need to write the price database.
         config.price_databases().into_iter().for_each(|db| db.write_file().unwrap());
+
+         */
         Ok(())
     }
 }
 
+/*
 fn create_table<'a>(bals: &'a AccountBalances) -> Table<'a> {
     let cmd = Arguments::get().cast_cmd::<BalCommand>().unwrap();
     let mut table = Table::default();
@@ -287,4 +367,4 @@ fn create_table<'a>(bals: &'a AccountBalances) -> Table<'a> {
     }*/
 
     table
-}
+}*/

@@ -63,6 +63,7 @@ pub trait AccountBalance<'h> {
 pub struct AccountBalances<'h> {
     with_amount: bool,
     value_units: Vec<&'h Unit<'h>>,
+    metadata_keys: Vec<String>,
     lines: Vec<BalanceLine<'h>>,
 }
 pub struct BalanceLine<'h> {
@@ -91,7 +92,13 @@ impl<'h> AccountBalances<'h> {
             "Either with_amount must be true or value_units must not be empty"
         );
 
-        AccountBalances { with_amount, value_units, lines: vec![] }
+        AccountBalances { with_amount, value_units, lines: vec![], metadata_keys: Vec::new() }
+    }
+
+    /// Sets metadata keys whose values will also be attempted to be balanced for matching entries
+    /// whose accounts are included.
+    pub fn set_metadata_keys(&mut self, keys: Vec<String>) {
+        self.metadata_keys = keys;
     }
 
     pub fn account_balances<'a>(

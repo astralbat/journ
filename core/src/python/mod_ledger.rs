@@ -20,9 +20,7 @@ use chrono_tz::Tz;
 use pyo3::basic::CompareOp;
 use pyo3::exceptions::PyException;
 use pyo3::types::{PyAnyMethods, PyDateTime, PyDict, PyDictMethods, PyModule, PyModuleMethods};
-use pyo3::{
-    Bound, IntoPyObject, Py, PyErr, PyObject, PyResult, Python, create_exception, wrap_pyfunction,
-};
+use pyo3::{Bound, IntoPyObject, Py, PyErr, PyObject, PyResult, Python, create_exception, wrap_pyfunction};
 use pyo3::{pyclass, pyfunction, pymethods, pymodule};
 use rust_decimal::Decimal;
 use std::ffi::CString;

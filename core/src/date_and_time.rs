@@ -12,7 +12,7 @@ use crate::ext::RangeBoundsExt;
 use crate::parsing::text_input::TextInput;
 use crate::parsing::{IParseResult, JParseResult};
 use crate::reporting::table;
-use crate::reporting::table::WrapPolicy;
+use crate::reporting::table::{Cell, WrapPolicy};
 use crate::{err, match_parser, match_parsers};
 use chrono::format::{DelayedFormat, Fixed, Item, Numeric, Pad, Parsed, parse};
 use chrono::{
@@ -182,6 +182,12 @@ impl<'h> JDate<'h> {
     }
 }
 
+impl From<JDate<'_>> for Cell<'_> {
+    fn from(value: JDate) -> Self {
+        Cell::from(value.date.format(value.format.format_str()).to_string())
+    }
+}
+
 impl Deref for JDate<'_> {
     type Target = NaiveDate;
 
@@ -195,6 +201,14 @@ impl fmt::Display for JDate<'_> {
         write!(f, "{}", DelayedFormat::new(Some(self.date), None, self.format.items().iter()))
     }
 }
+
+impl PartialEq for JDate<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.date == other.date
+    }
+}
+
+impl Eq for JDate<'_> {}
 
 #[derive(Copy, Clone, Debug)]
 pub struct JTime<'h> {
@@ -319,8 +333,11 @@ impl<'h> JDateTime<'h> {
     }
 
     /// Gets the date in the local timezone. I.e. not a UTC date unless the timezone is UTC.
-    pub fn date(&self) -> NaiveDate {
-        self.datetime.naive_local().date()
+    pub fn date(&self) -> JDate<'h> {
+        JDate::new(
+            self.datetime.naive_local().date(),
+            self.date_format.unwrap_or(&DEFAULT_DATE_FORMAT),
+        )
     }
 
     pub fn time(&self) -> NaiveTime {
@@ -456,6 +473,12 @@ impl fmt::Display for JDateTime<'_> {
     }
 }
 
+impl From<JDateTime<'_>> for Cell<'_> {
+    fn from(value: JDateTime) -> Self {
+        Cell::from(value.to_string())
+    }
+}
+
 impl PartialEq for JDateTime<'_> {
     fn eq(&self, other: &Self) -> bool {
         self.datetime == other.datetime
@@ -558,7 +581,7 @@ impl<'h> JDateTimeRange<'h> {
     pub fn without_time(mut self) -> Self {
         self.start.time_format = None;
 
-        if self.start.date() == self.end().date() {
+        if self.start.date().date == self.end().date().date {
             self.end = None;
         } else if let Some(end) = self.end.as_mut() {
             end.time_format = None;
@@ -606,7 +629,7 @@ impl<'h> JDateTimeRange<'h> {
                 // so no need to print the end as well.
                 if self.start.time_format.is_none()
                     && end.time_format().is_none()
-                    && end.date() == self.start.date() + Duration::days(1)
+                    && end.date().date == self.start.date().date + Duration::days(1)
                 {
                     write!(f, "{}", self.start)
                 } else {
@@ -631,7 +654,7 @@ impl<'h> JDateTimeRange<'h> {
                                 f,
                                 "{}",
                                 DelayedFormat::new(
-                                    Some(self.start.date()),
+                                    Some(self.start.date().date),
                                     None,
                                     self.start.date_format.unwrap().items().iter(),
                                 )
@@ -641,7 +664,7 @@ impl<'h> JDateTimeRange<'h> {
                                 f,
                                 "{}",
                                 DelayedFormat::new(
-                                    Some(self.start.date()),
+                                    Some(self.start.date().date),
                                     None,
                                     self.start.date_format.unwrap().items_no_day(),
                                 )
@@ -652,7 +675,7 @@ impl<'h> JDateTimeRange<'h> {
                             f,
                             "{}",
                             DelayedFormat::new(
-                                Some(self.start.date()),
+                                Some(self.start.date().date),
                                 None,
                                 self.start.date_format.unwrap().items_no_day_no_month(),
                             )
@@ -819,11 +842,11 @@ impl<'h> DateAndTime<'h> {
         self.datetime_range.end().datetime()
     }
 
-    pub fn date_from(&self) -> NaiveDate {
+    pub fn date_from(&self) -> JDate<'h> {
         self.datetime_range.start.date()
     }
 
-    pub fn date_to(&self) -> NaiveDate {
+    pub fn date_to(&self) -> JDate<'h> {
         self.datetime_range.end().date()
     }
 
@@ -835,10 +858,10 @@ impl<'h> DateAndTime<'h> {
         self.datetime_aux.as_ref().map(|adt| adt.datetime().naive_local().date())
     }
 
-    pub fn aux_date_or_date_from(&self) -> NaiveDate {
+    pub fn aux_date_or_date_from(&self) -> JDate<'h> {
         self.datetime_aux
             .as_ref()
-            .map(|adt| adt.datetime().naive_local().date())
+            .map(|adt| adt.date())
             .unwrap_or_else(|| self.datetime_range.start.date())
     }
 

@@ -74,7 +74,7 @@ impl<'h> JournalNodeSegment<'h> {
     }
 
     pub fn next_segment(&self) -> Option<&'h JournalNodeSegment<'h>> {
-        self.next_segment.lock().unwrap().clone()
+        *self.next_segment.lock().unwrap()
     }
 
     pub(crate) fn set_next_segment(&self, next_segment: Option<&'h JournalNodeSegment<'h>>) {

@@ -19,6 +19,7 @@ pub enum BalColumn {
     Account,
     Amount,
     Value(String),
+    Metadata(String),
 }
 
 impl FromStr for BalColumn {
@@ -28,9 +29,12 @@ impl FromStr for BalColumn {
         match s.to_ascii_lowercase().as_str() {
             "account" => Ok(BalColumn::Account),
             "amount" => Ok(BalColumn::Amount),
-            other if other.starts_with("value:") => {
+            value if value.starts_with("value:") => {
                 let unit = s[6..].to_string();
                 Ok(BalColumn::Value(unit))
+            }
+            metadata if metadata.starts_with("+") => {
+                Ok(BalColumn::Metadata(metadata[1..].to_string()))
             }
             _ => Err(format!("Invalid column name: {s}")),
         }
@@ -43,6 +47,7 @@ impl Display for BalColumn {
             BalColumn::Account => write!(f, "Account"),
             BalColumn::Amount => write!(f, "Amount"),
             BalColumn::Value(unit) => write!(f, "{unit}"),
+            BalColumn::Metadata(key) => write!(f, "+{key}"),
         }
     }
 }
@@ -67,11 +72,14 @@ pub struct BalArguments {
     write_csv: bool,
     #[arg(
         short = 'o',
-        help = "A comma separated list of columns to print. This can be 'account', 'amount' or 'value:<unit>'. Any valuation will be looked up on the entry or evaluated on the date/time of the entry",
-        value_delimiter = ',',
-        default_value = "account,amount"
+        help = "A comma separated list of columns to print. This can be: \
+        account: the account matched by the account filter, \
+        amount: the summed amount for each account matched, \
+        value(<unit>): the value of the amount in a particular unit. Ay valuation will be looked up on the entry or evaluated on the date/time of the entry, \
+        cosum(<account>): an additional sum for the accounts matched on matched entries",
+        default_value = "account,sum(amount)"
     )]
-    columns: Vec<BalColumn>,
+    column_spec: String,
     #[arg(
         short = 'w',
         long = "write",
@@ -89,7 +97,7 @@ impl IntoExecCommand for BalArguments {
         bal_cmd.set_description_filter(self.description_filter);
         bal_cmd.set_file_filter(self.file_filter);
         bal_cmd.set_write_csv(self.write_csv);
-        bal_cmd.set_columns(self.columns);
+        bal_cmd.set_column_spec(self.column_spec);
         bal_cmd.set_write_file(self.write_file);
         Ok(bal_cmd)
     }

@@ -19,6 +19,7 @@
 #![feature(cow_is_borrowed)]
 #![feature(try_trait_v2)]
 #![feature(mapped_lock_guards)]
+#![feature(debug_closure_helpers)]
 extern crate chrono_tz;
 #[macro_use]
 extern crate rust_decimal_macros;

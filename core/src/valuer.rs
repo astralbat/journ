@@ -806,12 +806,17 @@ impl<'h> Valuer<'h> for SystemValuer<'h, '_> {
         amount: Amount<'h>,
         quote_unit: &'h Unit<'h>,
     ) -> JournResult<Option<Amount<'h>>> {
+        // We don't need to value anything
+        if amount.unit() == quote_unit {
+            return Ok(Some(amount));
+        }
+
         // Try the entry valuer first.
-        if let Some(entry_valuer) = &mut self.entry_valuer {
-            if let Some(val) = entry_valuer.value(amount, quote_unit)? {
-                info!("{} Valued via entry: {} = {:?}", self.datetime, amount, val);
-                return Ok(Some(val));
-            }
+        if let Some(entry_valuer) = &mut self.entry_valuer
+            && let Some(val) = entry_valuer.value(amount, quote_unit)?
+        {
+            info!("{} Valued via entry: {} = {:?}", self.datetime, amount, val);
+            return Ok(Some(val));
         }
         // Next, the linear system valuer.
         if let Some(value) = self.linear_system_valuer.value(amount, quote_unit)? {

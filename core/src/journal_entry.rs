@@ -9,7 +9,7 @@ use crate::account::Account;
 use crate::alloc::HerdAllocator;
 use crate::amount::Amount;
 use crate::configuration::Configuration;
-use crate::date_and_time::DateAndTime;
+use crate::date_and_time::{DateAndTime, JDate};
 use crate::error::{BlockContext, BlockContextError, JournError, JournResult};
 use crate::ext::{RangeBoundsExt, StrExt};
 use crate::journal_entry_flow::Flows;
@@ -177,7 +177,7 @@ impl<'h> JournalEntry<'h> {
         self.date_id.unwrap()
     }
 
-    pub fn date(&self) -> NaiveDate {
+    pub fn date(&self) -> JDate<'h> {
         self.date_and_time.date_from()
     }
 

@@ -10,6 +10,7 @@ use crate::reporting::table::cell::content::Alignment;
 use crate::reporting::table::cell::iter::{CellIterator, CellIteratorMut};
 use crate::reporting::table::cell::sequence::CellSequence;
 use crate::reporting::term_style::{Colour, Style};
+use rust_decimal::Decimal;
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::fmt;
@@ -546,9 +547,21 @@ impl<'a> From<&'a &str> for Cell<'a> {
     }
 }
 
+impl<'a> From<&'a str> for Cell<'a> {
+    fn from(s: &'a str) -> Self {
+        Self { node_kind: CellNodeKind::Leaf(Cow::Borrowed(s)), ..Default::default() }
+    }
+}
+
 impl From<String> for Cell<'_> {
     fn from(s: String) -> Self {
         Self { node_kind: CellNodeKind::Leaf(Cow::Owned(s)), ..Default::default() }
+    }
+}
+
+impl From<Decimal> for Cell<'_> {
+    fn from(value: Decimal) -> Self {
+        Self { node_kind: CellNodeKind::Leaf(Cow::Owned(value.to_string())), ..Default::default() }
     }
 }
 

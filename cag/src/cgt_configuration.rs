@@ -524,10 +524,10 @@ impl Deref for EventPattern {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct EventFilter<'a>(&'a Vec<EventPattern>);
 
-impl<'h> Filter<PoolEvent<'h>> for EventFilter<'_> {
+impl<'a, 'h> Filter<'a, PoolEvent<'h>> for EventFilter<'_> {
     fn is_included(&self, event: &PoolEvent<'h>) -> bool {
         // No filter specified; always include.
         if self.0.is_empty() {

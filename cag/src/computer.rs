@@ -81,20 +81,22 @@ impl CapitalGainsComputer {
         included_units.retain(|c| cmd.unit_filter().is_included(*c));
         info!("Included units for CAG: {:?}", included_units);
 
-        // Find default unit of account
+        // Find a global default unit of account. What is set in the configuration is preferred, but if that is not set,
+        // then we will scan the journal for the first valuation.
         let mut default_unit_of_account = None;
-        'outer: for entry in journal.entry_range(self.args.begin_end_range()) {
-            for flow in entry.flows().net_equity() {
-                if let Some(val) = flow.valued_amount().valuations().next() {
-                    default_unit_of_account = Some(val.unit());
-                    break 'outer;
-                }
+        if let Some(config) = journal.config().module_config::<CgtConfiguration>(MODULE_NAME) {
+            if let Some(uoac) = config.unit_of_account_change() {
+                default_unit_of_account =
+                    Some(journal.config().get_unit(uoac.unit_of_account()).unwrap())
             }
-            if let Some(config) = entry.config().module_config::<CgtConfiguration>(MODULE_NAME) {
-                if let Some(uoac) = config.unit_of_account_change() {
-                    default_unit_of_account =
-                        Some(entry.config().get_unit(uoac.unit_of_account()).unwrap());
-                    break 'outer;
+        }
+        if default_unit_of_account.is_none() {
+            'outer: for entry in journal.entry_range(self.args.begin_end_range()) {
+                for flow in entry.flows().net_equity() {
+                    if let Some(val) = flow.valued_amount().valuations().next() {
+                        default_unit_of_account = Some(val.unit());
+                        break 'outer;
+                    }
                 }
             }
         }
@@ -152,12 +154,15 @@ impl CapitalGainsComputer {
     /// provided via Metadata. The latter overrides the former.
     ///
     /// The `assumed_uoa` is used as the quote unit for valuations. It is based on the first pool the deal _could_ be pushed to.
-    fn scan_entry<'h>(
+    fn scan_entry<'h, 'u>(
         &mut self,
         entry: &'h JournalEntry<'h>,
-        unit_filter: impl Filter<Unit<'h>> + Copy,
+        unit_filter: impl Filter<'u, Unit<'h>> + Copy,
         initial_uoa: impl Fn(&DealGroup<'h>) -> &'h Unit<'h> + Copy,
-    ) -> Result<Vec<DealingEvent<'h>>, JournError> {
+    ) -> Result<Vec<DealingEvent<'h>>, JournError>
+    where
+        'h: 'u,
+    {
         let cg_metadata = entry.cg_metadata()?;
 
         // Assume entries that are adjustments to have no deals.
@@ -358,10 +363,10 @@ impl CapitalGainsComputer {
         Ok(deals)*/
     }
 
-    fn scan_net_equity_flows<'a, 'h>(
+    fn scan_net_equity_flows<'a, 'h, 'u>(
         valued_entry: &'a JournalEntry<'h>,
         existing_entry: &'h JournalEntry<'h>,
-        unit_filter: impl Filter<Unit<'h>>,
+        unit_filter: impl Filter<'u, Unit<'h>>,
         initial_uoa: impl Fn(&DealGroup<'h>) -> &'h Unit<'h>,
     ) -> ValueResult<'h, NetEquityFlowsAndMetadataEvents<'h>> {
         let flows = Some(valued_entry.flows());
@@ -523,7 +528,7 @@ impl<'h> DealingEventQueue<'h> {
     pub fn add_events<I: IntoIterator<Item = DealingEvent<'h>>>(
         &mut self,
         events: I,
-        pool_manager: &mut PoolManager<'h>,
+        pool_manager: &mut PoolManager<'h, '_>,
     ) -> JournResult<Vec<PoolEvent<'h>>> {
         let mut pool_events = vec![];
 
@@ -574,7 +579,7 @@ impl<'h> DealingEventQueue<'h> {
     pub fn flush_to_offset(
         &mut self,
         offset: usize,
-        pool_manager: &mut PoolManager<'h>,
+        pool_manager: &mut PoolManager<'h, '_>,
     ) -> JournResult<Vec<PoolEvent<'h>>> {
         let mut pool_events = vec![];
         for event in self.events.drain(..=offset) {
@@ -593,7 +598,7 @@ impl<'h> DealingEventQueue<'h> {
 
     pub fn flush_all(
         mut self,
-        pool_manager: &mut PoolManager<'h>,
+        pool_manager: &mut PoolManager<'h, '_>,
     ) -> JournResult<Vec<PoolEvent<'h>>> {
         if self.events.is_empty() {
             return Ok(vec![]);

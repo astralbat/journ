@@ -17,10 +17,10 @@ use crate::parsing::DerefMutAndDebug;
 use crate::price_db::PriceDatabase;
 use crate::unit::{NumberFormat, RoundingStrategy, Unit};
 use chrono_tz::Tz;
+use im::HashMap;
 use regex::{Regex, RegexBuilder};
 use std::borrow::Cow;
-use std::collections::HashMap;
-use std::collections::hash_map::Entry;
+use std::fmt;
 use std::fmt::{Debug, Formatter};
 use std::ops::Deref;
 use std::string::ToString;
@@ -47,7 +47,12 @@ impl<'h> ConfigurationVersion<'h> {
     }
 }
 
-#[derive(Debug)]
+impl fmt::Display for ConfigurationVersion<'_> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{}-{}", self.node_id, self.version)
+    }
+}
+
 struct BaseConfiguration<'h> {
     /// The version sequence of the `Configuration`. The version changes whenever the `BaseConfiguration`
     /// changes _and_ it is in use elsewhere (`Configuration::clone`).
@@ -99,7 +104,7 @@ impl<'h> BaseConfiguration<'h> {
     fn get_mut(self: &mut Arc<Self>) -> &mut Self {
         if Arc::strong_count(self) > 1 {
             let new_base = Self {
-                parent: Some(self.clone()),
+                parent: self.parent.clone(),
                 args: self.args,
                 version: ConfigurationVersion::next(self.version),
                 date_format: self.date_format,
@@ -107,9 +112,9 @@ impl<'h> BaseConfiguration<'h> {
                 timezone: self.timezone,
                 number_format: self.number_format,
                 default_unit: self.default_unit,
-                units: HashMap::new(),
-                accounts: HashMap::new(),
-                module_config: HashMap::new(),
+                units: self.units.clone(),
+                accounts: self.accounts.clone(),
+                module_config: self.module_config.clone(),
             };
             *self = Arc::new(new_base);
             Arc::get_mut(self).unwrap()
@@ -123,6 +128,21 @@ impl<'h> BaseConfiguration<'h> {
             // If the unit is not found, check the parent configuration if it exists.
             self.parent.as_ref().and_then(|parent| parent.get_unit(code))
         })
+    }
+
+    pub fn units<'a>(&'a self) -> Box<dyn Iterator<Item = &'h Unit<'h>> + 'a> {
+        match &self.parent {
+            Some(parent) => Box::new(parent.units().chain(self.units.values().copied())),
+            None => Box::new(self.units.values().copied()),
+        }
+    }
+
+    /// An iterator of all parent accounts, followed by all child accounts.
+    pub fn accounts<'a>(&'a self) -> Box<dyn Iterator<Item = &'a Arc<Account<'h>>> + 'a> {
+        match &self.parent {
+            Some(parent) => Box::new(parent.accounts().chain(self.accounts.values())),
+            None => Box::new(self.accounts.values()),
+        }
     }
 
     pub fn get_account(&self, full_name: &str) -> Option<&Arc<Account<'h>>> {
@@ -172,12 +192,51 @@ impl PartialEq for BaseConfiguration<'_> {
     }
 }
 
-pub trait Filter<T: ?Sized> {
-    fn is_included(&self, item: &T) -> bool;
+impl Debug for BaseConfiguration<'_> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        writeln!(f, "Configuration:")?;
+        if let Some(parent) = &self.parent {
+            writeln!(f, "    Parent:        {}", parent.version)?;
+        } else {
+            writeln!(f, "    Parent:        None")?;
+        }
+        writeln!(f, "    Version:       {}", self.version)?;
+        writeln!(f, "    Date Format:   {}", self.date_format.format_str())?;
+        writeln!(f, "    Time Format:   {}", self.time_format.format_str())?;
+        writeln!(f, "    Timezone:      {}", self.timezone)?;
+        writeln!(f, "    Number Format: {}", self.number_format)?;
+        writeln!(f, "    Default Unit:  {}", self.default_unit.code())?;
+        writeln!(f, "    Units:")?;
+        for code in self.units.keys() {
+            writeln!(f, "        {code}")?;
+        }
+        writeln!(f, "    Accounts:")?;
+        for name in self.accounts.keys() {
+            writeln!(f, "        {name}")?;
+        }
+        writeln!(f, "    Module Configurations:")?;
+        for (module_name, config) in &self.module_config {
+            writeln!(f, "        {module_name}: {config:?}")?;
+        }
+        Ok(())
+    }
 }
 
-impl<F, T: ?Sized> Filter<T> for F
+pub trait Filter<'a, T: ?Sized> {
+    fn is_included(&self, item: &T) -> bool;
+
+    fn and<F2>(self, other: F2) -> impl Filter<'a, T>
+    where
+        Self: Sized + 'a,
+        F2: Filter<'a, T> + 'a,
+    {
+        move |item: &T| self.is_included(item) && other.is_included(item)
+    }
+}
+
+impl<'a, F, T: ?Sized> Filter<'a, T> for F
 where
+    F: 'a,
     for<'c> F: Fn(&'c T) -> bool,
 {
     fn is_included(&self, item: &T) -> bool {
@@ -185,9 +244,10 @@ where
     }
 }
 
+#[derive(Clone)]
 pub struct AlwaysIncluded;
 
-impl<T: ?Sized> Filter<T> for AlwaysIncluded {
+impl<'a, T: ?Sized> Filter<'a, T> for AlwaysIncluded {
     fn is_included(&self, _item: &T) -> bool {
         true
     }
@@ -261,7 +321,7 @@ impl<'h> Configuration<'h> {
 
     /// Gets the date format in use.
     pub fn date_format(&self) -> &'h DateFormat<'h> {
-        &self.base_config.date_format
+        self.base_config.date_format
     }
 
     /// Sets the date format for reading subsequent entries. The date format can be overridden
@@ -273,7 +333,7 @@ impl<'h> Configuration<'h> {
 
     /// Gets the time format in use.
     pub fn time_format(&self) -> &'h TimeFormat<'h> {
-        &self.base_config.time_format
+        self.base_config.time_format
     }
 
     /// Sets the time format for reading subsequent entries. The time format can be overridden
@@ -317,7 +377,7 @@ impl<'h> Configuration<'h> {
 
     /// An `Iterator` of all `Units` kept by this `Configuration`.
     pub fn units(&self) -> impl Iterator<Item = &'h Unit<'h>> + '_ {
-        self.base_config.units.values().copied()
+        self.base_config.units()
     }
 
     /// Inserts the unit if it doesn't already exist. If it exists, then a new unit is created
@@ -428,21 +488,24 @@ impl<'h> Configuration<'h> {
             dbs.push(price_db);
         }
         for curr in self.base_config.units.values() {
-            if let Some(curr_db) = curr.prices() {
-                if !dbs.iter().any(|db| Arc::ptr_eq(db, curr_db)) {
-                    dbs.push(curr_db);
-                }
+            if let Some(curr_db) = curr.prices()
+                && !dbs.iter().any(|db| Arc::ptr_eq(db, curr_db))
+            {
+                dbs.push(curr_db);
             }
         }
         dbs
     }
 
-    fn insert_account(&mut self, account: Arc<Account<'h>>) -> Arc<Account<'h>> {
-        let inserted = match self.get_mut().accounts.entry(account.name_exact().to_string()) {
-            Entry::Vacant(ve) => Arc::clone(ve.insert(account)),
-            Entry::Occupied(mut oe) => oe.insert(account),
-        };
-        inserted
+    fn insert_account(&mut self, account: Arc<Account<'h>>) {
+        match self.get_mut().accounts.entry(account.name_exact().to_string()) {
+            im::hashmap::Entry::Vacant(ve) => {
+                ve.insert(account);
+            }
+            im::hashmap::Entry::Occupied(mut oe) => {
+                oe.insert(account);
+            }
+        }
     }
 
     pub fn merge_account(&mut self, account: Arc<Account<'h>>) -> Arc<Account<'h>> {
@@ -497,6 +560,11 @@ impl<'h> Configuration<'h> {
 
     pub fn get_account(&self, full_name: &str) -> Option<&Arc<Account<'h>>> {
         self.base_config.get_account(full_name)
+    }
+
+    /// An iterator of all parent accounts, followed by all child accounts.
+    pub fn accounts<'a>(&'a self) -> impl Iterator<Item = &'a Arc<Account<'h>>> + 'a {
+        self.base_config.accounts()
     }
 
     pub fn module_config<T: ModuleConfiguration>(
@@ -585,9 +653,12 @@ impl<'s, 'h> DerefMutAndDebug<'h, 's, Configuration<'h>> for &'s mut Configurati
 
 impl<'s, 'h> DerefMutAndDebug<'h, 's, Configuration<'h>> for MutexGuard<'s, Configuration<'h>> {}
 
-pub fn create_unit_filter<S: AsRef<str>>(units: &[S]) -> impl for<'t> Filter<Unit<'t>> + '_ {
+pub fn create_unit_filter<'a, S: AsRef<str> + Clone>(
+    units: &'a [S],
+) -> impl for<'h> Filter<'a, Unit<'h>> + Clone {
+    #[derive(Clone)]
     struct UnitFilter<'a, S: AsRef<str>>(&'a [S]);
-    impl<S: AsRef<str>> Filter<Unit<'_>> for UnitFilter<'_, S> {
+    impl<'a, 'h, S: AsRef<str> + Clone> Filter<'a, Unit<'h>> for UnitFilter<'a, S> {
         fn is_included(&self, u: &Unit) -> bool {
             // When the filter is empty, all units are included.
             if self.0.is_empty() {
@@ -619,6 +690,7 @@ pub fn create_unit_filter<S: AsRef<str>>(units: &[S]) -> impl for<'t> Filter<Uni
 
 /// The standard account filter. The filter will match accounts exactly (case insensitive) except where '..' sequence is used
 /// to represent a wildcard match for any number of characters in the account name.
+#[derive(Clone)]
 pub struct AccountFilter {
     expressions: Vec<Regex>,
 }
@@ -639,8 +711,8 @@ impl AccountFilter {
     }
 }
 
-impl Filter<Account<'_>> for AccountFilter {
-    fn is_included(&self, item: &Account) -> bool {
+impl<'a, 'h> Filter<'a, Account<'h>> for AccountFilter {
+    fn is_included(&self, item: &Account<'h>) -> bool {
         // When the filter is empty, all accounts are included.
         if self.expressions.is_empty() {
             return true;
@@ -656,9 +728,10 @@ impl Filter<Account<'_>> for AccountFilter {
 }
 
 /// The standard description filter is a substring filter.
+#[derive(Clone)]
 pub struct DescriptionFilter<'a, S: AsRef<str>>(pub &'a [S]);
 
-impl<S: AsRef<str>> Filter<str> for DescriptionFilter<'_, S> {
+impl<'a, S: AsRef<str> + Clone> Filter<'a, str> for DescriptionFilter<'_, S> {
     fn is_included(&self, description: &str) -> bool {
         // When the filter is empty, all accounts are included.
         if self.0.is_empty() {
@@ -674,9 +747,10 @@ impl<S: AsRef<str>> Filter<str> for DescriptionFilter<'_, S> {
     }
 }
 
+#[derive(Clone)]
 pub struct FileFilter<'a, S: AsRef<str>>(pub &'a [S]);
 
-impl<'h, S: AsRef<str>> Filter<JournalNode<'h>> for FileFilter<'_, S> {
+impl<'a, 'h, S: AsRef<str> + Clone> Filter<'a, JournalNode<'h>> for FileFilter<'_, S> {
     fn is_included(&self, node: &JournalNode<'h>) -> bool {
         // When the filter is empty, all accounts are included.
         if self.0.is_empty() {
@@ -693,3 +767,28 @@ impl<'h, S: AsRef<str>> Filter<JournalNode<'h>> for FileFilter<'_, S> {
         false
     }
 }
+
+/*
+pub struct PostingFilter<'a> {
+    account_filter: Box<dyn Filter<Account<'a>> + 'a>,
+    units_filter: Box<dyn Filter<Unit<'a>> + 'a>,
+}
+impl<'a> PostingFilter<'a> {
+    pub fn new(
+        account_filter: impl for<'h> Filter<Account<'h>> + 'a,
+        units_filter: impl for<'h> Filter<Unit<'h>> + 'a,
+    ) -> Self {
+        Self { account_filter: Box::new(account_filter), units_filter: Box::new(units_filter) }
+    }
+}
+impl<'h, 'a> Filter<Posting<'h>> for PostingFilter<'a> {
+    fn is_included(&self, pst: &Posting<'h>) -> bool {
+        // When the filter is empty, all postings are included.
+        if self.account_filter.is_included(pst.account())
+            && self.units_filter.is_included(pst.unit())
+        {
+            return true;
+        }
+        false
+    }
+}*/

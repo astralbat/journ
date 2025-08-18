@@ -25,7 +25,7 @@ nom_locate = "*"
 term_size = "1.0.0-beta.2"
 ansi_term = "0.12.1"
 yaml-rust = "0.4.5"
-pyo3 = { version = "0.25.0", features = [] }
+pyo3 = { version = "0.25.0", features = ["macros"] }
 log = { version = "0.4.20", features = ["max_level_trace", "release_max_level_trace"] }
 
 [dev-dependencies]

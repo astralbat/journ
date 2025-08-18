@@ -10,13 +10,17 @@
 
 mod bal;
 mod cag;
+mod column_expr;
 mod csv;
+mod grouping;
 mod print;
 mod reg;
+pub mod report;
 
 extern crate chrono;
 #[macro_use]
 extern crate log;
+extern crate core;
 
 use crate::bal::BalArguments;
 use crate::cag::CagArguments;
@@ -140,7 +144,7 @@ pub trait IntoExecCommand {
 }
 
 pub trait ExecCommand: Command {
-    fn execute(&self, journ: Journal) -> JournResult<()>;
+    fn execute<'h>(&self, journ: Journal) -> JournResult<()>;
 }
 
 fn main() {

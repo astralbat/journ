@@ -19,7 +19,7 @@ use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{MutexGuard, OnceLock};
-use std::{cmp, fs};
+use std::{cmp, fmt, fs};
 
 /// An iterator over the directives from a journal node's tree.
 pub struct DirectiveTreeIter<'h, 'a, 'b> {
@@ -34,12 +34,11 @@ impl<'h, 'a, 'b> DirectiveTreeIter<'h, 'a, 'b> {
 
         // Leak the guard and reclaim it later. We bound the lifetime of the guard to the external lifetime 'b.
         // We need to do this because iterator in Rust cannot return a reference to a variable in the iterator struct.
-        let dti = Self {
+        Self {
             inner: Box::leak(Box::new(current_segment.unwrap().directives())),
             position: 0,
             current_segment,
-        };
-        dti
+        }
     }
 }
 
@@ -181,6 +180,15 @@ impl Ord for NodeId<'_> {
     }
 }
 
+impl fmt::Display for NodeId<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.parent {
+            Ok(p) => write!(f, "{}.{}", p, self.id),
+            Err(i) => write!(f, "{}#{}", i, self.id),
+        }
+    }
+}
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum JournalNodeKind {
     Entry,
@@ -298,7 +306,7 @@ impl<'h> JournalNode<'h> {
 
     /// Gets the segments of this node. The node will always have at least one segment.
     pub fn segments(&self) -> &Vec<&'h JournalNodeSegment<'h>> {
-        &self.segments.get().expect("Segments not initialised")
+        self.segments.get().expect("Segments not initialised")
     }
 
     pub fn set_segments(&self, segments: Vec<&'h JournalNodeSegment<'h>>) {
@@ -411,13 +419,13 @@ impl<'h> JournalNode<'h> {
         let entry = allocator.alloc(entry);
         for seg in self.segments() {
             for dir in seg.directives().iter_mut() {
-                if let DirectiveKind::Entry(curr_entry) = dir.kind() {
-                    if curr_entry.id() == entry.id() {
-                        let curr_entry = *curr_entry;
+                if let DirectiveKind::Entry(curr_entry) = dir.kind()
+                    && curr_entry.id() == entry.id()
+                {
+                    let curr_entry = *curr_entry;
 
-                        *dir = Directive::new(None, DirectiveKind::Entry(entry));
-                        return (curr_entry, entry);
-                    }
+                    *dir = Directive::new(None, DirectiveKind::Entry(entry));
+                    return (curr_entry, entry);
                 }
             }
         }
@@ -447,10 +455,10 @@ impl<'h> JournalNode<'h> {
 
         for seg in self.segments() {
             for dir in seg.directives().iter() {
-                if let DirectiveKind::Entry(next_entry) = dir.kind() {
-                    if next_entry.id() == entry_id {
-                        return next_entry;
-                    }
+                if let DirectiveKind::Entry(next_entry) = dir.kind()
+                    && next_entry.id() == entry_id
+                {
+                    return next_entry;
                 }
             }
         }
@@ -537,17 +545,17 @@ impl<'h> JournalNode<'h> {
         initial_leading_space: &str,
     ) -> JournResult<()> {
         let dir_iter: Box<dyn Iterator<Item = &'a Directive>> = Box::new(dir_iter.filter(|d| {
-            if let Some(filter) = &account_filter {
-                if let DirectiveKind::Entry(entry) = d.kind() {
-                    return entry.matches_account_filter(filter);
-                }
+            if let Some(filter) = &account_filter
+                && let DirectiveKind::Entry(entry) = d.kind()
+            {
+                return entry.matches_account_filter(filter);
             }
             true
         }));
         let mut last_leading_space = initial_leading_space;
         for (i, dir) in dir_iter.enumerate() {
             // For the second directive onwards, the minimal leading space is a newline.
-            if i > 0 && last_leading_space == "" {
+            if i > 0 && last_leading_space.is_empty() {
                 last_leading_space = "\n";
             }
             match dir.parsed() {

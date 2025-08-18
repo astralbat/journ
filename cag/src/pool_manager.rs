@@ -26,17 +26,17 @@ use journ_core::unit::Unit;
 use log::debug;
 use std::collections::HashMap;
 
-pub struct PoolManager<'h> {
+pub struct PoolManager<'h, 'u> {
     /// The default unit of account to use for all pools when none is specified by the pool configuration.
     default_unit_of_account: &'h Unit<'h>,
     config: Option<Configuration<'h>>,
-    unit_filter: Box<dyn Filter<Unit<'h>> + 'h>,
+    unit_filter: Box<dyn Filter<'u, Unit<'h>> + 'h>,
     /// Pools are expected to be in the order they are declared in the configuration.
     pools: Vec<Pool<'h>, &'h HerdAllocator<'h>>,
     pool_schedulers: HashMap<usize, PoolScheduler<'h>>,
 }
 
-impl<'h> PoolManager<'h> {
+impl<'h, 'u> PoolManager<'h, 'u> {
     pub fn new(default_unit_of_account: &'h Unit<'h>, allocator: &'h HerdAllocator<'h>) -> Self {
         // The starting implied pool is named "Pool".
         PoolManager {
@@ -52,7 +52,7 @@ impl<'h> PoolManager<'h> {
         &self.pools
     }
 
-    pub fn set_unit_filter(&mut self, unit_filter: Box<dyn Filter<Unit<'h>> + 'h>) {
+    pub fn set_unit_filter(&mut self, unit_filter: Box<dyn Filter<'u, Unit<'h>> + 'h>) {
         self.unit_filter = unit_filter;
     }
 
