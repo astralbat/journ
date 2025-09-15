@@ -6,15 +6,16 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::amount::{Amount, AmountExpr};
-use crate::error::parsing::{tag_err, IErrorMsg, IParseError};
+use crate::error::parsing::{IErrorMsg, IParseError, tag_err};
 use crate::ext::StrExt;
 use crate::parsing::text_input::{ConfigInput, TextInput};
 use crate::parsing::util::recognize_rtrim;
-use crate::parsing::{util, IParseResult};
+use crate::parsing::{IParseResult, util};
 use crate::unit::{
-    CodeFormat, CodePosition, NegativePosition, NegativeStyle, NumberFormat, Unit, UnitFormat,
-    DEFAULT_UNIT_FORMAT,
+    CodeFormat, CodePosition, DEFAULT_UNIT_FORMAT, NegativePosition, NegativeStyle, NumberFormat,
+    Unit, UnitFormat,
 };
+use nom::Parser;
 use nom::branch::{alt, permutation};
 use nom::bytes::complete::{tag, take, take_till1, take_while1};
 use nom::character::complete::{char, space0};
@@ -22,8 +23,8 @@ use nom::combinator::{consumed, flat_map, map, map_res, opt, recognize, rest, ve
 use nom::error::context;
 use nom::multi::fold_many0;
 use nom::sequence::{delimited, pair, preceded};
-use nom::Parser;
 use rust_decimal::Decimal;
+use smartstring::alias::String as SS;
 use std::iter::Sum;
 use std::mem;
 
@@ -214,8 +215,8 @@ pub fn unit_format<'h, I: TextInput<'h>>(
                     let (input, decimal_s) = decimal_format_fn(input)?;
                     (
                         input,
-                        CodePosition::PaddedLeft(padding.text().to_string()),
-                        Some(unit_s.text().to_string()),
+                        CodePosition::PaddedLeft(padding.text().into()),
+                        Some(unit_s.text().into()),
                         decimal_s,
                     )
                 }
@@ -225,8 +226,8 @@ pub fn unit_format<'h, I: TextInput<'h>>(
                     let (input, unit_s) = opt(unit)(input).unwrap();
                     (
                         input,
-                        CodePosition::PaddedRight(padding.text().to_string()),
-                        unit_s.map(|s| s.text().to_string()),
+                        CodePosition::PaddedRight(padding.text().into()),
+                        unit_s.map(|s| s.text().into()),
                         decimal_s,
                     )
                 }
@@ -235,7 +236,7 @@ pub fn unit_format<'h, I: TextInput<'h>>(
 
         let negative_position = {
             if neg_preceded
-                && mem::discriminant(&CodePosition::PaddedLeft(String::new()))
+                && mem::discriminant(&CodePosition::PaddedLeft(SS::new()))
                     == mem::discriminant(&code_position)
             {
                 NegativePosition::CodeAdjacent
@@ -361,10 +362,7 @@ where
     I: TextInput<'h> + ConfigInput<'h>,
 {
     map(
-        consumed(tag_err(
-            IErrorMsg::UNIT,
-            verify(amount_expr_inner::<I>, |out| out.0 .0.is_some()),
-        )),
+        consumed(tag_err(IErrorMsg::UNIT, verify(amount_expr_inner::<I>, |out| out.0.0.is_some()))),
         |(cons, ((unit, quantity), _))| {
             let (consumed, preceding_space) = space0::<_, ()>(cons).unwrap();
             AmountExpr::new(

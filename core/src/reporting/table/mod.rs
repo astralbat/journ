@@ -14,7 +14,7 @@ pub use cell::content::Alignment;
 
 use crate::reporting::table::cell::column::{CellColumn, ColumnTreeNode};
 //use crate::reporting::table::Cell;
-use crate::reporting::term_style::Style;
+use crate::reporting::term_style::{Style, Weight};
 pub use row::Row;
 use std::cell::RefCell;
 use std::fmt;
@@ -66,7 +66,7 @@ impl<'cell> Table<'cell> {
     pub fn set_heading_row<C: Into<Cell<'cell>>>(&mut self, cells: Vec<C>) {
         let row = Row::new(cells);
         row.root_mut().iter_mut().for_each(|mut cell| {
-            cell.set_bold(true);
+            cell.set_weight(Weight::Bold);
         });
         self.heading_row = Some(RefCell::new(row));
     }
@@ -202,7 +202,7 @@ impl<'cell> Table<'cell> {
                 writeln!(w)?;
             }
         }
-        Style::fmt_end(w)?;
+        Style::reset(w)?;
         Ok(())
     }
 
@@ -219,7 +219,7 @@ impl<'cell> Table<'cell> {
                 writeln!(w)?;
             }
         }
-        Style::fmt_end(w)?;
+        Style::reset(w)?;
         Ok(())
     }
 }

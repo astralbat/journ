@@ -20,6 +20,9 @@
 #![feature(try_trait_v2)]
 #![feature(mapped_lock_guards)]
 #![feature(debug_closure_helpers)]
+#![feature(result_option_map_or_default)]
+#![feature(slice_concat_trait)]
+#![feature(pattern)]
 extern crate chrono_tz;
 #[macro_use]
 extern crate rust_decimal_macros;

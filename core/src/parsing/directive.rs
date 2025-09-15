@@ -122,17 +122,22 @@ where
     move |input: I| {
         let node = input.parse_node();
         let mut unit = Unit::new(unit_code);
-        unit.set_aliases(all_codes.iter().map(|c| c.to_string()).collect());
+        unit.set_aliases(all_codes.iter().copied().map(|c| c.into()).collect());
         let mut metadata = vec![];
         let rem = match_blocks!(input.clone(),
                 param_value("name") => |input: I| {
                     let name = promote("Invalid unit name", line_value)(input)?.1;
-                    unit.set_name(Some(name.text().to_string()));
+                    unit.set_name(Some(name.text().into()));
                     Ok(())
                 },
                 param_value("format") => |input| {
                     let format = promote("Invalid unit format", map_parser(line_value, parsing::amount::unit_format(true)))(input)?.1;
                     unit.set_format(format);
+                    Ok(())
+                },
+                param_value("valueformat") => |input| {
+                    let format = promote("Invalid unit value format", map_parser(line_value, parsing::amount::unit_format(true)))(input)?.1;
+                    unit.set_value_format(format);
                     Ok(())
                 },
                 param_value("rounding") => |input: I| {

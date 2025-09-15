@@ -6,19 +6,22 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::reporting::table::Cell;
-use crate::reporting::table::{Alignment, WrapPolicy};
-use crate::reporting::term_style::Colour;
+use crate::reporting::table::WrapPolicy;
+use crate::reporting::table2::{AlignedCell, Alignment, CellRef, SpaceDistribution, StyledCell};
+use crate::reporting::term_style::{Colour, Style};
+use crate::reporting::{table, table2};
 use crate::unit;
-use crate::unit::{RoundingStrategy, Unit};
+use crate::unit::{NegativeStyle, RoundingStrategy, Unit, UnitFormat};
 use fmt::Write;
-use rust_decimal::prelude::Zero;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::Zero;
+use smartstring::alias::String as SS;
 use std::borrow::Borrow;
 use std::iter::Sum;
 use std::ops::{Add, AddAssign, Bound, Deref, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 use std::{cmp, fmt, mem};
-use yaml_rust::yaml::Hash;
 use yaml_rust::Yaml;
+use yaml_rust::yaml::Hash;
 
 /// A quantity is a `Decimal` that forms the numeric part of an `Amount`. E.g. the '5' in '$5'.
 pub type Quantity = Decimal;
@@ -177,12 +180,12 @@ impl<'h> Amount<'h> {
         Amount::new(self.unit, self.quantity.abs())
     }
 
-    pub fn format(&self) -> String {
+    pub fn format(&self) -> SS {
         self.unit.format().format(*self)
     }
 
     /// Same as format() but without loss of precision.
-    pub fn format_precise(self) -> String {
+    pub fn format_precise(self) -> SS {
         self.unit.format().format_precise(self)
     }
 
@@ -214,10 +217,163 @@ impl<'h> Amount<'h> {
     pub fn add_precise(&self, rhs: Amount<'h>) -> Option<Amount<'h>> {
         let scale = self.quantity.scale().max(rhs.quantity.scale());
         let result = self.quantity.checked_add(rhs.quantity)?;
-        if result.scale() <= scale {
-            Some(Amount::new(self.unit, result))
+        if result.scale() <= scale { Some(Amount::new(self.unit, result)) } else { None }
+    }
+
+    /// Formats the amount as a string, allowing a handler to process the
+    /// different parts of the amount.
+    pub fn handle_parts<H: AmountPartHandler>(&self, handler: &mut H, format: &UnitFormat) {
+        struct AmountStrParser<'h, H: AmountPartHandler> {
+            handler: &'h mut H,
+            thousands_separator: char,
+            decimal_separator: char,
+            negative_style: NegativeStyle,
+            in_quotes: bool,
+            // Becomes true when the decimal point is found.
+            found_decimal: bool,
+            found_digits: bool,
+            // Becomes true when a '-' or '+' is found.
+            found_sign: bool,
+        }
+        impl<H: AmountPartHandler> Write for AmountStrParser<'_, H> {
+            fn write_str(&mut self, s: &str) -> fmt::Result {
+                let mut iter = s.chars().peekable();
+                while let Some(c) = iter.next() {
+                    // Two consecutive quotes are used to escape quotes in strings.
+                    if c == '"' && iter.peek() != Some(&'"') {
+                        self.in_quotes = !self.in_quotes;
+                        self.handler.handle_part(AmountPart::Quote(c));
+                        continue;
+                    }
+                    match c {
+                        c if self.in_quotes => {
+                            self.handler.handle_part(AmountPart::Code(c));
+                        }
+                        d if (d.is_ascii_digit() || d == self.thousands_separator)
+                            && !self.found_decimal =>
+                        {
+                            self.found_digits = true;
+                            self.handler.handle_part(AmountPart::DigitBeforeDecimal(c))
+                        }
+                        d if d.is_ascii_digit() => {
+                            self.found_digits = true;
+                            self.handler.handle_part(AmountPart::DigitAfterDecimal(c))
+                        }
+                        dp if dp == self.decimal_separator => {
+                            self.found_decimal = true;
+                            self.handler.handle_part(AmountPart::DecimalPoint(dp))
+                        }
+                        '+' if !self.found_digits && !self.found_sign => {
+                            self.handler.handle_part(AmountPart::Sign(c));
+                            self.found_sign = true
+                        }
+                        '-' if !self.found_digits
+                            && !self.found_sign
+                            && self.negative_style == NegativeStyle::NegativeSign =>
+                        {
+                            self.handler.handle_part(AmountPart::Sign(c));
+                            self.found_sign = true;
+                        }
+                        '(' if !self.found_digits
+                            && !self.found_sign
+                            && self.negative_style == NegativeStyle::Brackets =>
+                        {
+                            self.handler.handle_part(AmountPart::Sign(c));
+                            self.found_sign = true;
+                        }
+                        ')' if self.found_digits
+                            && self.found_sign
+                            && self.negative_style == NegativeStyle::Brackets =>
+                        {
+                            self.handler.handle_part(AmountPart::Sign(c));
+                            self.found_sign = false;
+                        }
+                        _ => {
+                            self.handler.handle_part(AmountPart::Code(c));
+                        }
+                    }
+                }
+                Ok(())
+            }
+        }
+        let mut parser = AmountStrParser {
+            handler,
+            thousands_separator: self.unit.number_format().thousands_separator() as char,
+            decimal_separator: self.unit.number_format().decimal_separator() as char,
+            negative_style: self.unit.number_format().negative_style(),
+            found_digits: false,
+            in_quotes: false,
+            found_decimal: false,
+            found_sign: false,
+        };
+        format.write_amount(*self, &mut parser, None).unwrap();
+    }
+
+    pub fn into_cell(self, format: &UnitFormat) -> Box<dyn table2::Cell> {
+        #[derive(Default)]
+        struct AmountHandler {
+            part_before_decimal: SS,
+            part_after_decimal: SS,
+            code_before_amount: SS,
+            code_after_amount: SS,
+            reached_decimal: bool,
+            reached_integer_part: bool,
+        }
+        impl AmountPartHandler for AmountHandler {
+            fn handle_part(&mut self, part: AmountPart) {
+                match part {
+                    AmountPart::DigitBeforeDecimal(_) => self.reached_integer_part = true,
+                    AmountPart::Code(c) if !self.reached_integer_part => {
+                        self.code_before_amount.push(c);
+                        return;
+                    }
+                    AmountPart::Code(c) if self.reached_integer_part => {
+                        self.code_after_amount.push(c);
+                        return;
+                    }
+                    _ if self.reached_integer_part => self.reached_decimal = true,
+                    _ => {}
+                }
+                if self.reached_decimal {
+                    self.part_after_decimal.push(part.as_char());
+                } else {
+                    self.part_before_decimal.push(part.as_char());
+                }
+            }
+        }
+        let mut handler = AmountHandler::default();
+        self.handle_parts(&mut handler, format);
+
+        let left: Box<dyn table2::Cell> = if !handler.code_before_amount.is_empty() {
+            let left = Box::new(AlignedCell::new(handler.code_before_amount, Alignment::Left))
+                as Box<dyn table2::Cell>;
+            let right = Box::new(AlignedCell::new(handler.part_before_decimal, Alignment::Right))
+                as Box<dyn table2::Cell>;
+            let mut cell = table2::BinaryCell::new(left, right);
+            // The right integer part is right aligned, so give it all the extra space.
+            cell.set_space_distribution(SpaceDistribution::Right);
+            Box::new(cell)
         } else {
-            None
+            Box::new(AlignedCell::new(handler.part_before_decimal, Alignment::Right))
+        };
+        let right = if !handler.code_after_amount.is_empty() {
+            let left = Box::new(handler.part_after_decimal) as Box<dyn table2::Cell>;
+            let right = Box::new(AlignedCell::new(handler.code_after_amount, Alignment::Right))
+                as Box<dyn table2::Cell>;
+            let mut cell = table2::BinaryCell::new(left, right);
+            cell.set_space_distribution(SpaceDistribution::Left);
+            Box::new(cell)
+        } else {
+            Box::new(handler.part_after_decimal) as Box<dyn table2::Cell>
+        };
+        let mut cell = table2::BinaryCell::new(left, right);
+        // The left integer part is right aligned, so give it all the extra space - looks better.
+        cell.set_space_distribution(SpaceDistribution::Left);
+
+        if !self.is_positive() {
+            Box::new(StyledCell::new(Box::new(cell), Style::default().with_fg(Colour::Red)))
+        } else {
+            Box::new(cell)
         }
     }
 
@@ -390,8 +546,8 @@ impl<'h, 'a> From<Amount<'h>> for Cell<'a> {
         let part5 = &amount_str[offset_4..];
 
         let mut amount_cell = Cell::from([
-            Cell::new(part0.to_string()).with_alignment(Alignment::Right),
-            Cell::new(part3.to_string()).with_alignment(Alignment::Right),
+            Cell::new(part0.to_string()).with_alignment(table::Alignment::Right),
+            Cell::new(part3.to_string()).with_alignment(table::Alignment::Right),
             Cell::new(part4.to_string()),
             Cell::new(part5.to_string()),
         ]);
@@ -416,7 +572,7 @@ impl<'h> From<&Amount<'h>> for Yaml {
             Yaml::String("quantity".to_string()),
             Yaml::String(amount.quantity().to_string()),
         );
-        hash.insert(Yaml::String("display".to_string()), Yaml::String(amount.format()));
+        hash.insert(Yaml::String("display".to_string()), Yaml::String(amount.format().to_string()));
         Yaml::Hash(hash)
     }
 }
@@ -429,6 +585,30 @@ impl<'h> Sum<Amount<'h>> for Amount<'h> {
         }
         sum
     }
+}
+
+pub enum AmountPart {
+    Quote(char),
+    Code(char),
+    Sign(char),
+    DigitBeforeDecimal(char),
+    DecimalPoint(char),
+    DigitAfterDecimal(char),
+}
+impl AmountPart {
+    pub fn as_char(&self) -> char {
+        match self {
+            AmountPart::Quote(c) => *c,
+            AmountPart::Code(c) => *c,
+            AmountPart::Sign(c) => *c,
+            AmountPart::DigitBeforeDecimal(c) => *c,
+            AmountPart::DecimalPoint(c) => *c,
+            AmountPart::DigitAfterDecimal(c) => *c,
+        }
+    }
+}
+pub trait AmountPartHandler {
+    fn handle_part(&mut self, part: AmountPart);
 }
 
 macro_rules! checked_op {

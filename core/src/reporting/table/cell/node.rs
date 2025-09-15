@@ -9,7 +9,7 @@ use crate::reporting::table::cell::column::CellColumnInfo;
 use crate::reporting::table::cell::content::Alignment;
 use crate::reporting::table::cell::iter::{CellIterator, CellIteratorMut};
 use crate::reporting::table::cell::sequence::CellSequence;
-use crate::reporting::term_style::{Colour, Style};
+use crate::reporting::term_style::{Colour, Style, Weight};
 use rust_decimal::Decimal;
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -221,12 +221,8 @@ impl<'cell> Cell<'cell> {
         self
     }
 
-    pub fn set_bold(&mut self, bold: bool) {
-        self.style = self.style.with_bold(bold)
-    }
-
-    pub fn set_faint(&mut self, faint: bool) {
-        self.style = self.style.with_faint(faint)
+    pub fn set_weight(&mut self, weight: Weight) {
+        self.style = self.style.with_weight(weight)
     }
 
     pub fn set_alignment(&mut self, alignment: Alignment) {

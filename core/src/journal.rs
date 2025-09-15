@@ -6,7 +6,7 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::alloc::HerdAllocator;
-use crate::arguments::{Arguments, CsvCommand, RegCommand};
+use crate::arguments::{Arguments, CsvCommand};
 use crate::configuration::Configuration;
 use crate::configuration::Filter;
 use crate::directive::DirectiveKind;
@@ -323,123 +323,6 @@ impl<'h> Journal<'h> {
         self.nodes_recursive().into_iter().find(|f| {
             f.canonical_filename().map(|f| f.ends_with(search.normalize())).unwrap_or(false)
         })
-    }
-
-    pub fn reg(&mut self, args: &'static Arguments) -> JournResult<()> {
-        let cmd: &RegCommand = args.cast_cmd().unwrap();
-        let mut pa = PostingsAggregation::new(cmd.group_postings_by());
-        let mut bals = vec![];
-        // Subtract date width + number of spaces
-        let date_width = if pa.group_by_date() {
-            cmd.datetime_args.date_format.max_formatting_width()
-        } else {
-            cmd.datetime_args.date_format.max_formatting_width()
-                + cmd.datetime_args.time_format.max_formatting_width()
-                + 1
-        };
-        let cols = term_size::dimensions().map(|s| s.0 - (date_width + 4)).unwrap_or(100);
-        let desc_cols = (0.3 * cols as f32) as usize;
-        let acc_cols = (0.3 * cols as f32) as usize;
-        let amount_cols = (0.2 * cols as f32) as usize;
-        let bal_cols = (0.2 * cols as f32) as usize;
-        let desc_filter = cmd.description_filter();
-        let unit_filter = cmd.unit_filter();
-        let file_filter = cmd.file_filter();
-        for entry in self.entry_range(args.begin_end_range()) {
-            if !desc_filter.is_included(entry.description()) {
-                continue;
-            }
-            if !file_filter.is_included(self.root.find_by_node_id(entry.id().node_id()).unwrap()) {
-                continue;
-            }
-            for pst in entry.postings() {
-                if !cmd.account_filter().is_included(pst.account()) {
-                    continue;
-                }
-                if !unit_filter.is_included(pst.unit()) {
-                    continue;
-                }
-                bals += pst.amount();
-                let ap =
-                    AggregatedPosting::from_entry_and_posting(entry, pst, bals.balance(pst.unit()));
-                pa += ap;
-            }
-        }
-        for ap in pa.postings().iter() {
-            let desc = ap.descriptions().join("; ").trim().ellipses(desc_cols);
-            let account = ap.account().to_string().ellipses(acc_cols);
-            let balance = ap.balance();
-            let amount_str = ap.amount().format_precise().ellipses(amount_cols);
-            let bal_str = balance.format_precise().ellipses(bal_cols);
-            /*
-            let date_str = if args.aux_date() {
-                ap.datetime().convert_datetime_range(&cmd.datetime_args).to_string()
-                    .with_timezone(cmd.datetime_args.timezone)
-                    .aux_date_or_date_from()
-                    .format(cmd.datetime_args.date_format.format_str())
-            } else {
-                ap.datetime()
-                    .with_timezone(cmd.datetime_args.timezone)
-                    .date_from()
-                    .format(cmd.datetime_args.date_format.format_str())
-            };
-            let time_to_use = if args.aux_date() {
-                ap.datetime().with_timezone(cmd.datetime_args.timezone).aux_time_or_time_from()
-            } else {
-                ap.datetime().with_timezone(cmd.datetime_args.timezone).time_from()
-            };
-            let time_str = if !pa.group_by_date() {
-                format!(" {}", time_to_use.format(cmd.datetime_args.time_format.format_str()))
-            } else {
-                "".to_string()
-            };*/
-            let mut out = io::stdout();
-            if atty::is(atty::Stream::Stdout) {
-                writeln!(
-                    out,
-                    "{} {} {} {} {}",
-                    ap.datetime().convert_datetime_range(&cmd.datetime_args).start(),
-                    format_args!(
-                        "{:width$}",
-                        Style::new().bold().paint(desc).to_string(),
-                        width = desc_cols + 8
-                    ),
-                    format_args!(
-                        "{:width$}",
-                        Blue.paint(account).to_string(),
-                        width = acc_cols + 9
-                    ),
-                    format_args!(
-                        "{:>width$}",
-                        if ap.amount().is_negative() {
-                            Red.paint(amount_str).to_string()
-                        } else {
-                            amount_str
-                        },
-                        width =
-                            if ap.amount().is_negative() { amount_cols + 9 } else { amount_cols }
-                    ),
-                    format_args!(
-                        "{:>width$}",
-                        if balance.is_negative() {
-                            Red.paint(bal_str).to_string()
-                        } else {
-                            bal_str
-                        },
-                        width = if balance.is_negative() { bal_cols + 9 } else { bal_cols }
-                    ),
-                )
-                .map_err(|e| err!(e; "IO Error"))?;
-            } else {
-                writeln!(
-                    out,
-                    "{} {desc:desc_cols$} {account:acc_cols$} {amount_str:>amount_cols$} {bal_str:>bal_cols$}",
-                    ap.datetime().convert_datetime_range(&cmd.datetime_args),
-                )
-                    .map_err(|e| err!(e; "IO Error"))?;
-            }
-        }
-        Ok(())
     }
 
     pub fn csv(&mut self, args: &'static Arguments) -> JournResult<()> {

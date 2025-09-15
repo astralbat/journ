@@ -6,6 +6,11 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::metadata::Metadata;
+use crate::reporting::table2::fmt::CellFormatter;
+use crate::reporting::table2::{
+    Cell, CellWidth, PolicyWrappingCell, StyledCell, WrapEase, WrapPolicy,
+};
+use crate::reporting::term_style::{Colour, Style};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::{cmp, fmt};
@@ -72,11 +77,7 @@ impl<'h> Account<'h> {
 
     /// Gets the full name of the account
     pub fn name(&self) -> &str {
-        if self.is_virtual() {
-            &self.name[1..self.name.len() - 1]
-        } else {
-            &self.name
-        }
+        if self.is_virtual() { &self.name[1..self.name.len() - 1] } else { &self.name }
     }
 
     pub fn parent(&self) -> Option<&Arc<Account<'h>>> {
@@ -165,11 +166,7 @@ impl<'h> Account<'h> {
                 return Some(tag);
             }
         }
-        if let Some(parent) = &self.parent {
-            parent.get_best_tag(tags)
-        } else {
-            None
-        }
+        if let Some(parent) = &self.parent { parent.get_best_tag(tags) } else { None }
     }
 }
 
@@ -210,6 +207,29 @@ where
     fn from(s: S) -> Account<'t> {
         let parent = Account::parent_str(s.as_ref()).map(|s| Arc::new(Account::from(s)));
         Account::new(s.as_ref().to_string(), parent, vec![])
+    }
+}
+
+impl Cell for &Account<'_> {
+    fn print<'format>(&self, f: &mut dyn CellFormatter<'format>, line: usize) -> fmt::Result {
+        if line == 0 { write!(f, "{}", self.name()) } else { Err(fmt::Error) }
+    }
+
+    fn width(&self) -> CellWidth {
+        CellWidth::Unary(self.name().chars().count())
+    }
+}
+
+impl<'a> From<&'a Account<'_>> for Box<dyn Cell + 'a> {
+    fn from(account: &'a Account) -> Self {
+        let mut wrapping_account =
+            PolicyWrappingCell::new(Box::new(account), WrapPolicy::AfterStr(":"));
+        wrapping_account.set_wrap_ease(WrapEase::Eager);
+
+        Box::new(StyledCell::new(
+            Box::new(wrapping_account),
+            Style::default().with_fg(Colour::Blue),
+        ))
     }
 }
 

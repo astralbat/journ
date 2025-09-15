@@ -15,7 +15,7 @@ use journ_core::configuration::Filter;
 use journ_core::date_and_time::JDateTimeRange;
 use journ_core::reporting::table::Cell;
 use journ_core::reporting::table::Row;
-use journ_core::reporting::term_style::Colour;
+use journ_core::reporting::term_style::{Colour, Weight};
 use journ_core::unit::Unit;
 use journ_core::valued_amount::ValuedAmount;
 use linked_hash_set::LinkedHashSet;
@@ -24,8 +24,8 @@ use std::ops::Add;
 use std::sync::atomic;
 use std::sync::atomic::AtomicUsize;
 use std::{fmt, iter};
-use yaml_rust::yaml::Hash;
 use yaml_rust::Yaml;
+use yaml_rust::yaml::Hash;
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct MatchDetails<'h> {
@@ -64,20 +64,12 @@ impl<'h> MatchDetails<'h> {
 
     /// Gets the buy holding of this match.
     pub fn buy_holding(&self) -> &DealHolding<'h> {
-        if self.originator.total().amount().is_positive() {
-            &self.originator
-        } else {
-            &self.target
-        }
+        if self.originator.total().amount().is_positive() { &self.originator } else { &self.target }
     }
 
     /// Gets the holding on the sell side of the match.
     pub fn sell_holding(&self) -> &DealHolding<'h> {
-        if self.originator.total().amount().is_negative() {
-            &self.originator
-        } else {
-            &self.target
-        }
+        if self.originator.total().amount().is_negative() { &self.originator } else { &self.target }
     }
 
     /// The actual purchase cost in proportion to the amount disposed including expenses.
@@ -1166,7 +1158,7 @@ impl<'h, 'e> AggregatedPoolEvent<'h, 'e> {
                 for e in es {
                     let mut inner_rows = e.as_table_rows(include_sub_events, total_row);
                     inner_rows.first_mut().iter_mut().for_each(|r| {
-                        r.set_faint(true);
+                        r.set_weight(Weight::Faint);
                     });
                     rows.extend(inner_rows);
                 }

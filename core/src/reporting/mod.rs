@@ -9,6 +9,7 @@ use std::fmt;
 
 pub mod balance;
 pub mod table;
+pub mod table2;
 pub mod term_style;
 
 /// A wrapper around a `fmt::Write` that counts the number of characters written.

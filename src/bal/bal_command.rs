@@ -19,7 +19,8 @@ use journ_core::error::JournResult;
 use journ_core::journal::Journal;
 use journ_core::journal_entry::JournalEntry;
 use journ_core::journal_node::JournalNode;
-use journ_core::reporting::table::Cell;
+use journ_core::reporting::table2::{CellRef, StyledCell};
+use journ_core::reporting::term_style::{Style, Weight};
 use journ_core::unit::Unit;
 
 #[derive(Default, Debug)]
@@ -105,9 +106,10 @@ impl ExecCommand for BalCommand {
         let cmd: &BalCommand = args.cast_cmd().unwrap();
         let config = journ.config();
 
-        // Parse the column specification.
+        // Parse the column specification. We need a lower-case version for evaluation.
         let lowercase_spec = cmd.column_spec.to_ascii_lowercase();
-        let columns = parse_columns(&lowercase_spec)?;
+        let lower_column_spec = parse_columns(&lowercase_spec)?;
+        let column_spec = parse_columns(cmd.column_spec())?;
 
         // Get all the accounts to balance for.
         let description_filter = cmd.description_filter();
@@ -126,53 +128,85 @@ impl ExecCommand for BalCommand {
             ) as Box<dyn Iterator<Item = &'h JournalEntry<'h>>>
         });
 
-        let mut table = journ_core::reporting::table::Table::default();
+        let mut table = journ_core::reporting::table2::Table::default();
+        table.set_color(!args.no_color);
         // Heading Row
-        let headings = columns.iter().map(|col| Cell::from(col)).collect();
+        let heading_style = Style::default().with_weight(Weight::Bold);
+        let headings = column_spec
+            .iter()
+            .map(|col| StyledCell::new(col.to_string(), heading_style))
+            .collect::<Vec<_>>();
         table.set_heading_row(headings);
 
+        let mut accounts_to_bal = vec![];
         for acc in config.accounts() {
             if account_filter.is_included(&**acc) {
-                let account_filter_with_group_acc =
-                    account_filter.clone().and(|a: &Account| a == &**acc);
-                let context = EvalContext::new(
-                    &journ,
-                    DataContext::Group(PostingGroup::new(
-                        filtered_entries.clone(),
-                        Box::new(unit_filter.clone()),
-                        Box::new(account_filter_with_group_acc),
-                        Some(GroupKey::Account(acc.name())),
-                    )),
-                );
-
-                let mut row = vec![];
-                let mut found_non_zero = false;
-                for col in columns.iter() {
-                    let value = col.expr.eval(&context).map_err(|e| {
-                        err!("Invalid column expression: '{}'", cmd.column_spec).with_source(e)
-                    })?;
-                    if let ColumnValue::Amount(a) = value
-                        && !a.is_zero()
-                    {
-                        found_non_zero = true;
-                    }
-                    row.push(Cell::from(value));
-                }
-                if found_non_zero {
-                    table.add_row(row);
-                }
+                accounts_to_bal.push(acc);
             }
         }
+        accounts_to_bal.sort();
+
+        for account in accounts_to_bal.into_iter() {
+            let account_filter_with_group_acc =
+                account_filter.clone().and(|a: &Account| a == &**account);
+            let context = EvalContext::new(
+                &journ,
+                DataContext::Group(PostingGroup::new(
+                    filtered_entries.clone(),
+                    Box::new(unit_filter.clone()),
+                    Box::new(account_filter_with_group_acc),
+                    Some(GroupKey::Account(account)),
+                )),
+            );
+
+            let mut row: Vec<CellRef> = vec![];
+            let mut found_non_zero = false;
+            for col in lower_column_spec.iter() {
+                let value = col
+                    .expr
+                    .eval(&context)
+                    .map_err(|e| err!("Unable to evaluate column: '{}'", col).with_source(e))?;
+
+                if let Some(amounts) = value.as_amounts() {
+                    if !amounts.iter().all(|a| a.is_zero()) {
+                        found_non_zero = true;
+                    }
+                }
+                row.push(value.into());
+            }
+            if found_non_zero {
+                table.push_row(row);
+            }
+        }
+
         // Total row
-        table.add_separator_row('-', columns.len() as u16);
+        if table.rows()[1..].len() > 1 {
+            table.push_separator_row('-', lower_column_spec.len());
+            let mut total_row: Vec<CellRef> = vec![];
+            let context = EvalContext::new(
+                &journ,
+                DataContext::Group(PostingGroup::new(
+                    filtered_entries.clone(),
+                    Box::new(unit_filter.clone()),
+                    Box::new(account_filter),
+                    None,
+                )),
+            );
+            for col in lower_column_spec.iter() {
+                let value = col.expr.eval(&context).unwrap_or(ColumnValue::StringRef(""));
+
+                total_row.push(value.into());
+            }
+            table.push_row(total_row);
+        }
 
         // Print the table
         let mut output = String::new();
-        if cmd.write_csv() {
-            table.print_csv(&mut output).unwrap();
-        } else {
-            table.print(&mut output).unwrap();
-        }
+        //if cmd.write_csv() {
+        //    table.print_csv(&mut output).unwrap();
+        //} else {
+        table.print(&mut output).unwrap();
+        //}
         println!("{output}");
 
         // We only need to write the price database.

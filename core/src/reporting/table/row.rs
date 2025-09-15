@@ -7,7 +7,7 @@
  */
 use crate::reporting::table::cell::sequence::CellSequence;
 use crate::reporting::table::cell::{Cell, CellNodeKind};
-use crate::reporting::term_style::Style;
+use crate::reporting::term_style::{Style, Weight};
 use std::cell::{Ref, RefCell, RefMut};
 use std::fmt;
 use std::iter::FromIterator;
@@ -64,8 +64,8 @@ impl<'cell> Row<'cell> {
         Row { root: Rc::new(RefCell::new(self.root.take().into_owned())) }
     }
 
-    pub fn set_faint(&mut self, faint: bool) {
-        self.root.borrow_mut().set_faint(faint);
+    pub fn set_weight(&mut self, weight: Weight) {
+        self.root.borrow_mut().set_weight(weight);
     }
 
     pub(super) fn wrap_text_eager(&mut self) -> bool {

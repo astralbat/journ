@@ -144,7 +144,7 @@ pub trait IntoExecCommand {
 }
 
 pub trait ExecCommand: Command {
-    fn execute<'h>(&self, journ: Journal) -> JournResult<()>;
+    fn execute<'h>(&self, journ: Journal<'h>) -> JournResult<()>;
 }
 
 fn main() {

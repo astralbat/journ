@@ -166,62 +166,6 @@ pub struct PrintCommand {
 impl Command for PrintCommand {}
 
 #[derive(Default, Debug)]
-pub struct RegCommand {
-    pub datetime_args: DateTimeArguments,
-    pub file_filter: Vec<String>,
-    pub account_filter: Vec<String>,
-    pub unit_filter: Vec<String>,
-    pub description_filter: Vec<String>,
-    pub group_postings_by: Option<String>,
-}
-
-impl RegCommand {
-    pub fn account_filter(&self) -> impl for<'t> Filter<Account<'t>> + '_ {
-        AccountFilter::new(&self.account_filter)
-    }
-
-    pub fn set_account_filter(&mut self, accounts: Vec<String>) {
-        self.account_filter = accounts;
-    }
-
-    pub fn unit_filter(&self) -> impl for<'t> Filter<Unit<'t>> + '_ {
-        create_unit_filter(&self.unit_filter)
-    }
-
-    pub fn set_unit_filter(&mut self, units: Vec<String>) {
-        self.unit_filter = units;
-    }
-
-    pub fn file_filter(&self) -> impl for<'h> Filter<JournalNode<'h>> + '_ {
-        FileFilter(&self.file_filter)
-    }
-
-    pub fn set_file_filter(&mut self, files: Vec<String>) {
-        self.file_filter = files;
-    }
-
-    pub fn description_filter(&self) -> impl Filter<str> + '_ {
-        DescriptionFilter(&self.description_filter)
-    }
-
-    pub fn set_description_filter(&mut self, descriptions: Vec<String>) {
-        self.description_filter = descriptions
-    }
-
-    pub fn group_postings_by(&self) -> Option<&String> {
-        self.group_postings_by.as_ref()
-    }
-
-    pub fn set_group_postings_by(&mut self, group_by: Option<String>) -> JournResult<()> {
-        validate_group_postings_by(group_by.as_ref())?;
-        self.group_postings_by = group_by.map(|s| s.to_lowercase());
-        Ok(())
-    }
-}
-
-impl Command for RegCommand {}
-
-#[derive(Default, Debug)]
 pub struct CsvCommand {
     pub datetime_args: DateTimeArguments,
     pub file_filter: Vec<String>,

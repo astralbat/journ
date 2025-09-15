@@ -5,8 +5,10 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
-use crate::{read_date_time_args, ExecCommand, IntoExecCommand};
-use journ_core::arguments::{Arguments, RegCommand};
+mod reg_command;
+
+use crate::reg::reg_command::RegCommand;
+use crate::{IntoExecCommand, read_date_time_args};
 use journ_core::error::JournResult;
 use journ_core::journal::Journal;
 
@@ -32,28 +34,31 @@ pub struct RegArguments {
         help = "Filter descriptions by regexp pattern"
     )]
     description_filter: Vec<String>,
-    #[arg(long = "group-by", value_name = "GROUP_BY", help = "Group postings by")]
-    group_by: Option<String>,
+    #[arg(short = 'f', long = "file", value_name = "FILE", help = "Filter by file")]
+    file_filter: Vec<String>,
+    #[arg(
+        short = 'o',
+        help = "A comma separated list of columns to print. This can be: \
+        date: the date of the entry, \
+        account: the account matched by the account filter, \
+        description: the description of the entry, \
+        amount: the summed amount for each account matched, \
+        balance: the running balance for the register",
+        default_value = "Date,Description,Account,Amount,Balance"
+    )]
+    column_spec: String,
 }
 
 impl IntoExecCommand for RegArguments {
     type Command = RegCommand;
     #[allow(clippy::field_reassign_with_default)]
-    fn into_exec_cmd(self, journ: &Journal) -> JournResult<Self::Command> {
+    fn into_exec_cmd(self, _journ: &Journal) -> JournResult<Self::Command> {
         let mut cmd = RegCommand::default();
-        cmd.datetime_args = read_date_time_args(journ)?;
         cmd.set_unit_filter(self.unit_filter);
         cmd.set_account_filter(self.account_filter);
         cmd.set_description_filter(self.description_filter);
-        cmd.set_group_postings_by(self.group_by)?;
-
+        cmd.set_file_filter(self.file_filter);
+        cmd.set_column_spec(self.column_spec);
         Ok(cmd)
-    }
-}
-
-impl ExecCommand for RegCommand {
-    fn execute(&self, mut journ: Journal) -> JournResult<()> {
-        let args = Arguments::get();
-        journ.reg(args)
     }
 }

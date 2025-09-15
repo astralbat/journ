@@ -445,31 +445,11 @@ impl<'h, 'p, 'l> Valuer<'h> for LambdaValuer<'h, 'p, 'l> {
 
         let result =
             self.lambda.eval(args, self.config.version().node_id().journal_incarnation())?;
-        //let db_config =
-        //    amount.unit().prices().and_then(|p_db| p_db.node()).map(|file| file.config());
-        //let date_format = self.config.as_herd_ref().date_format();
-        //let time_format = self.config.as_herd_ref().time_format();
         let mut prices = match LambdaValuer::extract_price_from_python_result(
             &mut self.config,
             amount.unit(),
             quote_unit,
             self.datetime,
-            /*
-            JDateTime::from_datetime(
-                self.datetime,
-                Some(
-                    db_config
-                        .as_ref()
-                        .map(|c| c.as_herd_ref().date_format())
-                        .unwrap_or(date_format),
-                ),
-                Some(
-                    db_config
-                        .as_ref()
-                        .map(|c| c.as_herd_ref().time_format())
-                        .unwrap_or(time_format),
-                ),
-            ),*/
             result,
         ) {
             Ok(r) => r,
@@ -480,47 +460,57 @@ impl<'h, 'p, 'l> Valuer<'h> for LambdaValuer<'h, 'p, 'l> {
             }
         };
         let got_inverse = prices.first().map(|p| p.base_unit() == quote_unit).unwrap_or(false);
-        if prices.len() == 1 {
-            self.price_db.put(prices[0].clone());
-            debug!(
-                "{} Retrieved Price for '{}': {}",
-                self.datetime,
-                prices[0].base_unit(),
-                prices[0].price()
-            );
-            // The price evaluation function might have given us the inverse of what we've asked for and we'll
-            // need to correct that here.
-            let price =
-                if got_inverse { Arc::new(prices[0].inverse()) } else { prices.pop().unwrap() };
-            Ok(Some(price.quote_unit().with_quantity(amount.quantity() * price.price().quantity())))
-        } else {
+        match prices.len() {
+            // No results, no valuation possible.
+            0 => Ok(None),
+            1 => {
+                self.price_db.put(prices[0].clone());
+                debug!(
+                    "{} Retrieved Price for '{}': {}",
+                    self.datetime,
+                    prices[0].base_unit(),
+                    prices[0].price()
+                );
+                // The price evaluation function might have given us the inverse of what we've asked for and we'll
+                // need to correct that here.
+                let price =
+                    if got_inverse { Arc::new(prices[0].inverse()) } else { prices.pop().unwrap() };
+                Ok(Some(
+                    price.quote_unit().with_quantity(amount.quantity() * price.price().quantity()),
+                ))
+            }
             // More than one result provided. We put all prices in to the price database and initialise
             // a new price database with just the results provided, returning the price that's deemed closest.
-            let result_database = PriceDatabase::default();
-            let prices_len = prices.len();
-            for price in prices {
-                self.price_db.put(Arc::clone(&price));
-                result_database.put(price);
-            }
-            debug!("{} Inserted {} prices in to the price db", self.datetime, prices_len);
-            let (bc, qc) =
-                if got_inverse { (quote_unit, amount.unit()) } else { (amount.unit(), quote_unit) };
-            match result_database.get_closest(self.datetime.datetime(), -1, bc, qc) {
-                Some(price) => {
-                    let price = if got_inverse { Arc::new(price.inverse()) } else { price };
-                    debug!(
-                        "{} Retrieved Price for '{}': {}",
-                        self.datetime,
-                        price.base_unit(),
-                        price.price()
-                    );
-                    Ok(Some(
-                        price
-                            .quote_unit()
-                            .with_quantity(amount.quantity() * price.price().quantity()),
-                    ))
+            _ => {
+                let result_database = PriceDatabase::default();
+                let prices_len = prices.len();
+                for price in prices {
+                    self.price_db.put(Arc::clone(&price));
+                    result_database.put(price);
                 }
-                None => Err(err!("No price found for '{}' -> '{}'", amount.unit(), quote_unit)),
+                debug!("{} Inserted {} prices in to the price db", self.datetime, prices_len);
+                let (bc, qc) = if got_inverse {
+                    (quote_unit, amount.unit())
+                } else {
+                    (amount.unit(), quote_unit)
+                };
+                match result_database.get_closest(self.datetime.datetime(), -1, bc, qc) {
+                    Some(price) => {
+                        let price = if got_inverse { Arc::new(price.inverse()) } else { price };
+                        debug!(
+                            "{} Retrieved Price for '{}': {}",
+                            self.datetime,
+                            price.base_unit(),
+                            price.price()
+                        );
+                        Ok(Some(
+                            price
+                                .quote_unit()
+                                .with_quantity(amount.quantity() * price.price().quantity()),
+                        ))
+                    }
+                    None => unreachable!("There's at least one price in the result database"),
+                }
             }
         }
     }

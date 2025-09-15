@@ -234,7 +234,7 @@ impl<'h> JournalEntry<'h> {
         match_map!(self.objects.last().unwrap(), EntryObject::Posting(p, _) => p).unwrap()
     }
 
-    pub fn postings(&self) -> impl Iterator<Item = &Posting<'h>> + '_ {
+    pub fn postings(&self) -> impl DoubleEndedIterator<Item = &Posting<'h>> + '_ {
         self.objects
             .iter()
             .filter_map(|obj| if let EntryObject::Posting(pst, _) = obj { Some(pst) } else { None })
@@ -461,12 +461,11 @@ impl<'h> JournalEntry<'h> {
     pub fn metadata_tag_values(&self, key: &str) -> LinkedHashSet<String> {
         let mut vals = LinkedHashSet::new();
         for obj in self.objects.iter() {
-            if let EntryObject::Metadata(m) = obj {
-                if m.key() == key {
-                    if let Some(val) = m.value_unindented() {
-                        vals.insert_if_absent(val);
-                    }
-                }
+            if let EntryObject::Metadata(m) = obj
+                && m.key() == key
+                && let Some(val) = m.value_unindented()
+            {
+                vals.insert_if_absent(val);
             }
         }
         vals
@@ -474,10 +473,11 @@ impl<'h> JournalEntry<'h> {
 
     pub fn has_metadata_tag_value(&self, key: &str, value: &str) -> bool {
         for obj in self.objects.iter() {
-            if let EntryObject::Metadata(m) = obj {
-                if m.key() == key && m.value() == Some(value) {
-                    return true;
-                }
+            if let EntryObject::Metadata(m) = obj
+                && m.key() == key
+                && m.value() == Some(value)
+            {
+                return true;
             }
         }
         false
@@ -718,52 +718,6 @@ impl<'h> JournalEntry<'h> {
         }
     }
 
-    /*
-    /// Derives all possible valuations that do not already exist on the entry. Valuations
-    /// are always rounded.
-    /// # Examples
-    /// ```
-    /// # use journ_core::{amount, entry};
-    /// # use indoc::indoc;
-    /// let mut entry = entry!(indoc! {r#"
-    ///   2000-01-01
-    ///     Assets  10A
-    ///     Assets  -20B
-    /// "#});
-    /// entry.derive_valuations().unwrap();;
-    /// let unit_a = entry.config().get_unit("A").unwrap();
-    /// let unit_b = entry.config().get_unit("B").unwrap();
-    /// assert_eq!(entry.postings().nth(0).unwrap().amount_in(unit_b), Some(amount!("20B")));
-    /// assert_eq!(entry.postings().nth(1).unwrap().amount_in(unit_a), Some(amount!("-10A")));
-    /// ```
-    pub fn derive_valuations(&mut self) -> JournResult<()> {
-        let mut valued_units: SmallVec<[(&Unit<'h>, UnitAmountMap<'h>); 3]> = smallvec![];
-
-        for pst in self.postings() {
-            if !valued_units.iter().any(|uam| uam.0 == pst.unit()) {
-                let uam = self.exchange_rates(pst.unit())?;
-                valued_units.push((pst.unit(), uam));
-            }
-        }
-        for pst in self.postings_mut() {
-            let uam =
-                valued_units.iter().find(|uam| pst.unit() == uam.0).map(|uam| &uam.1).unwrap();
-            for rate in uam.iter() {
-                if pst.valued_amount().value_in(rate.unit()).is_none() {
-                    pst.set_valuation(Valuation::Total(
-                        AmountExpr::new(
-                            (rate * pst.amount().quantity()).abs().rounded(),
-                            " @@ ",
-                            None::<&'static str>,
-                        ),
-                        true,
-                    ));
-                }
-            }
-        }
-        Ok(())
-    }*/
-
     fn check_amounts_balanced(&self) -> JournResult<()> {
         let mut bals = SmallVec::with_capacity(8);
         for pst in self.postings().filter(|pst| !pst.account().is_virtual_unbalanced()) {
@@ -787,12 +741,8 @@ impl<'h> JournalEntry<'h> {
             for pst in self.postings().filter(|p| p.account().is_balanced()) {
                 // We allow for there to be multiple valuations in the same unit. We just take the first one
                 // for our needs and leave it up to the ValuedAmount to ensure they're consistent.
-                if let Some(val) = pst
-                    .valued_amount()
-                    .valuations()
-                    .filter(|v| v.unit() == unit)
-                    .filter(|v| !v.is_elided())
-                    .next()
+                if let Some(val) =
+                    pst.valued_amount().valuations().find(|v| v.unit() == unit && !v.is_elided())
                 {
                     match val {
                         Valuation::Total(value, _elided) => {
@@ -840,13 +790,13 @@ impl<'h> JournalEntry<'h> {
         for pst in self.postings() {
             if pst.amount() == 0 {
                 for valuation in pst.valuations() {
-                    if let Valuation::Total(value, _) = valuation {
-                        if !value.is_zero() {
-                            return Err(err!(err!(
+                    if let Valuation::Total(value, _) = valuation
+                        && !value.is_zero()
+                    {
+                        return Err(err!(err!(
                                 "Value should be 0 for 0 posting amounts: {}",
                                 pst
                             ); "Inconsistent valuation"));
-                        }
                     }
                 }
             } else {
@@ -886,11 +836,6 @@ impl<'h> JournalEntry<'h> {
                                         entry.range.to_string()
                                     )
                                 )));
-                                /*return Err(err!(err!(
-                                    "Inconsistent posting valuation: {} @@ {} not consistent with previous postings",
-                                    pst.amount(),
-                                    pst_value,
-                                ); "Inconsistent valuation"));*/
                             }
                         }
                         continue 'next_curr;

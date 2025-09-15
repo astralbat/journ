@@ -5,11 +5,9 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
-use chrono::NaiveDate;
+use journ_core::account::Account;
 use journ_core::amount::Amount;
 use journ_core::date_and_time::JDate;
-use journ_core::journal_entry::JournalEntry;
-use journ_core::posting::Posting;
 use std::collections::HashMap;
 use std::fmt;
 
@@ -28,7 +26,7 @@ pub enum Grouping {
 /// Represents single item in a grouped report.
 pub enum GroupKey<'h, 'a> {
     Date(JDate<'h>),
-    Account(&'a str),
+    Account(&'a Account<'h>),
     Description(&'a str),
 }
 
@@ -40,24 +38,4 @@ impl fmt::Display for GroupKey<'_, '_> {
             GroupKey::Description(desc) => write!(f, "Description={}", desc),
         }
     }
-}
-
-pub enum GroupedItemValue<'h> {
-    Amounts(Vec<Amount<'h>>),
-    String(String),
-}
-
-impl<'h> std::ops::AddAssign<Amount<'h>> for GroupedItemValue<'h> {
-    fn add_assign(&mut self, other: Amount<'h>) {
-        if let GroupedItemValue::Amounts(amounts) = self {
-            *amounts += other;
-        } else {
-            panic!("Cannot add Amount to GroupedItemValue::String");
-        }
-    }
-}
-
-pub struct GroupingValues<'h> {
-    grouping: Grouping,
-    values: HashMap<String, GroupedItemValue<'h>>,
 }

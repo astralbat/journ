@@ -77,7 +77,7 @@ pub struct BalArguments {
         amount: the summed amount for each account matched, \
         value(<unit>): the value of the amount in a particular unit. Ay valuation will be looked up on the entry or evaluated on the date/time of the entry, \
         cosum(<account>): an additional sum for the accounts matched on matched entries",
-        default_value = "account,sum(amount)"
+        default_value = "Account,Sum(amount)"
     )]
     column_spec: String,
     #[arg(

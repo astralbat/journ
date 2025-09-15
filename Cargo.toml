@@ -19,9 +19,10 @@ clap = { version = "4.5.4", features = ["derive"] }
 chrono = { version = "0.4" }
 chrono-tz = "0.10.3"
 nom = "7.1.3"
+smallvec = "1.4.2"
 num-format = { version = "0.4", features = ["with-system-locale"] }
 env_logger = "0.11.3"
-ansi_term = "0.12.1"
+terminal_size = "0.4.3"
 bumpalo-herd = "0.1.2"
 log = { version = "0.4", features = ["max_level_trace", "release_max_level_trace"] }
 sysinfo = { version = "0.32.0" }

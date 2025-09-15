@@ -170,6 +170,8 @@ pub trait StrExt {
 }
 pub trait StringExt {
     fn trim_newline(&mut self);
+
+    fn capitalize_first(&mut self);
 }
 impl StrExt for str {
     #[inline]
@@ -187,11 +189,7 @@ impl StrExt for str {
             || (self.starts_with('\'') && self.ends_with('\''))
     }
     fn trim_quotes(&self) -> &str {
-        if self.is_quoted() {
-            &self[1..self.len() - 1]
-        } else {
-            self
-        }
+        if self.is_quoted() { &self[1..self.len() - 1] } else { self }
     }
     fn ellipses(&self, n: usize) -> String {
         let mut count = 0;
@@ -217,7 +215,7 @@ impl StrExt for str {
             i128::from_str(s).map_err(|e| err!(e; "Cannot parse as number: '{}'", s))
         };
 
-        let negative = match format.negative_format() {
+        let negative = match format.negative_style() {
             NegativeStyle::NegativeSign => s.as_bytes().first().copied() == Some(b'-'),
             NegativeStyle::Brackets => {
                 s.as_bytes().first().copied() == Some(b'(')
@@ -225,7 +223,7 @@ impl StrExt for str {
             }
         };
         let (first_pos, last_pos) = if negative {
-            match format.negative_format() {
+            match format.negative_style() {
                 NegativeStyle::NegativeSign => (1, s.len()),
                 NegativeStyle::Brackets => (1, s.len() - 1),
             }
@@ -369,6 +367,19 @@ impl StringExt for String {
             if self.ends_with('\r') {
                 self.pop();
             }
+        }
+    }
+
+    /// Capitalizes the first character of the string, if it is alphabetic.
+    /// Does nothing if the string is empty or the first character is not alphabetic.
+    /// This only affects the first character, not the rest of the string.
+    /// This only affects ASCII characters.
+    fn capitalize_first(&mut self) {
+        if let Some(first_char) = self.chars().next()
+            && first_char.is_ascii_lowercase()
+        {
+            let first_char_upper = first_char.to_ascii_uppercase();
+            self.replace_range(0..first_char.len_utf8(), &first_char_upper.to_string());
         }
     }
 }
@@ -515,19 +526,11 @@ macro_rules! impl_num_ext {
     ($ty:ty) => {
         impl NumExt for $ty {
             fn min_abs(self, other: Self) -> Self {
-                if self.abs() < other.abs() {
-                    self
-                } else {
-                    other
-                }
+                if self.abs() < other.abs() { self } else { other }
             }
 
             fn is_sign_compatible(&self, other: Self) -> bool {
-                if *self == 0 || other == 0 {
-                    true
-                } else {
-                    self.signum() == other.signum()
-                }
+                if *self == 0 || other == 0 { true } else { self.signum() == other.signum() }
             }
         }
     };
@@ -541,11 +544,7 @@ impl_num_ext!(isize);
 
 impl NumExt for Decimal {
     fn min_abs(self, other: Self) -> Self {
-        if self.abs() < other.abs() {
-            self
-        } else {
-            other
-        }
+        if self.abs() < other.abs() { self } else { other }
     }
 
     fn is_sign_compatible(&self, other: Self) -> bool {

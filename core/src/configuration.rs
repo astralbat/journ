@@ -432,7 +432,7 @@ impl<'h> Configuration<'h> {
 
         // Combine aliases, but not with the default unit
         let mut combined_aliases = Vec::with_capacity(primary.aliases().count());
-        for alias in secondary.aliases().chain(primary.aliases()).map(|a| a.to_string()) {
+        for alias in secondary.aliases().chain(primary.aliases()).map(|a| a.into()) {
             if !combined_aliases.contains(&alias) {
                 combined_aliases.push(alias);
             }
@@ -444,6 +444,13 @@ impl<'h> Configuration<'h> {
             builder.set_format(primary.format().clone());
         } else if secondary.has_format() {
             builder.set_format(secondary.format().clone());
+        }
+
+        // Set the value format if one is set
+        if primary.has_value_format() {
+            builder.set_value_format(primary.value_format().clone());
+        } else if secondary.has_value_format() {
+            builder.set_value_format(secondary.value_format().clone());
         }
 
         // Set the rounding strategy if one is set

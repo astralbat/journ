@@ -7,22 +7,24 @@
  */
 use crate::grouping::GroupKey;
 use crate::report::BinOp;
-use chrono::NaiveDate;
 use journ_core::account::Account;
 use journ_core::amount::Amount;
 use journ_core::configuration::{AccountFilter, Filter};
 use journ_core::date_and_time::{JDate, JDateTime};
+use journ_core::err;
 use journ_core::error::JournResult;
 use journ_core::journal::Journal;
 use journ_core::journal_entry::JournalEntry;
 use journ_core::posting::Posting;
 use journ_core::reporting::table::Cell;
+use journ_core::reporting::table2;
+use journ_core::reporting::table2::{CellRef, EllipsisCell, MultiLineCell};
 use journ_core::unit::Unit;
-use journ_core::valued_amount::ValuedAmount;
 use journ_core::valuer::{SystemValuer, Valuer};
-use journ_core::{err, match_then};
 use rust_decimal::Decimal;
+use smallvec::SmallVec;
 use std::fmt;
+use std::fmt::Write;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ColumnExpr<'s> {
@@ -82,11 +84,16 @@ pub enum DataContext<'h, 'a> {
 pub struct EvalContext<'h, 'a> {
     journal: &'a Journal<'h>,
     data_context: DataContext<'h, 'a>,
+    variables: SmallVec<[(&'static str, ColumnValue<'h, 'a, 'static>); 1]>,
 }
 
 impl<'h, 'a> EvalContext<'h, 'a> {
     pub fn new(journal: &'a Journal<'h>, data_context: DataContext<'h, 'a>) -> Self {
-        EvalContext { journal, data_context }
+        EvalContext { journal, data_context, variables: SmallVec::new() }
+    }
+
+    pub fn add_variable(&mut self, name: &'static str, value: ColumnValue<'h, 'a, 'static>) {
+        self.variables.push((name, value));
     }
 
     pub fn data_context(&self) -> &DataContext<'h, 'a> {
@@ -111,19 +118,36 @@ impl<'h, 'a> EvalContext<'h, 'a> {
     }
 }
 
-#[derive(Debug)]
-pub enum ColumnValue<'h, 's> {
+#[derive(Debug, Clone)]
+pub enum ColumnValue<'h, 'a, 's> {
+    Account(&'a Account<'h>),
+    Description(&'s str),
     String(String),
     StringRef(&'s str),
     Date(JDate<'h>),
     Datetime(JDateTime<'h>),
     Number(Decimal),
     Amount(Amount<'h>),
+    // Like amount, but indicates this being a valued amount, to be formatted with the value formatter.
+    Value(Amount<'h>),
+    Amounts(Vec<Amount<'h>>),
+    Values(Vec<Amount<'h>>),
 }
 
-impl<'h, 's> ColumnValue<'h, 's> {
+impl<'h, 's, 'a> ColumnValue<'h, 'a, 's> {
     pub fn as_amount(&self) -> Option<Amount<'h>> {
-        if let ColumnValue::Amount(amount) = self { Some(*amount) } else { None }
+        match self {
+            ColumnValue::Amount(a) | ColumnValue::Value(a) => Some(*a),
+            _ => None,
+        }
+    }
+
+    pub fn as_amounts(&self) -> Option<&[Amount<'h>]> {
+        match self {
+            ColumnValue::Amounts(amounts) => Some(amounts),
+            ColumnValue::Amount(amount) => Some(std::slice::from_ref(amount)),
+            _ => None,
+        }
     }
 
     pub fn as_string(&self) -> Option<&str> {
@@ -151,34 +175,89 @@ impl<'h, 's> ColumnValue<'h, 's> {
     }
 }
 
-impl fmt::Display for ColumnValue<'_, '_> {
+impl fmt::Display for ColumnValue<'_, '_, '_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ColumnValue::String(s) => write!(f, "{}", s),
-            ColumnValue::StringRef(s) => write!(f, "{}", s),
+            ColumnValue::StringRef(s) | ColumnValue::Description(s) => write!(f, "{}", s),
+            ColumnValue::Account(acc) => write!(f, "{}", acc),
             ColumnValue::Date(date) => write!(f, "{}", date),
             ColumnValue::Datetime(dt) => write!(f, "{}", dt),
             ColumnValue::Number(num) => write!(f, "{}", num),
             ColumnValue::Amount(amount) => write!(f, "{}", amount),
+            ColumnValue::Amounts(amounts) => write!(
+                f,
+                "{}",
+                amounts.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(", ")
+            ),
+            ColumnValue::Value(value) => write!(f, "{}", value),
+            ColumnValue::Values(values) => {
+                write!(f, "{}", values.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(", "))
+            }
         }
     }
 }
 
-impl<'s> From<ColumnValue<'_, 's>> for Cell<'s> {
-    fn from(value: ColumnValue<'_, 's>) -> Self {
+impl<'s, 'a> From<ColumnValue<'_, 'a, 's>> for Cell<'s> {
+    fn from(value: ColumnValue<'_, 'a, 's>) -> Self {
         match value {
             ColumnValue::String(s) => Cell::from(s),
             ColumnValue::StringRef(s) => Cell::from(s),
+            ColumnValue::Description(s) => Cell::from(s),
             ColumnValue::Date(date) => Cell::from(date),
             ColumnValue::Datetime(dt) => Cell::from(dt),
+            ColumnValue::Account(acc) => Cell::from(acc.to_string()),
             ColumnValue::Number(num) => Cell::from(num),
             ColumnValue::Amount(amount) => Cell::from(amount),
+            ColumnValue::Amounts(amounts) => Cell::from(format!(
+                "[{}]",
+                amounts.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(", ")
+            )),
+            ColumnValue::Value(value) => Cell::from(value),
+            ColumnValue::Values(values) => Cell::from(format!(
+                "[{}]",
+                values.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(", ")
+            )),
+        }
+    }
+}
+
+impl<'s, 'a, 'h, 'val> From<ColumnValue<'h, 'a, 's>> for CellRef<'s>
+where
+    'h: 's,
+    'a: 's,
+{
+    fn from(value: ColumnValue<'h, 'a, 's>) -> Self {
+        match value {
+            ColumnValue::String(s) => CellRef::Owned(Box::new(s)),
+            ColumnValue::StringRef(s) => CellRef::Owned(Box::new(s)),
+            ColumnValue::Description(s) => {
+                CellRef::Owned(Box::new(EllipsisCell::new(CellRef::Owned(Box::new(s)))))
+            }
+            ColumnValue::Date(date) => CellRef::Owned(Box::new(date)),
+            ColumnValue::Datetime(dt) => CellRef::Owned(Box::new(dt)),
+            ColumnValue::Number(num) => CellRef::Owned(Box::new(num)),
+            ColumnValue::Account(acc) => CellRef::Owned(acc.into()),
+            ColumnValue::Amount(amount) => CellRef::Owned(amount.into_cell(amount.unit().format())),
+            ColumnValue::Amounts(amounts) => CellRef::Owned(Box::new(MultiLineCell::new(
+                amounts.into_iter().map(|a| CellRef::Owned(a.into_cell(a.unit().format()))),
+            ))),
+            ColumnValue::Value(value) => {
+                CellRef::Owned(value.into_cell(value.unit().value_format()))
+            }
+            ColumnValue::Values(values) => CellRef::Owned(Box::new(MultiLineCell::new(
+                values.into_iter().map(|a| CellRef::Owned(a.into_cell(a.unit().value_format()))),
+            ))),
         }
     }
 }
 
 impl<'h, 'a, 's> ColumnExpr<'s> {
-    pub fn eval(&self, eval_context: &EvalContext<'h, 'a>) -> JournResult<ColumnValue<'h, 's>> {
+    pub fn eval(&self, eval_context: &EvalContext<'h, 'a>) -> JournResult<ColumnValue<'h, 'a, 's>>
+    where
+        'h: 's,
+        'a: 's,
+    {
         let invalid_identifier = |name: &str| err!("Invalid identifier: '{}'", name,);
         let invalid_identifier_in_group = |name: &str, group_key: &GroupKey| {
             err!("Invalid identifier: '{}' for grouping key: '{}'", name, group_key)
@@ -190,7 +269,7 @@ impl<'h, 'a, 's> ColumnExpr<'s> {
             ColumnExpr::Column(name) => match eval_context.data_context() {
                 DataContext::Group(group) => match *name {
                     "account" => match group.group_key {
-                        Some(GroupKey::Account(acc)) => Ok(ColumnValue::String(acc.to_string())),
+                        Some(GroupKey::Account(acc)) => Ok(ColumnValue::Account(acc)),
                         _ => Err(identifier_not_valid_in_context("account")),
                     },
                     "date" => match group.group_key {
@@ -198,9 +277,7 @@ impl<'h, 'a, 's> ColumnExpr<'s> {
                         _ => Err(identifier_not_valid_in_context("date")),
                     },
                     "description" => match group.group_key {
-                        Some(GroupKey::Description(desc)) => {
-                            Ok(ColumnValue::String(desc.to_string()))
-                        }
+                        Some(GroupKey::Description(desc)) => Ok(ColumnValue::Description(desc)),
                         _ => Err(identifier_not_valid_in_context("description")),
                     },
                     _ => match &group.group_key {
@@ -209,7 +286,7 @@ impl<'h, 'a, 's> ColumnExpr<'s> {
                     },
                 },
                 DataContext::Scalar(entry, pst) => match *name {
-                    "account" => Ok(ColumnValue::String(pst.account().name().to_string())),
+                    "account" => Ok(ColumnValue::Account(pst.account())),
                     "date" => {
                         Ok(ColumnValue::Date(entry.date_and_time().datetime_range().start().date()))
                     }
@@ -220,9 +297,14 @@ impl<'h, 'a, 's> ColumnExpr<'s> {
                         Ok(ColumnValue::Datetime(entry.date_and_time().datetime_range().end()))
                     }
                     "datetime_mid" => Ok(ColumnValue::Datetime(entry.date_and_time().average())),
-                    "description" => Ok(ColumnValue::String(entry.description().to_string())),
+                    "description" => Ok(ColumnValue::Description(entry.description())),
                     "amount" => Ok(ColumnValue::Amount(pst.amount())),
-                    _ => Err(invalid_identifier(name)),
+                    _ => eval_context
+                        .variables
+                        .iter()
+                        .find(|(s, v)| *s == *name)
+                        .map(|(_, v)| v.clone())
+                        .ok_or_else(|| invalid_identifier(name)),
                 },
             },
             ColumnExpr::Function { name, args } => Self::eval_function(*name, args, eval_context),
@@ -241,7 +323,7 @@ impl<'h, 'a, 's> ColumnExpr<'s> {
         name: &'s str,
         args: &[ColumnExpr<'s>],
         eval_context: &EvalContext<'h, 'a>,
-    ) -> JournResult<ColumnValue<'h, 's>> {
+    ) -> JournResult<ColumnValue<'h, 'a, 's>> {
         match name {
             "value" => {
                 if args.len() == 0 || args.len() > 3 {
@@ -275,29 +357,38 @@ impl<'h, 'a, 's> ColumnExpr<'s> {
                     SystemValuer::on_date(eval_context.journal.config().clone(), datetime)
                         .value(base_amount, quote_unit)?
                 }
-                .ok_or(err!(
-                    "Could not value amount {} in unit {} on date {}",
-                    base_amount,
-                    quote_unit.code(),
-                    datetime
-                ))?;
-                Ok(ColumnValue::Amount(value))
+                .ok_or_else(|| {
+                    err!(
+                        "Could not value amount {} in unit {} on date {}",
+                        base_amount,
+                        quote_unit.code(),
+                        datetime
+                    )
+                })?;
+                Ok(ColumnValue::Value(value))
             }
             "sum" => match eval_context.data_context() {
                 DataContext::Group(group) => {
-                    let mut total = Amount::nil();
+                    let mut totals = vec![];
                     if args.is_empty() {
                         return Err(err!("Function 'sum' requires one argument"));
                     }
+                    let mut as_values = false;
                     group.evaluate(|context| {
-                        let amount = args[0]
-                            .eval(&EvalContext::new(eval_context.journal, context))?
-                            .as_amount()
-                            .ok_or(err!("Function 'sum' requires an `Amount` type argument"))?;
-                        total += amount;
+                        let cv = args[0].eval(&EvalContext::new(eval_context.journal, context))?;
+                        if matches!(cv, ColumnValue::Value(_)) {
+                            as_values = true;
+                        }
+                        totals += cv.as_amount().ok_or(err!(
+                            "Function 'sum' requires an `Amount` or `Value` type argument"
+                        ))?;
                         Ok(())
                     })?;
-                    Ok(ColumnValue::Amount(total))
+                    if as_values {
+                        Ok(ColumnValue::Values(totals))
+                    } else {
+                        Ok(ColumnValue::Amounts(totals))
+                    }
                 }
                 _ => Err(err!(
                     "Function 'sum' is not valid in scalar context, only in group context"

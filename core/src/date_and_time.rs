@@ -11,8 +11,10 @@ use crate::error::{JournError, JournResult};
 use crate::ext::RangeBoundsExt;
 use crate::parsing::text_input::TextInput;
 use crate::parsing::{IParseResult, JParseResult};
-use crate::reporting::table;
 use crate::reporting::table::{Cell, WrapPolicy};
+use crate::reporting::table2::CellWidth;
+use crate::reporting::table2::fmt::CellFormatter;
+use crate::reporting::{table, table2};
 use crate::{err, match_parser, match_parsers};
 use chrono::format::{DelayedFormat, Fixed, Item, Numeric, Pad, Parsed, parse};
 use chrono::{
@@ -185,6 +187,15 @@ impl<'h> JDate<'h> {
 impl From<JDate<'_>> for Cell<'_> {
     fn from(value: JDate) -> Self {
         Cell::from(value.date.format(value.format.format_str()).to_string())
+    }
+}
+impl table2::Cell for JDate<'_> {
+    fn print<'format>(&self, f: &mut dyn CellFormatter<'format>, line: usize) -> fmt::Result {
+        if line == 0 { write!(f, "{}", self) } else { Err(fmt::Error) }
+    }
+
+    fn width(&self) -> CellWidth {
+        CellWidth::Unary(self.to_string().chars().count())
     }
 }
 
@@ -476,6 +487,16 @@ impl fmt::Display for JDateTime<'_> {
 impl From<JDateTime<'_>> for Cell<'_> {
     fn from(value: JDateTime) -> Self {
         Cell::from(value.to_string())
+    }
+}
+
+impl table2::Cell for JDateTime<'_> {
+    fn print<'format>(&self, f: &mut dyn CellFormatter<'format>, line: usize) -> fmt::Result {
+        if line == 0 { write!(f, "{}", self) } else { Err(fmt::Error) }
+    }
+
+    fn width(&self) -> CellWidth {
+        CellWidth::Unary(self.to_string().chars().count())
     }
 }
 

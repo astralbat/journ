@@ -125,7 +125,9 @@ impl<'h> CapitalGains<'h> {
                 CapitalGainsColumn::Description => {
                     heading_col_cells.push("Description".to_string())
                 }
-                CapitalGainsColumn::Metadata(tag) => heading_col_cells.push("+".to_string() + tag),
+                CapitalGainsColumn::Metadata(tag) => {
+                    heading_col_cells.push("+".to_string() + tag.as_str())
+                }
             }
         }
         table.set_heading_row(heading_col_cells);

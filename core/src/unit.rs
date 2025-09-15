@@ -5,7 +5,7 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
-use crate::amount::Amount;
+use crate::amount::{Amount, Quantity};
 use crate::error::JournError;
 use crate::error::parsing::promote;
 use crate::metadata::Metadata;
@@ -14,6 +14,7 @@ use crate::price_db::PriceDatabase;
 use crate::python::lambda::Lambda;
 use crate::{err, parse};
 use rust_decimal::Decimal;
+use smartstring::alias::String as SS;
 use std::cell::RefCell;
 use std::cmp;
 use std::collections::HashSet;
@@ -86,6 +87,8 @@ pub struct Unit<'h> {
     /// All codes this unit is known by, including this one.
     aliases: Vec<String>,
     format: Option<UnitFormat>,
+    /// An alternative formatter for valuation amounts. Falls back to `format` if not specified.
+    value_format: Option<UnitFormat>,
     conversion_expression: Option<Lambda>,
     prices: Option<Arc<PriceDatabase<'h>>>,
     rounding_strategy: RoundingStrategy,
@@ -108,6 +111,7 @@ impl<'h> Unit<'h> {
             aliases,
             name: None,
             format: None,
+            value_format: None,
             conversion_expression: None,
             prices: None,
             rounding_strategy: RoundingStrategy::default(),
@@ -124,6 +128,7 @@ impl<'h> Unit<'h> {
             name: None,
             aliases: vec![],
             format: None,
+            value_format: None,
             conversion_expression: None,
             prices: None,
             rounding_strategy: RoundingStrategy::HalfUp,
@@ -214,6 +219,10 @@ impl<'h> Unit<'h> {
         self.format.is_some()
     }
 
+    pub fn has_value_format(&self) -> bool {
+        self.value_format.is_some()
+    }
+
     /*
     /// Gets whether the code will appear on the left of the quantity when this unit is formatted.
     pub fn code_on_left(&self) -> bool {
@@ -233,6 +242,17 @@ impl<'h> Unit<'h> {
 
     pub fn set_format(&mut self, format: UnitFormat) {
         self.format = Some(format)
+    }
+
+    pub fn value_format(&self) -> &UnitFormat {
+        match &self.value_format {
+            Some(cf) => cf,
+            None => self.format(),
+        }
+    }
+
+    pub fn set_value_format(&mut self, format: UnitFormat) {
+        self.value_format = Some(format)
     }
 
     pub fn conversion_expression(&self) -> Option<&Lambda> {
@@ -303,7 +323,7 @@ impl<'t> PartialEq for Unit<'t> {
 impl<'h> Eq for Unit<'h> {}
 
 impl<'h> PartialOrd for Unit<'h> {
-    fn partial_cmp(&self, other: &Self) -> Option<::std::cmp::Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
@@ -393,7 +413,7 @@ impl NumberFormat {
         self.thousands_separator
     }
 
-    pub fn negative_format(&self) -> NegativeStyle {
+    pub fn negative_style(&self) -> NegativeStyle {
         self.negative_style
     }
 
@@ -461,74 +481,92 @@ impl NumberFormat {
         }
     }
 
-    /// Formats a `quantity` ready for display.
-    ///
-    /// # Examples
-    /// * `"-1,000.00"`
-    /// * `"(1,000.00)"`
-    /// * `"1.000,00"`
-    pub fn format(&self, quantity: Decimal, rounding_strategy: RoundingStrategy) -> String {
-        // Round the quantity first
-        let rounded_quantity = if let Some(max_scale) = self.max_scale {
-            quantity.round_dp_with_strategy(max_scale as u32, rounding_strategy.into())
-        } else {
-            quantity
-        };
+    pub fn write(&self, quantity: Quantity, writer: &mut impl fmt::Write) -> fmt::Result {
+        let scale = quantity.scale();
 
-        // plain number may start with '-' if negative
-        let mut num = rounded_quantity.to_string();
-        Self::to_non_scientific(&mut num);
+        // Extract digits
+        let mut mantissa_tmp = quantity.mantissa();
+        let mut digit_buffer = [0u8; 32];
+        let mut pos = digit_buffer.len();
+        let mut digit_count = 0;
+        while mantissa_tmp > 0 {
+            pos -= 1;
+            digit_buffer[pos] = (mantissa_tmp % 10) as u8 + b'0';
+            mantissa_tmp /= 10;
+            digit_count += 1;
+        }
+        // Pad with zeros if needed
+        while digit_count <= scale {
+            pos -= 1;
+            digit_buffer[pos] = b'0';
+            digit_count += 1;
+        }
 
-        if let Some(dec_point_pos) = num.rfind('.') {
-            if let Some(max_scale) = self.max_scale {
-                let num_decimals = (num.len() - (dec_point_pos + 1)) as u8;
-                if num_decimals > max_scale {
-                    // We should be all ascii digits, so we can truncate safely
-                    num.truncate(dec_point_pos + 1 + max_scale as usize);
-                }
-            }
-            // Trim any surplus 0's off the end
-            if let Some(min_scale) = self.min_scale {
-                let mut num_decimals = (num.len() - (dec_point_pos + 1)) as u8;
-                while num_decimals > min_scale && num.ends_with('0') {
-                    num.remove(num.len() - 1);
-                    num_decimals -= 1;
-                }
-            }
-
-            if num.ends_with('.') {
-                num.pop();
+        // Write negative opening bracket if needed
+        if quantity.is_sign_negative() {
+            if self.negative_style() == NegativeStyle::Brackets {
+                writer.write_char('(')?;
             } else {
-                // Replace decimal point
-                num.remove(dec_point_pos);
-                num.insert(dec_point_pos, self.decimal_separator as char);
+                writer.write_char('-')?;
             }
         }
 
-        // Add thousand separators
-        self.add_thousands_separators(&mut num);
-        self.add_padding_zeros(&mut num);
-
-        // Adjust negativity
-        if num.starts_with('-') && self.negative_style == NegativeStyle::Brackets {
-            num.remove(0);
-            num.insert(0, '(');
-            num.push(')');
+        // Write integer part with thousands separators
+        let integer_digits = digit_count - scale;
+        let start_pos = pos;
+        for (i, &byte) in
+            digit_buffer[start_pos..start_pos + integer_digits as usize].iter().enumerate()
+        {
+            if i > 0 && (integer_digits - i as u32).is_multiple_of(3) {
+                writer.write_char(self.thousands_separator as char)?;
+            }
+            writer.write_char(byte as char)?;
         }
-        num
-    }
 
-    fn add_thousands_separators<'a>(&self, num: &'a mut String) -> &'a mut String {
-        let mut curr =
-            num.bytes().position(|c| c == self.decimal_separator).unwrap_or(num.len()) as f64;
-
-        curr -= 3.0;
-        let first_digit_pos = if num.starts_with('-') { 1.0 } else { 0.0 };
-        while curr > first_digit_pos {
-            num.insert(curr as usize, self.thousands_separator as char);
-            curr -= 3.0;
+        // Write decimal part
+        let mut written_scale = 0;
+        let mut written_dec_sep = false;
+        let decimal_start = start_pos + integer_digits as usize;
+        for (i, &byte) in
+            digit_buffer[decimal_start..decimal_start + scale as usize].iter().enumerate()
+        {
+            // Don't write trailing zeros if beyond min_scale
+            if let Some(min_scale) = self.min_scale
+                && i >= min_scale as usize
+                && digit_buffer[decimal_start + i..decimal_start + scale as usize]
+                    .iter()
+                    .all(|&byte| byte == b'0')
+            {
+                break;
+            }
+            // Don't write anything beyond max_scale
+            if let Some(max_scale) = self.max_scale
+                && i >= max_scale as usize
+            {
+                break;
+            }
+            if !written_dec_sep {
+                writer.write_char(self.decimal_separator as char)?;
+                written_dec_sep = true;
+            }
+            writer.write_char(byte as char)?;
+            written_scale += 1;
         }
-        num
+        // Add padding zeros if needed
+        if Some(written_scale) < self.min_scale {
+            if !written_dec_sep {
+                writer.write_char(self.decimal_separator as char)?;
+            }
+            for _ in written_scale..self.min_scale.unwrap() {
+                writer.write_char('0')?;
+            }
+        }
+
+        // Write closing negative bracket if needed
+        if quantity.is_sign_negative() && self.negative_style() == NegativeStyle::Brackets {
+            writer.write_char(')')?;
+        }
+        Ok(())
     }
 
     /// Modifies `decimal_s` by removing thousands separators.
@@ -550,9 +588,8 @@ impl NumberFormat {
             num.truncate(i);
             let mut dot_pos = num
                 .find('.')
-                .map(|pos| {
+                .inspect(|&pos| {
                     num.remove(pos);
-                    pos
                 })
                 .unwrap_or(num.len());
             for _ in 0..change {
@@ -657,9 +694,9 @@ pub enum NegativePosition {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CodePosition {
     /// Left of the quantity. E.g. $10
-    PaddedLeft(String),
+    PaddedLeft(SS),
     /// Right of the quantity. E.g. 10 USD
-    PaddedRight(String),
+    PaddedRight(SS),
     /// Left when a single char, right otherwise. E.g. $10, 10 USD
     Adaptive,
 }
@@ -745,10 +782,6 @@ impl UnitFormat {
         self.negative_position
     }
 
-    pub fn format(&self, amount: Amount) -> String {
-        self.formatted_amount_or_spec(Some(amount), self.number_format)
-    }
-
     /// Gets whether the code should be on the left of the quantity.
     /// When adaptive, the code is on the left if its length <= 1 and doesn't contain any illegal characters that would
     /// require quotes; right otherwise.
@@ -762,34 +795,39 @@ impl UnitFormat {
         }
     }
 
-    pub fn format_precise(&self, amount: Amount) -> String {
-        self.formatted_amount_or_spec(Some(amount), self.number_format.with_max_scale(None))
+    pub fn code<'a, 'h>(&'a self, amount: Amount<'h>) -> Option<&'a str>
+    where
+        'h: 'a,
+    {
+        match &self.code {
+            CodeFormat::Literal(s) => Some(&**s),
+            CodeFormat::Never => None,
+            CodeFormat::Unit => Some(amount.unit().code()),
+        }
     }
 
-    /// Dual-purpose function for formatting an amount for display (if `Some`),
-    /// or writing the format specification (if `None`).
-    fn formatted_amount_or_spec(
-        &self,
-        amount: Option<Amount>,
-        number_format: NumberFormat,
-    ) -> String {
-        let mut num = match amount {
-            Some(amount) => {
-                number_format.format(amount.quantity(), amount.unit().rounding_strategy())
-            }
-            None => number_format.to_string(),
+    pub fn format(&self, amount: Amount) -> SS {
+        let mut s = SS::new();
+        self.write_amount(amount, &mut s, None).unwrap();
+        s
+    }
+
+    pub fn format_precise(&self, amount: Amount) -> SS {
+        let mut s = SS::new();
+        self.write_amount(amount, &mut s, Some(self.number_format.with_max_scale(None))).unwrap();
+        s
+    }
+
+    pub fn write_spec(&self, writer: &mut impl fmt::Write) -> fmt::Result {
+        let num_fmt = self.number_format.to_string();
+        let code_s = match &self.code {
+            CodeFormat::Literal(s) => &**s,
+            CodeFormat::Never => "",
+            CodeFormat::Unit => "$UNIT$",
         };
 
-        let code_s = match (&self.code, amount) {
-            (CodeFormat::Literal(s), _) => &**s,
-            (CodeFormat::Never, _) => "",
-            (CodeFormat::Unit, Some(amount)) => amount.unit().code(),
-            (CodeFormat::Unit, None) => "$UNIT$",
-        };
-
-        //let code = self.code.str_for_amount(a).code.as_deref().or(amount.map(|a| a.unit().code()));
-        let add_quotes = code_s.chars().any(parsing::amount::illegal_unit_code_char);
         let code_on_left = self.code_on_left(code_s);
+        let add_quotes = code_s.chars().any(parsing::amount::illegal_unit_code_char);
         let padding = match &self.code_position {
             CodePosition::PaddedLeft(padding) => &**padding,
             CodePosition::PaddedRight(padding) => &**padding,
@@ -801,36 +839,94 @@ impl UnitFormat {
                 }
             }
         };
+        // Write negative sign before the code
+        if self.negative_position == NegativePosition::CodeAdjacent && code_on_left {
+            write!(writer, "-")?;
+        }
 
-        if !code_s.is_empty() {
-            if code_on_left {
-                let insert_pos = if amount.map(|a| a < 0).unwrap_or(true)
-                    && self.negative_position == NegativePosition::CodeAdjacent
-                {
-                    1
-                } else {
-                    0
-                };
-                num.insert_str(insert_pos, padding);
+        if code_on_left {
+            if !code_s.is_empty() {
                 if add_quotes {
-                    num.insert(insert_pos, '"');
-                    num.insert_str(insert_pos, code_s);
-                    num.insert(insert_pos, '"');
+                    write!(writer, "\"{}\"{}", code_s, padding)?;
                 } else {
-                    num.insert_str(insert_pos, code_s);
+                    write!(writer, "{}{}", code_s, padding)?;
                 }
-            } else {
-                num.push_str(padding);
+            }
+            write!(writer, "{}", num_fmt)?;
+        } else {
+            write!(writer, "{}", num_fmt)?;
+            if !code_s.is_empty() {
                 if add_quotes {
-                    num.push('"');
-                    num.push_str(code_s);
-                    num.push('"');
+                    write!(writer, "{}\"{}\"", padding, code_s)?;
                 } else {
-                    num.push_str(code_s);
+                    write!(writer, "{}{}", padding, code_s)?;
                 }
             }
         }
-        num
+
+        Ok(())
+    }
+
+    pub fn write_amount(
+        &self,
+        amount: Amount,
+        writer: &mut impl fmt::Write,
+        alt_number_fmt: Option<NumberFormat>,
+    ) -> fmt::Result {
+        let number_format = match alt_number_fmt {
+            Some(nf) => nf,
+            None => self.number_format,
+        };
+        let mut quantity = amount.quantity();
+        if let Some(max_scale) = number_format.max_scale() {
+            quantity = quantity
+                .round_dp_with_strategy(max_scale as u32, amount.unit().rounding_strategy().into());
+        }
+
+        let code_s = self.code(amount).unwrap_or("");
+        let add_quotes = code_s.chars().any(parsing::amount::illegal_unit_code_char);
+        let code_on_left = self.code_on_left(amount.unit().code());
+        let padding = match &self.code_position {
+            CodePosition::PaddedLeft(padding) => &**padding,
+            CodePosition::PaddedRight(padding) => &**padding,
+            CodePosition::Adaptive => {
+                if code_on_left {
+                    ""
+                } else {
+                    " "
+                }
+            }
+        };
+        // Write negative sign before the code
+        if quantity.is_sign_negative()
+            && self.negative_position == NegativePosition::CodeAdjacent
+            && code_on_left
+        {
+            quantity = -quantity;
+            write!(writer, "-")?;
+        }
+
+        if code_on_left {
+            if !code_s.is_empty() {
+                if add_quotes {
+                    write!(writer, "\"{}\"{}", code_s, padding)?;
+                } else {
+                    write!(writer, "{}{}", code_s, padding)?;
+                }
+            }
+            number_format.write(quantity, writer)?;
+        } else {
+            number_format.write(quantity, writer)?;
+            if !code_s.is_empty() {
+                if add_quotes {
+                    write!(writer, "{}\"{}\"", padding, code_s)?;
+                } else {
+                    write!(writer, "{}{}", padding, code_s)?;
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -847,7 +943,7 @@ impl Default for UnitFormat {
 
 impl fmt::Display for UnitFormat {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", self.formatted_amount_or_spec(None, self.number_format))
+        self.write_spec(f)
     }
 }
 
