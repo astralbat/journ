@@ -7,7 +7,7 @@
  */
 use crate::reporting::table2::cell::ModifiableCell;
 use crate::reporting::table2::fmt::CellFormatter;
-use crate::reporting::table2::{Cell, CellRef, CellWidth, ShrinkableCell};
+use crate::reporting::table2::{Cell, CellRef, CellWidth, ColumnWidth, ShrinkableCell};
 
 pub struct EllipsisCell<'c> {
     modifiable_cell: ModifiableCell<'c>,
@@ -20,8 +20,13 @@ impl<'c> EllipsisCell<'c> {
 }
 
 impl Cell for EllipsisCell<'_> {
-    fn print<'format>(&self, f: &mut dyn CellFormatter<'format>, line: usize) -> std::fmt::Result {
-        self.modifiable_cell.print(f, line)
+    fn print<'format>(
+        &self,
+        f: &mut dyn CellFormatter,
+        line: usize,
+        width: Option<ColumnWidth>,
+    ) -> std::fmt::Result {
+        self.modifiable_cell.print(f, line, width)
     }
 
     fn width(&self) -> CellWidth {

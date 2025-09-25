@@ -65,18 +65,14 @@ impl<'h> Flows<'h> {
         self.units().filter_map(move |unit| {
             let mut accum = Flow::new(AccountType::Equity, ValuedAmount::nil());
             for flow in self.0.iter().filter(|f| f.unit() == unit) {
-                if flow.account_type == AccountType::Equity
-                    || flow.account_type == AccountType::Asset
-                    || flow.account_type == AccountType::Liability
-                {
-                    accum.net_amount = (&accum.net_amount + &flow.net_amount).unwrap();
+                match flow.account_type {
+                    AccountType::Equity | AccountType::Asset | AccountType::Liability => {
+                        accum.net_amount = (&accum.net_amount + &flow.net_amount).unwrap();
+                    }
+                    _ => {}
                 }
             }
-            if !accum.net_amount.is_zero() {
-                Some(accum)
-            } else {
-                None
-            }
+            if !accum.net_amount.is_zero() { Some(accum) } else { None }
         })
     }
 

@@ -7,7 +7,7 @@
  */
 use std::iter::Sum;
 use std::mem;
-use std::ops::Add;
+use std::ops::{Add, Deref};
 
 #[derive(Clone, Copy, Debug, Default)]
 pub enum SpaceDistribution {
@@ -194,3 +194,28 @@ impl Ord for CellWidth {
         self.width().cmp(&other.width())
     }
 }
+
+pub type ColumnWidth = CellWidth;
+
+/*
+pub struct ColumnWidth {
+    width: CellWidth,
+    num_columns: usize,
+}
+impl ColumnWidth {
+    pub fn new(width: CellWidth, num_columns: usize) -> Self {
+        Self { width, num_columns }
+    }
+
+    pub fn num_columns(&self) -> usize {
+        self.num_columns
+    }
+}
+impl Deref for ColumnWidth {
+    type Target = CellWidth;
+
+    fn deref(&self) -> &Self::Target {
+        &self.width
+    }
+}
+*/

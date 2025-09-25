@@ -12,7 +12,6 @@ use crate::configuration::Filter;
 use crate::directive::DirectiveKind;
 use crate::err;
 use crate::error::{BlockContext, BlockContextError, JournErrors, JournResult};
-use crate::ext::StrExt;
 use crate::journal_entry::{EntryId, JournalEntry};
 use crate::journal_node::{JournalNode, JournalNodeKind, NodeId};
 use crate::parsing::parser::JournalParseNode;
@@ -23,8 +22,6 @@ use crate::postings_aggregation::{AggregatedPosting, PostingsAggregation};
 use crate::python::mod_ledger::PythonLedgerModule;
 use crate::reporting::balance::{AccountBalances, Balance};
 use crate::unit::NumberFormat;
-use ansi_term::Colour::{Blue, Red};
-use ansi_term::Style;
 use chrono::DateTime;
 use chrono_tz::Tz;
 use nom_locate::LocatedSpan;
@@ -386,88 +383,4 @@ impl<'h> Journal<'h> {
         }
         Ok(())
     }
-
-    /*
-    pub fn val(&mut self) -> JournResult<AccountBalances> {
-        // The preferred approach is to value entries in order of date/time rather than in order of declaration.
-        // This has the advantage that a price lookup function can optimise by returning many results after the time in question,
-        // assuming that all further calls to that function will be for entries after that date/time.
-        let mut bals = AccountBalances::default();
-        let exchange_currency = self.args.exchange_currency().unwrap();
-        let account_filter = self.args.account_filter().cloned();
-        let mut valuer = Valuer::new();
-
-        let range = JournalEntry::id_range(self.args.begin_end_range());
-        for (_, entry) in self.entries.range(range) {
-            let mut entry = entry.lock().unwrap();
-            let entry_utc_average = entry.utc_average();
-            let mut value_error = None;
-            let mut value_sources = HashSet::new();
-            for trans in entry.transactions_mut().unwrap() {
-                // Filter
-                if let Some(filter) = &account_filter {
-                    if !trans.postings().any(|p| p.matches_account_filter(filter)) {
-                        continue;
-                    }
-                }
-
-                // Value
-                if !trans.is_valued(&exchange_currency) {
-                    match valuer.value_transaction(
-                        &mut self.config,
-                        trans,
-                        entry_utc_average,
-                        &exchange_currency,
-                        &self.currencies,
-                    ) {
-                        Ok(sources) => value_sources.extend(sources),
-                        Err(err) => value_error = Some(err),
-                    }
-                }
-            }
-            for source in value_sources {
-                if !entry.has_metadata_tag_value("ValueSource", &source) {
-                    entry.append_metadata("ValueSource".to_string(), source);
-                }
-            }
-            if let Some(err) = value_error {
-                let loc = entry.raw().location().map(|l| l.to_owned());
-                return Err(errmsg!(err; "Unable to value entry {}",
-                match loc {
-                    Some(loc) => format!("at {}\n  {}", loc, entry.to_string()),
-                    None => format!("\n  {}", entry.to_string()),
-                }));
-            }
-
-            // Add Balances
-            for pst in entry.postings().filter(|p| !p.account().is_virtual()) {
-                if let Some(filter) = &account_filter {
-                    if !pst.matches_account_filter(filter) {
-                        continue;
-                    }
-                }
-                if self.args.real_postings() && pst.account().is_virtual() {
-                    continue;
-                }
-                let val = pst.amount_in(&exchange_currency);
-                assert!(val.is_some());
-                bals.update_balance(pst.account(), pst.amount(), false);
-            }
-        }
-
-        Ok(bals)
-    }*/
 }
-
-/*
-#[cfg(feature = "testing")]
-#[macro_export]
-/// Parses a journal.
-macro_rules! journ {
-    ($text:expr) => {{
-        $crate::journal::Journal::parse(
-            $crate::configuration::Configuration::default(),
-            $crate::journal_file::StreamType::Text($text.to_string()),
-        )
-    }};
-}*/

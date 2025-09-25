@@ -12,9 +12,10 @@ use crate::ext::RangeBoundsExt;
 use crate::parsing::text_input::TextInput;
 use crate::parsing::{IParseResult, JParseResult};
 use crate::reporting::table::{Cell, WrapPolicy};
-use crate::reporting::table2::CellWidth;
+use crate::reporting::table2;
 use crate::reporting::table2::fmt::CellFormatter;
-use crate::reporting::{table, table2};
+use crate::reporting::table2::{CellWidth, ColumnWidth};
+use crate::unit::NumberFormat;
 use crate::{err, match_parser, match_parsers};
 use chrono::format::{DelayedFormat, Fixed, Item, Numeric, Pad, Parsed, parse};
 use chrono::{
@@ -42,6 +43,7 @@ pub static DEFAULT_DATE_FORMAT: LazyLock<DateFormat<'static>> =
 pub static DEFAULT_TIME_FORMAT: LazyLock<TimeFormat<'static>> =
     LazyLock::new(|| "hh:mm:ss".parse().unwrap());
 static DEFAULT_TIMEZONE: LazyLock<Tz> = LazyLock::new(|| Tz::UTC);
+pub static DEFAULT_NUMBER_FORMAT: LazyLock<NumberFormat> = LazyLock::new(NumberFormat::default);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DateTimeParams<'h> {
@@ -190,7 +192,12 @@ impl From<JDate<'_>> for Cell<'_> {
     }
 }
 impl table2::Cell for JDate<'_> {
-    fn print<'format>(&self, f: &mut dyn CellFormatter<'format>, line: usize) -> fmt::Result {
+    fn print<'format>(
+        &self,
+        f: &mut dyn CellFormatter,
+        line: usize,
+        _width: Option<ColumnWidth>,
+    ) -> fmt::Result {
         if line == 0 { write!(f, "{}", self) } else { Err(fmt::Error) }
     }
 
@@ -419,7 +426,7 @@ impl<'h> JDateTime<'h> {
     ///
     /// Returns `None` if no time or date format is set.
     pub fn increment(&self) -> Self {
-        let inc = match self.precision() {
+        match self.precision() {
             DateTimePrecision::Second => *self + Duration::seconds(1),
             DateTimePrecision::Minute => *self + Duration::minutes(1),
             DateTimePrecision::Hour => *self + Duration::hours(1),
@@ -439,8 +446,7 @@ impl<'h> JDateTime<'h> {
                 self.with_utc_datetime(&utc_date)
             }
             DateTimePrecision::Week => *self + Duration::days(7),
-        };
-        inc
+        }
     }
 }
 
@@ -491,7 +497,12 @@ impl From<JDateTime<'_>> for Cell<'_> {
 }
 
 impl table2::Cell for JDateTime<'_> {
-    fn print<'format>(&self, f: &mut dyn CellFormatter<'format>, line: usize) -> fmt::Result {
+    fn print<'format>(
+        &self,
+        f: &mut dyn CellFormatter,
+        line: usize,
+        _width: Option<ColumnWidth>,
+    ) -> fmt::Result {
         if line == 0 { write!(f, "{}", self) } else { Err(fmt::Error) }
     }
 
@@ -768,9 +779,9 @@ impl<'h> fmt::Display for JDateTimeRange<'h> {
     }
 }
 
-impl From<JDateTimeRange<'_>> for table::Cell<'_> {
+impl From<JDateTimeRange<'_>> for Cell<'_> {
     fn from(range: JDateTimeRange) -> Self {
-        let mut cell = table::Cell::new(range.to_string());
+        let mut cell = Cell::new(range.to_string());
         cell.set_wrap_policy(WrapPolicy::With(|cell| match cell.as_leaf().unwrap().find("..") {
             Some(idx) => WrapPolicy::Position(idx + 2),
             None => WrapPolicy::Never,

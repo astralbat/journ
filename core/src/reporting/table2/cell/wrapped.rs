@@ -5,10 +5,10 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
-use crate::reporting::table2::CellRef;
 use crate::reporting::table2::cell::{Cell, ModifiableCell, ShrinkableCell};
 use crate::reporting::table2::cell_width::CellWidth;
 use crate::reporting::table2::fmt::CellFormatter;
+use crate::reporting::table2::{CellRef, ColumnWidth};
 use std::fmt;
 use std::str::pattern::{Pattern, ReverseSearcher};
 
@@ -112,10 +112,15 @@ impl<'c> PolicyWrappingCell<'c> {
     }
 }
 impl Cell for PolicyWrappingCell<'_> {
-    fn print<'format>(&self, f: &mut dyn CellFormatter<'format>, line: usize) -> fmt::Result {
+    fn print<'format>(
+        &self,
+        f: &mut dyn CellFormatter,
+        line: usize,
+        _width: Option<ColumnWidth>,
+    ) -> fmt::Result {
         let lines = self.modifiable_cell.lines.borrow();
         let line = lines.get(line).ok_or(fmt::Error)?;
-        f.write_str(line)
+        write!(f, "{}", line)
     }
 
     fn width(&self) -> CellWidth {

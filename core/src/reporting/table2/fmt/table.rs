@@ -5,13 +5,13 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
-use crate::reporting::table2::Cell;
 use crate::reporting::table2::cell_width::CellWidth;
 use crate::reporting::table2::column::{ColumnsVec, TableColumn};
-use crate::reporting::table2::fmt::cell_formatter::{CellFormatter, Transformer, lines_and_cols};
+use crate::reporting::table2::fmt::cell_formatter::{CellFormatter, lines_and_cols};
+use crate::reporting::table2::fmt::row_formatter::RowFormatter;
 use crate::reporting::table2::row::Row;
+use crate::reporting::table2::{Cell, ColumnWidth};
 use crate::reporting::term_style::{Colour, Style};
-use palette::{Hsl, IntoColor, Srgb};
 use std::fmt;
 use std::fmt::Write;
 use supports_color::Stream;
@@ -21,18 +21,15 @@ use terminal_colorsaurus::{QueryOptions, ThemeMode, color_palette};
 pub struct TableCellFormatter<'w, 'format> {
     writer: &'w mut dyn Write,
     max_width: Option<usize>,
-    /// The number of columns this cell is expected to span
-    width: CellWidth,
     /// The current line index in the table, starting at 0.
     cursor_line: usize,
     /// The current column index in the table, starting at 0.
     cursor_col: usize,
-    /// A stack of transformers set at each cell level. The last one is applied first. In this way, a pipeline of transformations can be built up.
-    transformers: Vec<Box<dyn Transformer + 'format>>,
-    transformer_output: String,
     cell_separator: &'w str,
     border: TableBorder<'w>,
     color: bool,
+    current_row: Option<&'format Row<'format>>,
+    first_cell_in_line: bool,
     odd_bg: Option<Style>,
     even_bg: Option<Style>,
 }
@@ -42,16 +39,15 @@ impl<'w, 'format> TableCellFormatter<'w, 'format> {
         Self {
             writer,
             max_width: None,
-            width: CellWidth::default(),
             cursor_line: 0,
             cursor_col: 0,
-            transformers: Vec::new(),
-            transformer_output: String::new(),
             cell_separator: "  ",
             border: TableBorder::default(),
             color: false,
             odd_bg: None,
             even_bg: None,
+            current_row: None,
+            first_cell_in_line: true,
         }
     }
 
@@ -133,79 +129,64 @@ impl<'w, 'format> TableCellFormatter<'w, 'format> {
             }
         }
     }
-
-    fn adjust_lightness(r: u8, g: u8, b: u8, lightness_delta: f32) -> (u8, u8, u8) {
-        // Convert RGB to HSL
-        let rbg = Srgb::new(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0);
-        let mut hsl: Hsl = rbg.into_color();
-        // Adjust lightness
-        hsl.lightness = (hsl.lightness + lightness_delta).clamp(0.0, 1.0);
-        // Convert back to RGB
-        let rgb: Srgb = hsl.into_color();
-        (
-            (rgb.red * 255.0).round() as u8,
-            (rgb.green * 255.0).round() as u8,
-            (rgb.blue * 255.0).round() as u8,
-        )
-    }
-
-    fn calculate_luminance(r: u8, g: u8, b: u8) -> f32 {
-        // Convert RGB to linear RGB
-        let r = r as f32 / 255.0;
-        let g = g as f32 / 255.0;
-        let b = b as f32 / 255.0;
-
-        let r = if r <= 0.03928 { r / 12.92 } else { ((r + 0.055) / 1.055).powf(2.4) };
-        let g = if g <= 0.03928 { g / 12.92 } else { ((g + 0.055) / 1.055).powf(2.4) };
-        let b = if b <= 0.03928 { b / 12.92 } else { ((b + 0.055) / 1.055).powf(2.4) };
-
-        // Calculate luminance
-        0.2126 * r + 0.7152 * g + 0.0722 * b
-    }
 }
 
-impl<'w, 'format, 'cell> CellFormatter<'format> for TableCellFormatter<'w, 'format> {
-    fn format_cell(
-        &mut self,
-        cell: &dyn Cell,
-        row: &Row,
-        line: usize,
-        cols: &[TableColumn],
-    ) -> fmt::Result {
-        self.transformers.clear();
-
+impl<'w, 'format> CellFormatter for TableCellFormatter<'w, 'format> {
+    fn format_cell(&mut self, cell: &dyn Cell, line: usize, mut width: ColumnWidth) -> fmt::Result {
         // Set the width.
         let sep_len = self.cell_separator.chars().count();
-        let mut width: CellWidth = cols.iter().map(|col| col.width()).sum();
-        width = width.distribute(sep_len * (cols.len() - 1));
-
-        self.set_width(Some(width.clone()));
+        width = width.distribute(sep_len * (cell.hspan() - 1));
 
         // Not the first column, so add a separator
-        if cols[0].index() > 0 {
+        if !self.first_cell_in_line {
             let sep = self.cell_separator;
-            if row.is_header() {
+            if self.current_row.as_ref().unwrap().is_header() {
                 let width = sep.chars().count();
                 write!(self, "{:width$}", "")
             } else {
                 write!(self, "{sep}")
             }?;
+        } else {
+            self.first_cell_in_line = false;
         }
 
         let start_col = self.cursor_col;
 
         // Visit the cell to print its content
-        let print_res = cell.print(self, line);
+        let print_res = cell.print(self, line, Some(width.clone()));
+        //apply_transformers(&mut self.cell_line_buf, &mut self.transformers);
 
         // Pad to the column width
         for _ in self.cursor_col..(start_col + width.width()) {
             write!(self, "{}", cell.padding_char())?;
         }
-
         print_res
     }
 
+    fn color(&self) -> bool {
+        self.color
+    }
+}
+
+impl<'format> RowFormatter<'format> for TableCellFormatter<'_, 'format> {
+    fn format_row_start(
+        &mut self,
+        row: &'format Row<'format>,
+        _row_num: usize,
+        _line: usize,
+    ) -> fmt::Result {
+        self.current_row = Some(row);
+        Ok(())
+    }
+
+    fn format_row_end(&mut self, _row: &Row, _row_num: usize, _line: usize) -> fmt::Result {
+        self.current_row = None;
+        Ok(())
+    }
+
     fn format_line_start(&mut self, row: &Row, row_num: usize, _line: usize) -> fmt::Result {
+        self.first_cell_in_line = true;
+
         if self.color {
             if row_num.is_multiple_of(2)
                 && let Some(even_bg) = self.even_bg
@@ -269,43 +250,10 @@ impl<'w, 'format, 'cell> CellFormatter<'format> for TableCellFormatter<'w, 'form
             }
         }
     }
-
-    fn width(&self) -> Option<&CellWidth> {
-        Some(&self.width)
-    }
-
-    fn set_width(&mut self, width: Option<CellWidth>) {
-        assert!(width.is_some(), "TableCellFormatter requires a width to be set");
-
-        self.width = width.unwrap();
-    }
-
-    fn color(&self) -> bool {
-        self.color
-    }
-
-    fn push_transformer(&mut self, f: Box<dyn Transformer + 'format>) {
-        self.transformers.push(f);
-    }
-
-    fn pop_transformer(&mut self) -> Option<Box<dyn Transformer + 'format>> {
-        self.transformers.pop()
-    }
-
-    fn cursor_col(&self) -> usize {
-        self.cursor_col
-    }
 }
 
 impl<'w, 't> Write for TableCellFormatter<'w, 't> {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        crate::reporting::table2::fmt::cell_formatter::apply_transformers(
-            s,
-            &mut self.transformers,
-            &mut self.transformer_output,
-        );
-        let s = &self.transformer_output;
-
         if s.is_empty() {
             return Ok(());
         }

@@ -7,12 +7,10 @@
  */
 use crate::arguments::Arguments;
 use std::cell::RefCell;
+use std::fmt;
 use std::fmt::Write;
-use std::io::Read as IoRead;
-use std::io::Write as IoWrite;
-use std::sync::{LazyLock, Mutex};
-use std::time::{Duration, Instant};
-use std::{fmt, io};
+use std::sync::Mutex;
+use std::time::Instant;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]

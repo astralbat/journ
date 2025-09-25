@@ -347,6 +347,7 @@ impl<'h> JournalNode<'h> {
     /// to find a good insert position.
     pub(crate) fn insert_directive(&self, dir_kind: DirectiveKind<'h>) {
         // First, find the segment we need to be in by searching each in turn.
+        let mut insert_seg = None;
         for seg in self.segments() {
             if let Some(last_dir) = seg.directives().last() {
                 match last_dir.kind().partial_cmp(&dir_kind) {
@@ -355,10 +356,18 @@ impl<'h> JournalNode<'h> {
                         continue;
                     }
                     _ => {
-                        self.insert_directive_in_segment(seg, dir_kind);
+                        insert_seg = Some(seg);
                         break;
                     }
                 }
+            }
+        }
+        match insert_seg {
+            Some(seg) => self.insert_directive_in_segment(seg, dir_kind),
+            None => {
+                // Insert in the last segment.
+                let seg = self.segments().last().unwrap();
+                self.insert_directive_in_segment(seg, dir_kind)
             }
         }
     }
@@ -478,6 +487,8 @@ impl<'h> JournalNode<'h> {
                         .map_err(|e| err!(e; "IO Error"))?,
                 );
                 self.write(&mut writer, None)?;
+                // Ensure a newline at the end of the file as is best practice.
+                writeln!(writer).map_err(|e| err!(e; "IO Error"))?;
                 Ok(())
             }
             None => Err(err!("Cannot write journal file: file represents a text stream")),
@@ -582,8 +593,6 @@ impl<'h> JournalNode<'h> {
                 }
             }
         }
-        // Ensure a newline at the end of the file
-        writeln!(writer).map_err(|e| err!(e; "IO Error"))?;
         Ok(())
     }
 

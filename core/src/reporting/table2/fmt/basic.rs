@@ -5,78 +5,58 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
-use crate::reporting::table2::fmt::cell_formatter::{CellFormatter, Transformer, lines_and_cols};
-use crate::reporting::table2::{Cell, CellWidth, Row, TableColumn};
+use crate::reporting::table2::fmt::cell_formatter::{CellFormatter, lines_and_cols};
+use crate::reporting::table2::{Cell, CellWidth, ColumnWidth};
 use std::fmt;
 use std::fmt::Write;
 
 /// Cell formatter that prints cells to a string
-pub struct BasicCellFormatter<'w, 't> {
+pub struct BasicCellFormatter<'w> {
     writer: &'w mut dyn Write,
     line: usize,
     col: usize,
     width: Option<CellWidth>,
-    transformers: Vec<Box<dyn Transformer + 't>>,
 }
-impl<'w, 'format> BasicCellFormatter<'w, 'format> {
+impl<'w> BasicCellFormatter<'w> {
     pub fn new(writer: &'w mut dyn Write) -> Self {
-        Self { writer, width: None, transformers: Vec::new(), line: 0, col: 0 }
+        Self { writer, width: None, line: 0, col: 0 }
     }
 }
 
-impl<'w, 'format> CellFormatter<'format> for BasicCellFormatter<'w, 'format> {
-    fn format_cell(
-        &mut self,
-        cell: &dyn Cell,
-        _row: &Row,
-        line: usize,
-        _col: &[TableColumn],
-    ) -> fmt::Result {
-        cell.print(self, line)
-    }
-
-    fn format_line_start(&mut self, _row: &Row, _row_num: usize, _line: usize) -> fmt::Result {
-        Ok(())
-    }
-
-    fn format_line_end(&mut self, _row: &Row, _row_num: usize, _line: usize) -> fmt::Result {
-        Ok(())
-    }
-
-    fn width(&self) -> Option<&CellWidth> {
-        self.width.as_ref()
-    }
-
-    fn set_width(&mut self, width: Option<CellWidth>) {
-        self.width = width;
-    }
-
-    fn push_transformer(&mut self, f: Box<dyn Transformer + 'format>) {
-        self.transformers.push(f);
-    }
-
-    fn pop_transformer(&mut self) -> Option<Box<dyn Transformer + 'format>> {
-        self.transformers.pop()
-    }
-
-    fn cursor_col(&self) -> usize {
-        self.col
+impl<'w> CellFormatter for BasicCellFormatter<'w> {
+    fn format_cell(&mut self, cell: &dyn Cell, line: usize, _width: ColumnWidth) -> fmt::Result {
+        cell.print(self, line, None)
     }
 }
 
-impl Write for BasicCellFormatter<'_, '_> {
+impl Write for BasicCellFormatter<'_> {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        self.writer.write_str(s)?;
+        write!(self.writer, "{}", s)
+    }
+}
 
-        // Keep track of self.line and self.col
-        let (lines, cols) = lines_and_cols(s);
-        self.line += lines;
-        if lines == 0 {
-            self.col += cols;
-        } else {
-            self.col = cols;
-        }
+#[derive(Default)]
+pub struct StringCellFormatter {
+    buf: String,
+}
+impl StringCellFormatter {
+    pub fn buffer(&self) -> &str {
+        &self.buf
+    }
 
+    pub fn clear(&mut self) {
+        self.buf.clear();
+    }
+}
+
+impl CellFormatter for StringCellFormatter {
+    fn format_cell(&mut self, cell: &dyn Cell, line: usize, _width: ColumnWidth) -> fmt::Result {
+        cell.print(self, line, None)
+    }
+}
+impl Write for StringCellFormatter {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        self.buf.push_str(s);
         Ok(())
     }
 }

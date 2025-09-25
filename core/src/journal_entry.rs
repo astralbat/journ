@@ -719,11 +719,11 @@ impl<'h> JournalEntry<'h> {
     }
 
     fn check_amounts_balanced(&self) -> JournResult<()> {
-        let mut bals = SmallVec::with_capacity(8);
+        let mut bals: SmallVec<[Amount; 8]> = smallvec![];
         for pst in self.postings().filter(|pst| !pst.account().is_virtual_unbalanced()) {
             bals += pst.amount();
         }
-        match bals.into_iter().filter(|b| !b.is_zero()).count() {
+        match bals.into_iter().filter(|b: &Amount| !b.is_zero()).count() {
             0 => Ok(()),
             1 => Err(err!("Unbalanced entry. Amounts should total to zero.")),
             // This is a trade between multiple currencies which is acceptable

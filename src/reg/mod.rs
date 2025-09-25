@@ -17,24 +17,32 @@ use journ_core::journal::Journal;
 pub struct RegArguments {
     #[arg(
         value_name = "ACCOUNT_FILTER",
-        value_delimiter = ',',
-        help = "Filter accounts by regexp pattern"
+        help = "Filter accounts by regexp pattern",
+        use_value_delimiter = true
     )]
     account_filter: Vec<String>,
-    #[arg(short = 'u', long = "unit", value_name = "UNIT", help = "Filter by unit expression")]
+    #[arg(
+        short = 'u',
+        long = "unit",
+        value_name = "UNIT",
+        help = "Filter by unit expression",
+        use_value_delimiter = true
+    )]
     unit_filter: Vec<String>,
     #[arg(
         short = 'd',
         value_name = "DESCRIPTION_FILTER",
-        help = "Filter descriptions by regexp pattern"
-    )]
-    #[arg(
-        short = 'd',
-        value_name = "DESCRIPTION_FILTER",
-        help = "Filter descriptions by regexp pattern"
+        help = "Filter descriptions by regexp pattern",
+        use_value_delimiter = true
     )]
     description_filter: Vec<String>,
-    #[arg(short = 'f', long = "file", value_name = "FILE", help = "Filter by file")]
+    #[arg(
+        short = 'f',
+        long = "file",
+        value_name = "FILE",
+        help = "Filter by file",
+        use_value_delimiter = true
+    )]
     file_filter: Vec<String>,
     #[arg(
         short = 'o',

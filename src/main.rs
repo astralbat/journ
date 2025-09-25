@@ -10,8 +10,8 @@
 
 mod bal;
 mod cag;
-mod column_expr;
 mod csv;
+mod expr;
 mod grouping;
 mod print;
 mod reg;
@@ -31,8 +31,8 @@ use bumpalo_herd::Herd;
 use chrono_tz::Tz;
 use clap::{Parser, Subcommand};
 
-use env_logger::Builder;
 use env_logger::fmt::style::{AnsiColor, Color, RgbColor, Style};
+use env_logger::{Builder, Env};
 use journ_core::alloc::HerdAllocator;
 use journ_core::arguments::{Arguments, Command, DateTimeArguments};
 use journ_core::date_and_time::{
@@ -162,7 +162,7 @@ fn main() {
     // Emulates 'faint' in the terminal. Half intensity, not knowing whether the user has a white or black background.
     let trace_style =
         Style::default().fg_color(Some(Color::Rgb(RgbColor::from((128u8, 128u8, 128u8)))));
-    Builder::from_default_env()
+    Builder::from_env(Env::default().default_filter_or("off"))
         .format(move |buf, record| {
             let level_style = match record.level() {
                 log::Level::Error => error_style,

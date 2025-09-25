@@ -5,22 +5,23 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
-use crate::reporting::table2::column::{ColumnsVec, TableColumn};
-use crate::reporting::table2::fmt::{CellFormatter, TableCellFormatter};
+use crate::reporting::table2::fmt::RowFormatter;
+use crate::reporting::table2::fmt::TableCellFormatter;
 use crate::reporting::table2::row::Row;
-use crate::reporting::table2::{AlignedCell, Alignment, CellRef, SeparatorCell};
-use crate::reporting::term_style::{Colour, Style};
+use crate::reporting::table2::{CellRef, SeparatorCell};
 use std::fmt;
 
-#[derive(Default)]
 pub struct Table<'cell> {
     rows: Vec<Row<'cell>>,
     color: bool,
-    fill_width: bool,
     column_preferences: Vec<ColumnPreferences>,
 }
 
 impl<'cell> Table<'cell> {
+    pub fn color(&self) -> bool {
+        self.color
+    }
+
     pub fn set_color(&mut self, color: bool) {
         self.color = color;
     }
@@ -72,6 +73,12 @@ impl<'cell> Table<'cell> {
         formatter.set_striped();
         formatter.set_max_width(term_size::dimensions().map(|(w, _)| w));
         formatter.print(&self.rows, &self.column_preferences)
+    }
+}
+
+impl Default for Table<'_> {
+    fn default() -> Self {
+        Self { rows: vec![], color: atty::is(atty::Stream::Stdout), column_preferences: vec![] }
     }
 }
 

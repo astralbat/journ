@@ -55,6 +55,7 @@ pub mod valued_amount;
 
 pub mod alloc;
 //pub mod apportionment;
+pub mod amounts;
 mod journal_node_segment;
 pub mod journal_util;
 pub mod module;

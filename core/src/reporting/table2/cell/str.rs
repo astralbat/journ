@@ -6,13 +6,20 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::reporting::table2::fmt::CellFormatter;
-use crate::reporting::table2::{Cell, CellWidth};
+use crate::reporting::table2::{Cell, CellWidth, ColumnWidth};
 use smartstring::{SmartString, SmartStringMode};
 use std::fmt;
 
 impl Cell for str {
-    fn print<'format>(&self, f: &mut dyn CellFormatter<'format>, line: usize) -> fmt::Result {
-        self.lines().nth(line).map_or(Err(fmt::Error), |line| write!(f, "{line}"))
+    fn print<'format>(
+        &self,
+        f: &mut dyn CellFormatter,
+        line: usize,
+        _: Option<ColumnWidth>,
+    ) -> fmt::Result {
+        self.lines()
+            .nth(line)
+            .map_or(Err(fmt::Error), |line| write!(f, "{line}").map_err(|_| fmt::Error))
     }
 
     fn width(&self) -> CellWidth {
@@ -23,7 +30,12 @@ impl Cell for str {
 }
 
 impl Cell for &str {
-    fn print<'format>(&self, f: &mut dyn CellFormatter<'format>, line: usize) -> fmt::Result {
+    fn print<'format>(
+        &self,
+        f: &mut dyn CellFormatter,
+        line: usize,
+        _: Option<ColumnWidth>,
+    ) -> fmt::Result {
         self.lines().nth(line).map_or(Err(fmt::Error), |line| write!(f, "{line}"))
     }
 
@@ -35,8 +47,13 @@ impl Cell for &str {
 }
 
 impl Cell for String {
-    fn print<'format>(&self, f: &mut dyn CellFormatter<'format>, line: usize) -> fmt::Result {
-        self.as_str().print(f, line)
+    fn print<'format>(
+        &self,
+        f: &mut dyn CellFormatter,
+        line: usize,
+        width: Option<ColumnWidth>,
+    ) -> fmt::Result {
+        self.as_str().print(f, line, width)
     }
 
     fn width(&self) -> CellWidth {
@@ -45,8 +62,13 @@ impl Cell for String {
 }
 
 impl<Mode: SmartStringMode> Cell for SmartString<Mode> {
-    fn print<'format>(&self, f: &mut dyn CellFormatter<'format>, line: usize) -> fmt::Result {
-        self.as_str().print(f, line)
+    fn print<'format>(
+        &self,
+        f: &mut dyn CellFormatter,
+        line: usize,
+        width: Option<ColumnWidth>,
+    ) -> fmt::Result {
+        self.as_str().print(f, line, width)
     }
 
     fn width(&self) -> CellWidth {

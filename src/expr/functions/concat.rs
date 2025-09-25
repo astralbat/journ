@@ -5,23 +5,21 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
-mod cell;
-mod cell_width;
-mod column;
-pub mod fmt;
-mod row;
-mod table;
+use crate::expr::column_expr::{ColumnExpr, ColumnValue, EvalContext};
+use journ_core::error::JournResult;
+use smartstring::alias::String as SS;
 
-pub use cell::aligned::{AlignedCell, Alignment};
-pub use cell::binary::BinaryCell;
-pub use cell::blank::BlankCell;
-pub use cell::ellipsis::EllipsisCell;
-pub use cell::multi::MultiLineCell;
-pub use cell::separator::SeparatorCell;
-pub use cell::styled::StyledCell;
-pub use cell::wrapped::{PolicyWrappingCell, WrapEase, WrapPolicy};
-pub use cell::{Cell, CellRef, ShrinkableCell};
-pub use cell_width::{CellWidth, ColumnWidth, SpaceDistribution};
-pub use column::TableColumn;
-pub use row::Row;
-pub use table::Table;
+pub fn concat<'h, 'a, 's>(
+    args: &[ColumnExpr<'a>],
+    eval_context: &mut EvalContext<'h, 'a>,
+) -> JournResult<ColumnValue<'h, 'a>> {
+    let mut result = SS::new();
+
+    for arg in args {
+        let value = arg.eval(eval_context)?;
+        for v in value.as_list() {
+            result.push_str(&v.to_string());
+        }
+    }
+    Ok(ColumnValue::String(result))
+}

@@ -22,7 +22,6 @@ use journ_core::error::JournError;
 use journ_core::journal_node::NodeId;
 use journ_core::module::MODULES;
 use journ_core::parsing::text_block::TextBlock;
-use journ_core::python::conversion::DateTimeWrapper;
 use journ_core::python::mod_ledger;
 use journ_core::reporting::balance::AccountBalances;
 use journ_core::unit::{Unit, UnitFormat};
@@ -129,7 +128,7 @@ impl Journal {
         let filename = &**ALLOCATOR.alloc(PathBuf::from(filename));
 
         if MODULES.lock().unwrap().is_empty() {
-            MODULES.lock().unwrap().push(journ_cag::module_init::initialize(*ALLOCATOR));
+            MODULES.lock().unwrap().push(journ_cag::module_init::initialize());
         }
         /*
         let rust_journal = TextBlock::from_file(filename, &ALLOCATOR, None).and_then(|block| {
@@ -259,7 +258,7 @@ impl Journal {
             },
         );
         let journal = self.journal.lock().unwrap();
-        let account_obj = journal.root().config().get_or_create_account(account);
+        let account_obj = journal.config().clone().get_or_create_account(account);
         for entry in journal.entry_range(time_range) {
             for pst in entry.postings() {
                 if pst.account() != &account_obj {
@@ -285,7 +284,7 @@ impl Journal {
     ) -> PyLedgerResult<JournalEntry> {
         let journal = self.journal.lock().unwrap();
         let rust_jf = journal.node(&self.edit_node_id.lock().unwrap());
-        let config = rust_jf.config().clone();
+        let config = rust_jf.segments().last().unwrap().config().clone();
 
         // Convert the python datetime object in to a DateAndTime object.
         let chrono_date: DateTime<Tz> =
@@ -294,8 +293,8 @@ impl Journal {
             JDateTimeRange::new(
                 JDateTime::from_datetime(
                     chrono_date.with_timezone(&config.timezone()),
-                    Some(config.as_herd_ref().date_format()),
-                    if write_time { Some(config.as_herd_ref().time_format()) } else { None },
+                    Some(config.date_format()),
+                    if write_time { Some(config.time_format()) } else { None },
                 ),
                 None,
             ),
@@ -306,8 +305,8 @@ impl Journal {
                         .map_err(|e| PyLedgerError(err!("Invalid aux datetime: {}", e)))?;
                     Some(JDateTime::from_datetime(
                         aux_date.with_timezone(&config.timezone()),
-                        Some(config.as_herd_ref().date_format()),
-                        if write_time { Some(config.as_herd_ref().time_format()) } else { None },
+                        Some(config.date_format()),
+                        if write_time { Some(config.time_format()) } else { None },
                     ))
                 }
                 None => None,
@@ -317,7 +316,7 @@ impl Journal {
         description.insert_str(0, "  ");
         let entry = journ_core::journal_entry::JournalEntry::new(
             ALLOCATOR.alloc(*self.edit_node_id.lock().unwrap()),
-            rust_jf.config().clone(),
+            config.clone(),
             dt,
             ALLOCATOR.alloc(description),
             Vec::new_in(&ALLOCATOR),
@@ -384,6 +383,6 @@ fn format_amount<'py>(
         },
     };
 
-    let formatted = uf.format_precise(Amount::new(&Unit::new(unit), dec));
-    Ok(formatted)
+    let formatted = uf.format(Amount::new(&Unit::new(unit), dec));
+    Ok(formatted.to_string())
 }

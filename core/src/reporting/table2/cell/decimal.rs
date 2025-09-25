@@ -5,16 +5,21 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
-use crate::reporting::table2::Cell;
 use crate::reporting::table2::cell_width::CellWidth;
 use crate::reporting::table2::fmt::CellFormatter;
+use crate::reporting::table2::{Cell, ColumnWidth};
 use rust_decimal::Decimal;
 use std::fmt;
 
 impl Cell for Decimal {
-    fn print<'format>(&self, f: &mut dyn CellFormatter<'format>, line: usize) -> fmt::Result {
+    fn print<'format>(
+        &self,
+        f: &mut dyn CellFormatter,
+        line: usize,
+        width: Option<ColumnWidth>,
+    ) -> fmt::Result {
         let s = self.to_string();
-        s.print(f, line)
+        s.print(f, line, width)
     }
 
     fn width(&self) -> CellWidth {

@@ -55,18 +55,35 @@ impl Display for BalColumn {
 #[derive(clap::Args, Debug)]
 #[command(name = "bal", about = "Print balances of accounts")]
 pub struct BalArguments {
-    #[arg(value_name = "ACCOUNT_FILTER", help = "Filter accounts by regexp pattern")]
+    #[arg(
+        value_name = "ACCOUNT_FILTER",
+        help = "Filter accounts by pattern. E.g. Expenses..Food",
+        use_value_delimiter = true
+    )]
     account_filter: Vec<String>,
-    #[arg(short = 'u', long = "unit", value_name = "UNIT", help = "Filter by unit expression")]
+    #[arg(
+        short = 'u',
+        long = "unit",
+        value_name = "UNIT",
+        help = "Filter by unit expression",
+        use_value_delimiter = true
+    )]
     unit_filter: Vec<String>,
     #[arg(
         short = 'd',
         long = "description",
         value_name = "DESCRIPTION",
-        help = "Filter by description"
+        help = "Filter by description",
+        use_value_delimiter = true
     )]
     description_filter: Vec<String>,
-    #[arg(short = 'f', long = "file", value_name = "FILE", help = "Filter by file")]
+    #[arg(
+        short = 'f',
+        long = "file",
+        value_name = "FILE",
+        help = "Filter by file",
+        use_value_delimiter = true
+    )]
     file_filter: Vec<String>,
     #[arg(long = "csv", help = "write the output in CSV format")]
     write_csv: bool,
@@ -86,6 +103,10 @@ pub struct BalArguments {
         help = "write the file(s) with any new entry valuations if any were not explicitly set"
     )]
     write_file: bool,
+    #[arg(short = 'H', long = "no-header", help = "do not print header row")]
+    no_header: bool,
+    #[arg(short = 'T', long = "no-total", help = "do not print total row")]
+    no_total: bool,
 }
 
 impl IntoExecCommand for BalArguments {
@@ -99,6 +120,8 @@ impl IntoExecCommand for BalArguments {
         bal_cmd.set_write_csv(self.write_csv);
         bal_cmd.set_column_spec(self.column_spec);
         bal_cmd.set_write_file(self.write_file);
+        bal_cmd.set_no_header(self.no_header);
+        bal_cmd.set_no_total(self.no_total);
         Ok(bal_cmd)
     }
 }

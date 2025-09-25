@@ -5,9 +5,9 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
-use crate::arguments::Arguments;
+use crate::reporting::table2::cell::{lease_formatter, return_formatter};
 use crate::reporting::table2::fmt::CellFormatter;
-use crate::reporting::table2::{Cell, CellRef, ShrinkableCell};
+use crate::reporting::table2::{Cell, CellRef, ColumnWidth, ShrinkableCell};
 use crate::reporting::term_style::Style;
 
 pub struct StyledCell<'c> {
@@ -21,28 +21,35 @@ impl<'c> StyledCell<'c> {
 }
 
 impl Cell for StyledCell<'_> {
-    fn print<'format>(&self, f: &mut dyn CellFormatter<'format>, line: usize) -> std::fmt::Result {
+    fn print<'format>(
+        &self,
+        f: &mut dyn CellFormatter,
+        line: usize,
+        width: Option<ColumnWidth>,
+    ) -> std::fmt::Result {
         if self.inner.height() <= line {
             return Err(std::fmt::Error);
         }
 
         if f.color() {
             self.style.start(f)?;
-            let start_cursor_col = f.cursor_col();
 
-            let res = self.inner.print(f, line);
+            let mut tmp_formatter = lease_formatter();
+            let res = self.inner.print(&mut tmp_formatter, line, width.clone());
+            write!(f, "{}", tmp_formatter.buffer())?;
 
             // It's a good idea to pad here (otherwise the formatter will do it) to keep a consistent style
-            if let Some(width) = f.width() {
-                for _ in f.cursor_col()..(start_cursor_col + width.width()) {
+            if let Some(width) = width {
+                for _ in tmp_formatter.buffer().chars().count()..width.width() {
                     write!(f, "{}", self.padding_char())?;
                 }
             }
+            return_formatter(tmp_formatter);
 
             self.style.end(f)?;
             res
         } else {
-            self.inner.print(f, line)
+            self.inner.print(f, line, width)
         }
     }
 

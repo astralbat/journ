@@ -46,13 +46,11 @@ impl Posting {
 
     fn set_unit_value(&self, unit_value: &str) -> PyLedgerResult<()> {
         let mut entry = self.entry.lock().unwrap();
+        let mut config = entry.config().clone();
         let pst = entry.find_posting_mut(self.posting_id).unwrap();
-        let journal = self.journal.lock().unwrap();
-        let node = journal.node(self.posting_id.entry_id().node_id());
-        let node_config = node.config();
         let unit_value_alloc = crate::bindings_pyo3::ALLOCATOR.alloc(unit_value.to_string());
 
-        let parse_res = parse!(unit_value_alloc, parsing::amount::amount, node_config).0?.1;
+        let parse_res = parse!(unit_value_alloc, parsing::amount::amount, &mut config).0?.1;
 
         if !parse_res.is_positive() {
             return Err(PyLedgerError(err!("Unit value must be positive")));
@@ -70,13 +68,11 @@ impl Posting {
 
     fn set_total_value(&self, total_value: &str) -> PyLedgerResult<()> {
         let mut entry = self.entry.lock().unwrap();
+        let mut config = entry.config().clone();
         let pst = entry.find_posting_mut(self.posting_id).unwrap();
-        let journal = self.journal.lock().unwrap();
-        let node = journal.node(self.posting_id.entry_id().node_id());
-        let node_config = node.config();
         let total_value_alloc = crate::bindings_pyo3::ALLOCATOR.alloc(total_value.to_string());
 
-        let parse_res = parse!(total_value_alloc, parsing::amount::amount, node_config).0?.1;
+        let parse_res = parse!(total_value_alloc, parsing::amount::amount, &mut config).0?.1;
         if !parse_res.is_positive() {
             return Err(PyLedgerError(err!("Total value must be positive")));
         }

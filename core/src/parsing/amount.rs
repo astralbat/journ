@@ -34,7 +34,9 @@ type UnitQuantity<'t> = (Option<&'t Unit<'t>>, Decimal);
 pub fn illegal_unit_code_char(c: char) -> bool {
     #[rustfmt::skip]
     // '(', ')', '*', '+', ',', '-', '.', '/', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', ':', ';', '<', '=', '>', '?', '@'
+    // '#' appears in number formats.
     let illegal = ((c as u32) >= 0x28 && (c as u32) <= 0x40)
+        || c == '#'
         || c == '"'
         // Mainly '\r' and '\n'. Unit has to finish on the same line.  
         || (c as u32) < 0x20;
@@ -102,7 +104,9 @@ pub fn pos_decimal_format<'h, I: TextInput<'h>>(input: I) -> IParseResult<'h, I,
             IErrorMsg::POSITIVE_NUMBER_FORMAT,
             preceded(
                 space0,
-                take_while1(|c: char| c.is_ascii_digit() || c == ',' || c == '.' || c == '#'),
+                take_while1(|c: char| {
+                    c.is_ascii_digit() || c == ',' || c == '.' || c == '#' || c == '?'
+                }),
             ),
         ),
         |output: I| output.text(),

@@ -5,9 +5,11 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
-use crate::reporting::table2::cell::Cell;
+use crate::reporting::table2::ColumnWidth;
+use crate::reporting::table2::cell::{Cell, lease_formatter, return_formatter};
 use crate::reporting::table2::cell_width::{CellWidth, SpaceDistribution};
-use crate::reporting::table2::fmt::CellFormatter;
+use crate::reporting::table2::fmt::{CellFormatter, StringCellFormatter};
+use log::Level;
 use std::fmt;
 
 /// A cell composed of two other cells.
@@ -36,34 +38,44 @@ impl BinaryCell {
     }
 }
 impl Cell for BinaryCell {
-    fn print<'format>(&self, f: &mut dyn CellFormatter<'format>, line: usize) -> fmt::Result {
+    fn print<'format>(
+        &self,
+        f: &mut dyn CellFormatter,
+        line: usize,
+        width: Option<ColumnWidth>,
+    ) -> fmt::Result {
         assert!(
-            matches!(f.width(), Some(CellWidth::Binary(_, _, _)) | None),
+            matches!(width, Some(CellWidth::Binary(_, _, _)) | None),
             "BinaryCell can only be written to a CellFormatter with a Binary width"
         );
-        let padded_l_width = f.width().and_then(|pad_w| pad_w.left().cloned());
-        let padded_r_width = f.width().and_then(|pad_w| pad_w.right().cloned());
+        let padded_l_width = width.as_ref().and_then(|pad_w| pad_w.left().cloned());
+        let padded_r_width = width.and_then(|pad_w| pad_w.right().cloned());
 
-        let start_col = f.cursor_col();
-
-        f.set_width(padded_l_width.clone());
-        let left_res = self.left.print(f, line);
+        //let left_formatter = BasicCellFormatter::new()
+        //f.set_width(padded_l_width.clone());
+        let mut left_buffer = lease_formatter();
+        let left_res = self.left.print(&mut left_buffer, line, padded_l_width.clone());
+        write!(f, "{}", left_buffer.buffer())?;
 
         // Print padding between left and right cells
         if let Some(padded_l_width) = padded_l_width {
-            debug_assert!(
-                f.cursor_col() - start_col <= padded_l_width.width(),
-                "Left cell wrote more than its allocated width ({} > {})",
-                f.cursor_col() - start_col,
-                padded_l_width.width()
-            );
-            for _ in 0..(padded_l_width.width() - (f.cursor_col() - start_col)) {
+            if log_enabled!(Level::Debug) {
+                debug_assert!(
+                    left_buffer.buffer().chars().count() <= padded_l_width.width(),
+                    "Left cell wrote more than its allocated width ({} > {})",
+                    left_buffer.buffer().chars().count(),
+                    padded_l_width.width()
+                );
+            }
+            for _ in 0..(padded_l_width.width() - left_buffer.buffer().chars().count()) {
                 write!(f, "{}", self.padding_char())?;
             }
         }
 
-        f.set_width(padded_r_width);
-        let right_res = self.right.print(f, line);
+        return_formatter(left_buffer);
+
+        // f.set_width(padded_r_width);
+        let right_res = self.right.print(f, line, padded_r_width);
         left_res.or(right_res)
     }
 

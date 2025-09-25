@@ -8,7 +8,7 @@
 use crate::metadata::Metadata;
 use crate::reporting::table2::fmt::CellFormatter;
 use crate::reporting::table2::{
-    Cell, CellWidth, PolicyWrappingCell, StyledCell, WrapEase, WrapPolicy,
+    Cell, CellWidth, ColumnWidth, PolicyWrappingCell, StyledCell, WrapEase, WrapPolicy,
 };
 use crate::reporting::term_style::{Colour, Style};
 use std::hash::{Hash, Hasher};
@@ -211,7 +211,12 @@ where
 }
 
 impl Cell for &Account<'_> {
-    fn print<'format>(&self, f: &mut dyn CellFormatter<'format>, line: usize) -> fmt::Result {
+    fn print<'format>(
+        &self,
+        f: &mut dyn CellFormatter,
+        line: usize,
+        _width: Option<ColumnWidth>,
+    ) -> fmt::Result {
         if line == 0 { write!(f, "{}", self.name()) } else { Err(fmt::Error) }
     }
 

@@ -7,7 +7,7 @@
  */
 use crate::reporting::table::Cell;
 use crate::reporting::table::WrapPolicy;
-use crate::reporting::table2::{AlignedCell, Alignment, CellRef, SpaceDistribution, StyledCell};
+use crate::reporting::table2::{AlignedCell, Alignment, BlankCell, SpaceDistribution, StyledCell};
 use crate::reporting::term_style::{Colour, Style};
 use crate::reporting::{table, table2};
 use crate::unit;
@@ -18,7 +18,10 @@ use rust_decimal::prelude::Zero;
 use smartstring::alias::String as SS;
 use std::borrow::Borrow;
 use std::iter::Sum;
-use std::ops::{Add, AddAssign, Bound, Deref, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssign};
+use std::ops::{
+    Add, AddAssign, Bound, Deref, Div, DivAssign, Mul, MulAssign, Neg, Rem, RemAssign, Sub,
+    SubAssign,
+};
 use std::{cmp, fmt, mem};
 use yaml_rust::Yaml;
 use yaml_rust::yaml::Hash;
@@ -58,7 +61,7 @@ impl<'h> Amount<'h> {
     /// Gets whether the amount is nil, nothing: a zero amount with no unit.
     /// This is not the same as [Amount::is_zero()] which is always true when the quantity is zero.
     pub fn is_nil(&self) -> bool {
-        self.unit.is_none()
+        self.unit.is_none() && self.quantity.is_zero()
     }
 
     pub fn quantity(&self) -> Quantity {
@@ -71,7 +74,7 @@ impl<'h> Amount<'h> {
     {
         let quantity = quantity.into();
 
-        assert!(!self.unit.is_none() || quantity.is_zero(), "Can't set quantity on a nil amount");
+        //assert!(!self.unit.is_none() || quantity.is_zero(), "Can't set quantity on a nil amount");
         Amount::new(self.unit, quantity)
     }
 
@@ -310,6 +313,10 @@ impl<'h> Amount<'h> {
     }
 
     pub fn into_cell(self, format: &UnitFormat) -> Box<dyn table2::Cell> {
+        if self.is_nil() {
+            return Box::new(BlankCell);
+        }
+
         #[derive(Default)]
         struct AmountHandler {
             part_before_decimal: SS,
@@ -323,11 +330,15 @@ impl<'h> Amount<'h> {
             fn handle_part(&mut self, part: AmountPart) {
                 match part {
                     AmountPart::DigitBeforeDecimal(_) => self.reached_integer_part = true,
-                    AmountPart::Code(c) if !self.reached_integer_part => {
+                    AmountPart::DecimalPoint(_) => {
+                        self.reached_decimal = true;
+                        self.reached_integer_part = true;
+                    }
+                    AmountPart::Code(c) | AmountPart::Sign(c) if !self.reached_integer_part => {
                         self.code_before_amount.push(c);
                         return;
                     }
-                    AmountPart::Code(c) if self.reached_integer_part => {
+                    AmountPart::Code(c) | AmountPart::Quote(c) if self.reached_integer_part => {
                         self.code_after_amount.push(c);
                         return;
                     }
@@ -656,6 +667,8 @@ macro_rules! op {
 }
 op!(Amount<'h>, Div, div, Decimal::div);
 op!(&Amount<'h>, Div, div, Decimal::div);
+op!(Amount<'h>, Rem, rem, Decimal::rem);
+op!(&Amount<'h>, Rem, rem, Decimal::rem);
 
 macro_rules! checked_op_assign {
     ($amount_type:ty, $op_type:tt, $op_method:tt, $dec_op:path) => {
@@ -700,6 +713,8 @@ macro_rules! op_assign {
 }
 op_assign!(Amount<'h>, DivAssign, div_assign, Decimal::div);
 op_assign!(&Amount<'h>, DivAssign, div_assign, Decimal::div);
+op_assign!(Amount<'h>, RemAssign, rem_assign, Decimal::rem);
+op_assign!(&Amount<'h>, RemAssign, rem_assign, Decimal::rem);
 
 macro_rules! checked_op_decimal {
     ($amount_type:ty, $op_type:tt, $op_method:tt, $op:path, $unit_check:expr) => {
@@ -748,6 +763,8 @@ macro_rules! op_decimal {
 }
 op_decimal!(Amount<'h>, Div, div, Decimal::div, false);
 op_decimal!(&Amount<'h>, Div, div, Decimal::div, false);
+op_decimal!(Amount<'h>, Rem, rem, Decimal::rem, false);
+op_decimal!(&Amount<'h>, Rem, rem, Decimal::rem, false);
 
 macro_rules! checked_op_assign_decimal {
     ($op_type:tt, $op_method:tt, $op:path, $unit_check:expr) => {
@@ -783,6 +800,14 @@ checked_op_assign_decimal!(AddAssign, add_assign, Decimal::checked_add, true);
 checked_op_assign_decimal!(SubAssign, sub_assign, Decimal::checked_sub, true);
 checked_op_assign_decimal!(MulAssign, mul_assign, Decimal::checked_mul, false);
 op_assign_decimal!(DivAssign, div_assign, Decimal::div, false);
+op_assign_decimal!(RemAssign, rem_assign, Decimal::rem, false);
+
+impl<'h> Neg for Amount<'h> {
+    type Output = Amount<'h>;
+    fn neg(self) -> Self::Output {
+        Amount::new(self.unit, self.quantity.neg())
+    }
+}
 
 /// An arithmetic expression of `Amounts`.
 /// These are parsed from the journal files and stored so that they can be rewritten later.

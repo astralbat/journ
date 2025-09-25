@@ -6,15 +6,11 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::ExecCommand;
-use crate::column_expr::{ColumnExpr, ColumnValue, DataContext, EvalContext, PostingGroup};
-use crate::grouping::GroupKey;
+use crate::expr::column_expr::{ColumnExpr, ColumnValue, DataContext, EvalContext};
 use crate::report::parse_columns;
 use journ_core::account::Account;
-use journ_core::amount::Amount;
 use journ_core::arguments::{Arguments, Command};
-use journ_core::configuration::{
-    AccountFilter, DescriptionFilter, FileFilter, Filter, create_unit_filter,
-};
+use journ_core::configuration::{AccountFilter, DescriptionFilter, FileFilter, Filter, UnitFilter};
 use journ_core::err;
 use journ_core::error::JournResult;
 use journ_core::journal::Journal;
@@ -25,8 +21,6 @@ use journ_core::reporting::balance::Balance;
 use journ_core::reporting::table2::{CellRef, StyledCell};
 use journ_core::reporting::term_style::{Style, Weight};
 use journ_core::unit::Unit;
-use num_format::Locale::pa;
-use std::io;
 
 #[derive(Default, Debug)]
 pub struct RegCommand {
@@ -48,7 +42,7 @@ impl RegCommand {
     }
 
     pub fn unit_filter(&self) -> impl for<'t> Filter<Unit<'t>> + '_ {
-        create_unit_filter(&self.unit_filter)
+        UnitFilter::new(&self.unit_filter)
     }
 
     pub fn set_unit_filter(&mut self, units: Vec<String>) {
@@ -110,7 +104,7 @@ impl ExecCommand for RegCommand {
         });
 
         let mut table = journ_core::reporting::table2::Table::default();
-        table.set_color(!args.no_color);
+        table.set_color(table.color() && !args.no_color);
         // Heading Row
         let heading_style = Style::default().with_weight(Weight::Bold);
         let headings = column_spec
@@ -121,19 +115,20 @@ impl ExecCommand for RegCommand {
 
         let mut balance = vec![];
         for (entry, pst) in filtered_postings() {
-            let mut context = EvalContext::new(&journ, DataContext::Scalar(entry, pst));
+            let mut context = EvalContext::new(&journ, DataContext::Single(entry, pst));
             balance += pst.amount();
-            context.add_variable("balance", ColumnValue::Amount(balance.balance(pst.unit())));
+            context.add_variable(
+                "balance",
+                ColumnValue::Amount { amount: balance.balance(pst.unit()), is_valuation: false },
+            );
             let mut row: Vec<CellRef> = vec![];
             for (i, col) in lower_column_spec.iter().enumerate() {
                 let value = col
-                    .expr
-                    .eval(&context)
+                    .eval(&mut context)
                     .map_err(|e| err!("Unable to evaluate column: '{}'", col).with_source(e))?;
 
                 // Allow these columns to expand. Look better.
-                if let ColumnExpr::Column("description") | ColumnExpr::Column("account") = &col.expr
-                {
+                if let ColumnExpr::Column("description") | ColumnExpr::Column("account") = &col {
                     table.expand_column(i);
                 }
 
@@ -143,7 +138,7 @@ impl ExecCommand for RegCommand {
         }
         let mut output = String::new();
         table.print(&mut output).unwrap();
-        println!("{output}");
+        print!("{output}");
 
         // We only need to write the price database.
         config.price_databases().into_iter().for_each(|db| db.write_file().unwrap());

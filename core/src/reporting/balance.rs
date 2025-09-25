@@ -10,10 +10,8 @@ use crate::amount::Amount;
 use crate::journal_entry::JournalEntry;
 use crate::unit::Unit;
 use crate::valued_amount::ValuedAmount;
-use smallvec::SmallVec;
 use std::cell::Ref;
 use std::collections::HashMap;
-use std::ops::AddAssign;
 use std::sync::Arc;
 
 pub trait Balance<'h> {
@@ -31,21 +29,6 @@ impl<'h> Balance<'h> for HashMap<&'h Unit<'h>, Amount<'h>> {
         self.get(unit).copied().unwrap_or_else(|| unit.with_quantity(0))
     }
 }
-
-macro_rules! add_assign_vec_like {
-    ($vec_like:ty) => {
-        impl<'h> AddAssign<Amount<'h>> for $vec_like {
-            fn add_assign(&mut self, rhs: Amount<'h>) {
-                match self.iter_mut().find(|b| b.unit() == rhs.unit()) {
-                    Some(amount) => *amount += rhs,
-                    None => self.push(rhs),
-                }
-            }
-        }
-    };
-}
-add_assign_vec_like!(Vec<Amount<'h>>);
-add_assign_vec_like!(SmallVec<[Amount<'h>; 8]>);
 
 pub trait AccountBalance<'h> {
     fn balances(&mut self, account_filter: Option<&str>) -> AccountBalances<'h>;

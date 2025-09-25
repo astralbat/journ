@@ -157,7 +157,7 @@ impl CapitalGainsComputer {
     fn scan_entry<'h, 'u>(
         &mut self,
         entry: &'h JournalEntry<'h>,
-        unit_filter: impl Filter<'u, Unit<'h>> + Copy,
+        unit_filter: impl Filter<Unit<'h>> + Copy,
         initial_uoa: impl Fn(&DealGroup<'h>) -> &'h Unit<'h> + Copy,
     ) -> Result<Vec<DealingEvent<'h>>, JournError>
     where
@@ -366,7 +366,7 @@ impl CapitalGainsComputer {
     fn scan_net_equity_flows<'a, 'h, 'u>(
         valued_entry: &'a JournalEntry<'h>,
         existing_entry: &'h JournalEntry<'h>,
-        unit_filter: impl Filter<'u, Unit<'h>>,
+        unit_filter: impl Filter<Unit<'h>>,
         initial_uoa: impl Fn(&DealGroup<'h>) -> &'h Unit<'h>,
     ) -> ValueResult<'h, NetEquityFlowsAndMetadataEvents<'h>> {
         let flows = Some(valued_entry.flows());
@@ -528,7 +528,7 @@ impl<'h> DealingEventQueue<'h> {
     pub fn add_events<I: IntoIterator<Item = DealingEvent<'h>>>(
         &mut self,
         events: I,
-        pool_manager: &mut PoolManager<'h, '_>,
+        pool_manager: &mut PoolManager<'h>,
     ) -> JournResult<Vec<PoolEvent<'h>>> {
         let mut pool_events = vec![];
 
@@ -579,7 +579,7 @@ impl<'h> DealingEventQueue<'h> {
     pub fn flush_to_offset(
         &mut self,
         offset: usize,
-        pool_manager: &mut PoolManager<'h, '_>,
+        pool_manager: &mut PoolManager<'h>,
     ) -> JournResult<Vec<PoolEvent<'h>>> {
         let mut pool_events = vec![];
         for event in self.events.drain(..=offset) {
@@ -598,7 +598,7 @@ impl<'h> DealingEventQueue<'h> {
 
     pub fn flush_all(
         mut self,
-        pool_manager: &mut PoolManager<'h, '_>,
+        pool_manager: &mut PoolManager<'h>,
     ) -> JournResult<Vec<PoolEvent<'h>>> {
         if self.events.is_empty() {
             return Ok(vec![]);

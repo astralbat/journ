@@ -7,7 +7,6 @@
  */
 use crate::bindings_pyo3::{PyLedgerError, PyLedgerResult};
 use crate::posting::Posting;
-use chrono::DateTime;
 use journ_core::amount::AmountExpr;
 use journ_core::journal::Journal as CoreJournal;
 use journ_core::journal_entry::EntryObject;
@@ -68,14 +67,14 @@ impl JournalEntry {
     }
 
     fn append_posting(&self, account: &str, amount: Option<&str>) -> PyLedgerResult<Posting> {
-        let journal = self.journal.lock().unwrap();
-        let node = journal.node(&self.node_id);
-        let account = node.config().get_or_create_account(account);
+        let mut entry = self.entry.lock().unwrap();
+        let mut config = entry.config().clone();
+        let account = config.get_or_create_account(account);
         let money = match amount {
             Some(amount) => {
                 let alloc_amount = crate::bindings_pyo3::ALLOCATOR.alloc(amount.to_string());
                 Some(
-                    parse!(alloc_amount, parsing::amount::amount, node.config())
+                    parse!(alloc_amount, parsing::amount::amount, &mut config)
                         .0
                         .map(|r| r.1)
                         .map_err(|e| err!(e; "append_posting()"))?,
@@ -83,7 +82,6 @@ impl JournalEntry {
             }
             None => None,
         };
-        let mut entry = self.entry.lock().unwrap();
         let pst = journ_core::posting::Posting::new(
             None,
             "  ",

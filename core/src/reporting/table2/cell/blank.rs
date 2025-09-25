@@ -6,7 +6,7 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::reporting::table2::fmt::CellFormatter;
-use crate::reporting::table2::{Cell, CellWidth};
+use crate::reporting::table2::{Cell, CellWidth, ColumnWidth};
 use std::fmt;
 
 // public to crate only so that we can ensure it is not used outside. We use this to compare for filler cells
@@ -16,7 +16,12 @@ pub(crate) static BLANK_CELL: BlankCell = BlankCell;
 /// A special cell that does not write anything; its width is 0.
 pub struct BlankCell;
 impl Cell for BlankCell {
-    fn print<'format>(&self, _f: &mut dyn CellFormatter<'format>, _line: usize) -> fmt::Result {
+    fn print<'format>(
+        &self,
+        _f: &mut dyn CellFormatter,
+        _line: usize,
+        _: Option<ColumnWidth>,
+    ) -> fmt::Result {
         Err(fmt::Error)
     }
 

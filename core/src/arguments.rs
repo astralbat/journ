@@ -6,9 +6,7 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::account::Account;
-use crate::configuration::{
-    AccountFilter, DescriptionFilter, FileFilter, Filter, create_unit_filter,
-};
+use crate::configuration::{AccountFilter, DescriptionFilter, FileFilter, Filter, UnitFilter};
 use crate::date_and_time::{
     DEFAULT_DATE_FORMAT, DEFAULT_TIME_FORMAT, DateFormat, JDateTime, TimeFormat,
 };
@@ -20,13 +18,12 @@ use chrono::{DateTime, NaiveDateTime, TimeZone};
 use chrono_tz::Tz;
 use std::any::Any;
 use std::default::Default;
-use std::fmt;
 use std::fmt::Debug;
 use std::ops::{Bound, RangeBounds};
 use std::sync::OnceLock;
 
 /// The command we're executing.
-pub trait Command: fmt::Debug + Send + Sync + Any {}
+pub trait Command: Debug + Send + Sync + Any {}
 
 #[derive(Debug, Default)]
 pub struct Arguments {
@@ -185,7 +182,7 @@ impl CsvCommand {
     }
 
     pub fn unit_filter(&self) -> impl for<'t> Filter<Unit<'t>> + '_ {
-        create_unit_filter(&self.unit_filter)
+        UnitFilter::new(&self.unit_filter)
     }
 
     pub fn set_unit_filter(&mut self, units: Vec<String>) {

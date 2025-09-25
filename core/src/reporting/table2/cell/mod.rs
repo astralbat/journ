@@ -16,15 +16,36 @@ pub mod str;
 pub mod styled;
 pub mod wrapped;
 
-use crate::reporting::table2::StyledCell;
 use crate::reporting::table2::cell_width::CellWidth;
-use crate::reporting::table2::fmt::{BasicCellFormatter, CellFormatter};
+use crate::reporting::table2::fmt::{BasicCellFormatter, CellFormatter, StringCellFormatter};
+use crate::reporting::table2::{ColumnWidth, StyledCell};
 use smallvec::SmallVec;
 use smartstring::alias::String as SS;
 use smartstring::{SmartString, SmartStringMode};
 use std::cell::RefCell;
 use std::fmt::Write;
 use std::{fmt, iter};
+
+thread_local! {
+    static TMP_FORMATTERS: RefCell<Vec<StringCellFormatter>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Gets a temporary StringCellFormatter from the thread-local pool, or creates a new one if none are available.
+fn lease_formatter() -> StringCellFormatter {
+    TMP_FORMATTERS.with(|buffers| {
+        let mut buffers = buffers.borrow_mut();
+        buffers.pop().unwrap_or_default()
+    })
+}
+
+/// Returns a temporary StringCellFormatter to the thread-local pool.
+fn return_formatter(mut buffer: StringCellFormatter) {
+    TMP_FORMATTERS.with(|buffers| {
+        let mut buffers = buffers.borrow_mut();
+        buffer.clear();
+        buffers.push(buffer);
+    });
+}
 
 pub enum CellRef<'c> {
     Owned(Box<dyn Cell + 'c>),
@@ -77,11 +98,14 @@ where
 }
 
 pub trait Cell {
-    /// Writes the contents of the cell to the formatter.
-    /// The cell must ensure that it does not write more than the width returned by `{Self::width()}`.
-    /// The formatter's width should always be at least as wide as the cell's width, allowing the cell
-    /// to optionally pad its content if necessary up to that width.
-    fn print<'format>(&self, f: &mut dyn CellFormatter<'format>, line: usize) -> fmt::Result;
+    /// Writes the contents of the cell to the formatter, optionally padding its content to fill it.
+    /// Returns Ok(()) if the line was printed, or Err(fmt::Error) if the line does not exist.
+    fn print(
+        &self,
+        f: &mut dyn CellFormatter,
+        line: usize,
+        width: Option<ColumnWidth>,
+    ) -> fmt::Result;
 
     /// The width of the cell in characters.
     fn width(&self) -> CellWidth;
@@ -95,7 +119,7 @@ pub trait Cell {
             }
         }
         let mut lines = 0;
-        while self.print(&mut BasicCellFormatter::new(&mut Writer), lines).is_ok() {
+        while self.print(&mut BasicCellFormatter::new(&mut Writer), lines, None).is_ok() {
             lines += 1;
         }
         lines
@@ -146,7 +170,7 @@ impl<'c> ModifiableCell<'c> {
         for i in 0..height {
             let mut buf = SS::new();
             let mut cf = BasicCellFormatter::new(&mut buf);
-            self.inner.print(&mut cf, i).unwrap();
+            self.inner.print(&mut cf, i, None).unwrap();
             self.lines.borrow_mut().push(buf);
         }
     }
@@ -174,8 +198,13 @@ impl<'c> ModifiableCell<'c> {
 }
 
 impl Cell for ModifiableCell<'_> {
-    fn print<'format>(&self, f: &mut dyn CellFormatter<'format>, line: usize) -> fmt::Result {
-        self.lines.borrow().get(line).map(|l| l.print(f, line)).unwrap_or(Err(std::fmt::Error))
+    fn print<'format>(
+        &self,
+        f: &mut dyn CellFormatter,
+        line: usize,
+        width: Option<ColumnWidth>,
+    ) -> fmt::Result {
+        self.lines.borrow().get(line).map(|l| l.print(f, line, width)).unwrap_or(Err(fmt::Error))
     }
 
     fn width(&self) -> CellWidth {

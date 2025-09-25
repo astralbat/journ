@@ -11,7 +11,7 @@ use chrono::{DateTime, Duration};
 use chrono_tz::Tz;
 use journ_core::account::Account;
 use journ_core::arguments::{Command, DateTimeArguments};
-use journ_core::configuration::{AccountFilter, Filter, create_unit_filter};
+use journ_core::configuration::{AccountFilter, Filter, UnitFilter};
 use journ_core::directive::DirectiveKind;
 use journ_core::err;
 use journ_core::error::JournError;
@@ -442,7 +442,7 @@ impl CagCommand {
     }
 
     pub fn unit_filter(&self) -> impl for<'h> Filter<Unit<'h>> + '_ {
-        create_unit_filter(&self.unit_filter)
+        UnitFilter::new(&self.unit_filter)
     }
 
     pub fn set_unit_filter(&mut self, units: Vec<String>) {
@@ -527,7 +527,7 @@ impl Deref for EventPattern {
 #[derive(Debug, Clone)]
 pub struct EventFilter<'a>(&'a Vec<EventPattern>);
 
-impl<'a, 'h> Filter<'a, PoolEvent<'h>> for EventFilter<'_> {
+impl<'a, 'h> Filter<PoolEvent<'h>> for EventFilter<'_> {
     fn is_included(&self, event: &PoolEvent<'h>) -> bool {
         // No filter specified; always include.
         if self.0.is_empty() {

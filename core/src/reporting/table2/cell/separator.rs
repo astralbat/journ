@@ -5,9 +5,9 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
-use crate::reporting::table2::Cell;
 use crate::reporting::table2::cell_width::CellWidth;
 use crate::reporting::table2::fmt::CellFormatter;
+use crate::reporting::table2::{Cell, ColumnWidth};
 use std::fmt;
 
 pub struct SeparatorCell {
@@ -20,7 +20,12 @@ impl SeparatorCell {
     }
 }
 impl Cell for SeparatorCell {
-    fn print<'format>(&self, _f: &mut dyn CellFormatter<'format>, _line: usize) -> fmt::Result {
+    fn print<'format>(
+        &self,
+        _f: &mut dyn CellFormatter,
+        _line: usize,
+        _width: Option<ColumnWidth>,
+    ) -> fmt::Result {
         Err(fmt::Error)
     }
 

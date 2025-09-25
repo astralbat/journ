@@ -5,23 +5,26 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
-mod cell;
-mod cell_width;
-mod column;
-pub mod fmt;
-mod row;
-mod table;
+pub mod concat;
+pub mod cosum;
+pub mod max;
+pub mod min;
+pub mod neg;
+pub mod num;
+pub mod round;
+pub mod sum;
+pub mod sumif;
+pub mod text;
+pub mod value;
 
-pub use cell::aligned::{AlignedCell, Alignment};
-pub use cell::binary::BinaryCell;
-pub use cell::blank::BlankCell;
-pub use cell::ellipsis::EllipsisCell;
-pub use cell::multi::MultiLineCell;
-pub use cell::separator::SeparatorCell;
-pub use cell::styled::StyledCell;
-pub use cell::wrapped::{PolicyWrappingCell, WrapEase, WrapPolicy};
-pub use cell::{Cell, CellRef, ShrinkableCell};
-pub use cell_width::{CellWidth, ColumnWidth, SpaceDistribution};
-pub use column::TableColumn;
-pub use row::Row;
-pub use table::Table;
+pub use concat::concat;
+pub use cosum::cosum;
+pub use max::max;
+pub use min::min;
+pub use neg::neg;
+pub use num::num;
+pub use round::round;
+pub use sum::sum;
+pub use sumif::sumif;
+pub use text::text;
+pub use value::value;

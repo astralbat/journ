@@ -8,8 +8,10 @@
 
 mod basic;
 mod cell_formatter;
+mod row_formatter;
 mod table;
 
-pub use basic::BasicCellFormatter;
-pub use cell_formatter::{CellFormatter, Transformer};
+pub use basic::{BasicCellFormatter, StringCellFormatter};
+pub use cell_formatter::CellFormatter;
+pub use row_formatter::RowFormatter;
 pub use table::TableCellFormatter;

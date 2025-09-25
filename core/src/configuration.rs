@@ -8,8 +8,9 @@
 use crate::account::Account;
 use crate::alloc::HerdAllocator;
 use crate::arguments::Arguments;
-use crate::date_and_time::{DEFAULT_DATE_FORMAT, DEFAULT_TIME_FORMAT, DateFormat, TimeFormat};
-use crate::ext::StrExt;
+use crate::date_and_time::{
+    DEFAULT_DATE_FORMAT, DEFAULT_NUMBER_FORMAT, DEFAULT_TIME_FORMAT, DateFormat, TimeFormat,
+};
 use crate::journal_node::{JournalNode, NodeId};
 use crate::module::MODULES;
 use crate::module::{ModuleConfiguration, ModuleConfigurationEq};
@@ -62,7 +63,7 @@ struct BaseConfiguration<'h> {
     date_format: &'h DateFormat<'h>,
     time_format: &'h TimeFormat<'h>,
     timezone: Tz,
-    number_format: NumberFormat,
+    number_format: &'h NumberFormat,
     default_unit: &'h Unit<'h>,
     units: HashMap<String, &'h Unit<'h>>,
     accounts: HashMap<String, Arc<Account<'h>>>,
@@ -80,7 +81,7 @@ impl<'h> BaseConfiguration<'h> {
         let mut bc = Self {
             parent,
             args,
-            number_format: Default::default(),
+            number_format: DEFAULT_NUMBER_FORMAT.deref(),
             date_format: DEFAULT_DATE_FORMAT.deref(),
             time_format: DEFAULT_TIME_FORMAT.deref(),
             timezone: Tz::UTC,
@@ -222,21 +223,49 @@ impl Debug for BaseConfiguration<'_> {
     }
 }
 
-pub trait Filter<'a, T: ?Sized> {
+pub trait Filter<T: ?Sized> {
     fn is_included(&self, item: &T) -> bool;
 
-    fn and<F2>(self, other: F2) -> impl Filter<'a, T>
+    fn and<F2>(self, other: F2) -> AndFilter<Self, F2, T>
     where
-        Self: Sized + 'a,
-        F2: Filter<'a, T> + 'a,
+        Self: Sized,
+        F2: Filter<T>,
     {
-        move |item: &T| self.is_included(item) && other.is_included(item)
+        AndFilter { f1: self, f2: other, _marker: std::marker::PhantomData }
     }
 }
 
-impl<'a, F, T: ?Sized> Filter<'a, T> for F
+pub struct AndFilter<F1, F2, T: ?Sized>
 where
-    F: 'a,
+    F1: Filter<T>,
+    F2: Filter<T>,
+{
+    f1: F1,
+    f2: F2,
+    _marker: std::marker::PhantomData<T>,
+}
+impl<F1, F2, T: ?Sized> Filter<T> for AndFilter<F1, F2, T>
+where
+    F1: Filter<T>,
+    F2: Filter<T>,
+{
+    fn is_included(&self, item: &T) -> bool {
+        self.f1.is_included(item) && self.f2.is_included(item)
+    }
+}
+
+impl<T, F1: Filter<T>, F2: Filter<T>> Clone for AndFilter<F1, F2, T>
+where
+    F1: Clone,
+    F2: Clone,
+{
+    fn clone(&self) -> Self {
+        Self { f1: self.f1.clone(), f2: self.f2.clone(), _marker: std::marker::PhantomData }
+    }
+}
+
+impl<F, T: ?Sized> Filter<T> for F
+where
     for<'c> F: Fn(&'c T) -> bool,
 {
     fn is_included(&self, item: &T) -> bool {
@@ -247,7 +276,7 @@ where
 #[derive(Clone)]
 pub struct AlwaysIncluded;
 
-impl<'a, T: ?Sized> Filter<'a, T> for AlwaysIncluded {
+impl<T: ?Sized> Filter<T> for AlwaysIncluded {
     fn is_included(&self, _item: &T) -> bool {
         true
     }
@@ -353,8 +382,8 @@ impl<'h> Configuration<'h> {
         base_config.timezone = tz;
     }
 
-    pub fn number_format(&self) -> NumberFormat {
-        self.base_config.number_format
+    pub fn number_format(&self) -> &'h NumberFormat {
+        &self.base_config.number_format
     }
 
     pub fn default_unit(&self) -> &'h Unit<'h> {
@@ -590,43 +619,6 @@ impl<'h> Configuration<'h> {
         bc.module_config.insert(module_name, config);
     }
 
-    /*
-    pub fn cgt_config(&self) -> &CgtConfiguration<'h> {
-        &self.base_config.cgt_config
-    }
-
-    pub fn merge_cgt_config(&mut self, cgt_config: &CgtConfiguration<'h>) -> Option<MergeCgtError> {
-        let existing = &mut self.base_config.get_mut().cgt_config;
-
-        // Update the pools
-        let mut new_pools = if cgt_config.clear_pool_config { Vec::new() } else { existing.pools.clone() };
-        for pool in cgt_config.pools.iter() {
-            match new_pools.iter_mut().find(|p| *p == pool) {
-                Some(existing_pool) => {
-                    existing_pool.set_unit_of_account_change(pool.unit_of_account_change);
-                    existing_pool.set_max_age(pool.max_age());
-                    existing_pool.set_name(pool.new_name);
-                    existing_pool.set_method(pool.method);
-                    existing_pool.set_match_condition(pool.match_condition.clone());
-                }
-                None => new_pools.push(pool.clone()),
-            }
-        }
-        if new_pools.last().map(|p| p.max_age.is_some()).unwrap_or(false) {
-            return Some(MergeCgtError::MaxAgeNotAllowedFinalPool);
-        }
-
-        // Don't let there be no pools. Create one as a last resort with a default name for the first pool.
-        if new_pools.is_empty() {
-            new_pools.push(PoolConfiguration::new("Pool_1"));
-        }
-        existing.set_pools(new_pools);
-        if let Some(round_deals) = cgt_config.round_deals {
-            existing.set_round_deals(round_deals);
-        }
-        None
-    }*/
-
     pub fn allocator(&self) -> &'h HerdAllocator<'h> {
         self.herd_allocator
     }
@@ -660,65 +652,87 @@ impl<'s, 'h> DerefMutAndDebug<'h, 's, Configuration<'h>> for &'s mut Configurati
 
 impl<'s, 'h> DerefMutAndDebug<'h, 's, Configuration<'h>> for MutexGuard<'s, Configuration<'h>> {}
 
-pub fn create_unit_filter<'a, S: AsRef<str> + Clone>(
-    units: &'a [S],
-) -> impl for<'h> Filter<'a, Unit<'h>> + Clone {
-    #[derive(Clone)]
-    struct UnitFilter<'a, S: AsRef<str>>(&'a [S]);
-    impl<'a, 'h, S: AsRef<str> + Clone> Filter<'a, Unit<'h>> for UnitFilter<'a, S> {
-        fn is_included(&self, u: &Unit) -> bool {
-            // When the filter is empty, all units are included.
-            if self.0.is_empty() {
-                return true;
-            }
+fn as_expressions<S: AsRef<str>>(items: &[S]) -> Vec<Expression> {
+    let mut expressions = vec![];
+    for item in items {
+        // Replace the escaped '..' with a regex that matches any characters.
+        let mut s = regex::escape(item.as_ref()).replace("\\.\\.", ".*");
+        // The whole item has to match.
+        s.insert(0, '^');
+        s.push('$');
 
-            for unit_str in self.0 {
-                // If the unit starts with a + (and not quoted), then it is a tag
-                // and not a unit code.
-                if unit_str.as_ref().starts_with('+') {
-                    if u.has_tag(unit_str.as_ref()[1..].trim_start()) {
-                        return true;
-                    }
-                    continue;
-                }
-
-                let unit_str_unquoted = unit_str.as_ref().trim_quotes();
-                for alias in u.aliases() {
-                    if alias.eq_ignore_ascii_case(unit_str_unquoted) {
-                        return true;
-                    }
-                }
-            }
-            false
-        }
+        expressions.push(Expression {
+            regex: RegexBuilder::new(&s).case_insensitive(true).build().unwrap(),
+            input: item.as_ref().to_string(),
+        });
     }
-    UnitFilter(units)
+    expressions
+}
+
+#[derive(Debug, Clone)]
+struct Expression {
+    pub regex: Regex,
+    /// The original user input that generated the expression.
+    pub input: String,
+}
+impl Deref for Expression {
+    type Target = Regex;
+
+    fn deref(&self) -> &Self::Target {
+        &self.regex
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct UnitFilter {
+    expressions: Vec<Expression>,
+}
+impl UnitFilter {
+    pub fn new<S: AsRef<str>>(units: &'_ [S]) -> Self {
+        Self { expressions: as_expressions(units) }
+    }
+}
+impl<'h> Filter<Unit<'h>> for UnitFilter {
+    fn is_included(&self, u: &Unit) -> bool {
+        // When the filter is empty, all units are included.
+        if self.expressions.is_empty() {
+            return true;
+        }
+
+        for unit_expr in &self.expressions {
+            // If the unit starts with a + (and not quoted), then it is a tag
+            // and not a unit code.
+            if unit_expr.input.starts_with('+') {
+                if u.has_tag(unit_expr.input[1..].trim_start()) {
+                    return true;
+                }
+                continue;
+            }
+
+            for alias in u.aliases() {
+                if unit_expr.is_match(alias) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
 }
 
 /// The standard account filter. The filter will match accounts exactly (case insensitive) except where '..' sequence is used
 /// to represent a wildcard match for any number of characters in the account name.
 #[derive(Clone)]
 pub struct AccountFilter {
-    expressions: Vec<Regex>,
+    expressions: Vec<Expression>,
 }
 impl AccountFilter {
     /// Creates a new account filter from the given slice of strings.
     pub fn new<S: AsRef<str>>(accounts: &'_ [S]) -> Self {
-        let mut expressions = vec![];
-        for acc in accounts {
-            // Replace the escaped '..' with a regex that matches any characters.
-            let mut s = regex::escape(acc.as_ref()).replace("\\.\\.", ".*");
-            // The whole account has to match.
-            s.insert(0, '^');
-            s.push('$');
-
-            expressions.push(RegexBuilder::new(&s).case_insensitive(true).build().unwrap());
-        }
-        Self { expressions }
+        Self { expressions: as_expressions(accounts) }
     }
 }
 
-impl<'a, 'h> Filter<'a, Account<'h>> for AccountFilter {
+impl<'h> Filter<Account<'h>> for AccountFilter {
     fn is_included(&self, item: &Account<'h>) -> bool {
         // When the filter is empty, all accounts are included.
         if self.expressions.is_empty() {
@@ -738,7 +752,7 @@ impl<'a, 'h> Filter<'a, Account<'h>> for AccountFilter {
 #[derive(Clone)]
 pub struct DescriptionFilter<'a, S: AsRef<str>>(pub &'a [S]);
 
-impl<'a, S: AsRef<str> + Clone> Filter<'a, str> for DescriptionFilter<'_, S> {
+impl<S: AsRef<str> + Clone> Filter<str> for DescriptionFilter<'_, S> {
     fn is_included(&self, description: &str) -> bool {
         // When the filter is empty, all accounts are included.
         if self.0.is_empty() {
@@ -757,7 +771,7 @@ impl<'a, S: AsRef<str> + Clone> Filter<'a, str> for DescriptionFilter<'_, S> {
 #[derive(Clone)]
 pub struct FileFilter<'a, S: AsRef<str>>(pub &'a [S]);
 
-impl<'a, 'h, S: AsRef<str> + Clone> Filter<'a, JournalNode<'h>> for FileFilter<'_, S> {
+impl<'a, 'h, S: AsRef<str> + Clone> Filter<JournalNode<'h>> for FileFilter<'_, S> {
     fn is_included(&self, node: &JournalNode<'h>) -> bool {
         // When the filter is empty, all accounts are included.
         if self.0.is_empty() {

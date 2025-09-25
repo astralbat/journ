@@ -7,7 +7,7 @@
  */
 use crate::reporting::table2::cell_width::CellWidth;
 use crate::reporting::table2::fmt::CellFormatter;
-use crate::reporting::table2::{Cell, CellRef};
+use crate::reporting::table2::{Cell, CellRef, ColumnWidth};
 use smallvec::SmallVec;
 
 /// A cell of other cells arranged vertically. Each cell is printed on its own
@@ -24,11 +24,16 @@ impl<'c> MultiLineCell<'c> {
 }
 
 impl<'c> Cell for MultiLineCell<'c> {
-    fn print<'format>(&self, f: &mut dyn CellFormatter<'format>, line: usize) -> std::fmt::Result {
+    fn print<'format>(
+        &self,
+        f: &mut dyn CellFormatter,
+        line: usize,
+        width: Option<ColumnWidth>,
+    ) -> std::fmt::Result {
         let mut lines_to_go = line;
         for (i, cell) in self.cells.iter().enumerate() {
             if cell.height() > lines_to_go {
-                return cell.print(f, lines_to_go);
+                return cell.print(f, lines_to_go, width);
             } else {
                 lines_to_go -= cell.height();
             }

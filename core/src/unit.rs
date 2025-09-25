@@ -395,12 +395,21 @@ pub enum NegativeStyle {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum NumberFormatPart {
+    Zero,
+    Hash,
+    QuestionMark,
+    Separator(u8),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NumberFormat {
     negative_style: NegativeStyle,
+    parts: Vec<NumberFormatPart>,
     thousands_separator: u8,
     decimal_separator: u8,
-    min_scale: Option<u8>,
-    max_scale: Option<u8>,
+    //min_scale: Option<u8>,
+    //max_scale: Option<u8>,
 }
 
 thread_local!(static NUMBER_BUF: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new())));
@@ -413,20 +422,41 @@ impl NumberFormat {
         self.thousands_separator
     }
 
+    pub fn max_scale(&self) -> Option<u8> {
+        if self.parts.is_empty() {
+            return None;
+        }
+        Some(
+            self.parts
+                .iter()
+                .rev()
+                .take_while(|p| {
+                    matches!(
+                        p,
+                        NumberFormatPart::Zero
+                            | NumberFormatPart::Hash
+                            | NumberFormatPart::QuestionMark
+                    )
+                })
+                .count() as u8,
+        )
+    }
+
+    pub fn with_full_precision(&self) -> NumberFormat {
+        NumberFormat {
+            negative_style: self.negative_style,
+            parts: vec![],
+            thousands_separator: self.thousands_separator,
+            decimal_separator: self.decimal_separator,
+        }
+    }
+
     pub fn negative_style(&self) -> NegativeStyle {
         self.negative_style
     }
 
     pub fn set_negative_style(&mut self, negative_style: NegativeStyle) {
         self.negative_style = negative_style
-    }
-
-    pub fn max_scale(&self) -> Option<u8> {
-        self.max_scale
-    }
-
-    pub fn with_max_scale(self, max_scale: Option<u8>) -> Self {
-        Self { max_scale, ..self }
     }
 
     pub fn parse(s: &str, definitive: bool) -> NumberFormat {
@@ -444,48 +474,53 @@ impl NumberFormat {
             negative_format = NegativeStyle::Brackets;
         }
 
-        // The count of digits after the decimal point indicates the minimum scale. E.g. "10.00" rather than "10".
-        // The special '#' character adds extra scale and indicates a maximum (numbers may be rounded). E.g. "10.00##" means "10.00" or "10.1234"
-        let (min_scale, max_scale) = if let Some(dec_point_pos) = s.rfind(decimal_separator as char)
-        {
-            // If this is not definitive, it means that we are not parsing a format specification, but the first occurrence of an amount.
-            // Therefore, we can't assert too much information from this amount, except that if it has trailing zeros in the fraction part, we can
-            // at least assume the `min_scale`.
-            if definitive {
-                let min_scale =
-                    s[dec_point_pos + 1..].chars().take_while(char::is_ascii_digit).count() as u8;
-                let additional_scale =
-                    s[dec_point_pos + 1..].chars().rev().filter(|c| *c == '#').count() as u8;
-                (Some(min_scale), Some(min_scale + additional_scale))
-            } else {
-                let frac_digit_count =
-                    s[dec_point_pos + 1..].chars().take_while(char::is_ascii_digit).count();
-                let trailing_zero_count =
-                    s[dec_point_pos + 1..].chars().rev().take_while(|c| c == &'0').count();
-                if trailing_zero_count > 0 {
-                    (Some(frac_digit_count as u8), None)
-                } else {
-                    (None, None)
+        // If this is non-definitive, it means that we are not parsing a format specification, but the first occurrence of an amount.
+        // Therefore, we can't assert too much information from this amount, except that if it has trailing zeros in the fraction part, we can
+        // at least assume a scale.
+        let mut parts = Vec::new();
+        let mut found_decimal_sep = false;
+        let decimal_sep_pos = s.rfind(decimal_separator as char);
+        for (pos, c) in s.char_indices() {
+            match c {
+                // The default for non-definitive specs is to write for example, 0.5 rather than .5.
+                d if d.is_ascii_digit() && !definitive && decimal_sep_pos == Some(pos + 1) => {
+                    Some(NumberFormatPart::Zero)
                 }
+                d if d.is_ascii_digit() && !definitive && !found_decimal_sep => {
+                    Some(NumberFormatPart::Hash)
+                }
+                d if d.is_ascii_digit() && !definitive => Some(NumberFormatPart::Hash),
+                d if d.is_ascii_digit() => Some(NumberFormatPart::Zero),
+                '#' => Some(NumberFormatPart::Hash),
+                '?' => Some(NumberFormatPart::QuestionMark),
+                d if d as u8 == thousands_separator => {
+                    Some(NumberFormatPart::Separator(thousands_separator))
+                }
+                d if d as u8 == decimal_separator => {
+                    found_decimal_sep = true;
+                    Some(NumberFormatPart::Separator(decimal_separator))
+                }
+                _ => None,
             }
-        } else {
-            (Some(0), Some(0))
-        };
+            .iter()
+            .for_each(|f| parts.push(*f));
+        }
 
         NumberFormat {
             negative_style: negative_format,
             thousands_separator,
             decimal_separator,
-            min_scale,
-            max_scale,
+            parts,
         }
     }
 
-    pub fn write(&self, quantity: Quantity, writer: &mut impl fmt::Write) -> fmt::Result {
+    pub fn write(&self, mut quantity: Quantity, writer: &mut impl fmt::Write) -> fmt::Result {
+        quantity = quantity.normalize();
+
         let scale = quantity.scale();
 
         // Extract digits
-        let mut mantissa_tmp = quantity.mantissa();
+        let mut mantissa_tmp = quantity.mantissa().abs();
         let mut digit_buffer = [0u8; 32];
         let mut pos = digit_buffer.len();
         let mut digit_count = 0;
@@ -496,7 +531,9 @@ impl NumberFormat {
             digit_count += 1;
         }
         // Pad with zeros if needed
-        while digit_count <= scale {
+        while digit_count < scale
+            || (digit_count == scale && (quantity.is_zero() || self.parts.is_empty()))
+        {
             pos -= 1;
             digit_buffer[pos] = b'0';
             digit_count += 1;
@@ -511,54 +548,82 @@ impl NumberFormat {
             }
         }
 
+        //
+        // Work on the integer part first
+        //
+        let num_integer_digits = digit_count - scale;
+        let integer_parts = self
+            .parts
+            .iter()
+            .filter(
+                |p| !matches!(p, NumberFormatPart::Separator(s) if *s == self.thousands_separator),
+            )
+            .clone()
+            .take_while(|c| *c != &NumberFormatPart::Separator(self.decimal_separator));
+        let num_integer_parts = integer_parts.clone().count() as u32;
+        // Write left padding if needed. We take the parts until the part place value where the quantity starts
+        // E.g. if the format is "##00" and the quantity is "5", we take the first 3 parts.
+        // However, if the integer is zero, we take an extra part. E.g. 0.5 with "#.0" means we write ".5"
+        for part in integer_parts
+            .clone()
+            .take(num_integer_parts.saturating_sub(num_integer_digits) as usize)
+        {
+            match *part {
+                NumberFormatPart::Zero => writer.write_char('0')?,
+                NumberFormatPart::Hash => {}
+                NumberFormatPart::QuestionMark => writer.write_char(' ')?,
+                _ => {}
+            }
+        }
+
         // Write integer part with thousands separators
-        let integer_digits = digit_count - scale;
         let start_pos = pos;
         for (i, &byte) in
-            digit_buffer[start_pos..start_pos + integer_digits as usize].iter().enumerate()
+            digit_buffer[start_pos..start_pos + num_integer_digits as usize].iter().enumerate()
         {
-            if i > 0 && (integer_digits - i as u32).is_multiple_of(3) {
+            if i > 0 && (num_integer_digits - i as u32).is_multiple_of(3) {
                 writer.write_char(self.thousands_separator as char)?;
             }
             writer.write_char(byte as char)?;
         }
 
+        //
         // Write decimal part
-        let mut written_scale = 0;
+        //
+        let mut fraction_parts = self
+            .parts
+            .iter()
+            .skip_while(|c| *c != &NumberFormatPart::Separator(self.decimal_separator))
+            .skip(1);
         let mut written_dec_sep = false;
-        let decimal_start = start_pos + integer_digits as usize;
-        for (i, &byte) in
-            digit_buffer[decimal_start..decimal_start + scale as usize].iter().enumerate()
-        {
-            // Don't write trailing zeros if beyond min_scale
-            if let Some(min_scale) = self.min_scale
-                && i >= min_scale as usize
-                && digit_buffer[decimal_start + i..decimal_start + scale as usize]
-                    .iter()
-                    .all(|&byte| byte == b'0')
-            {
-                break;
-            }
+        let decimal_start = start_pos + num_integer_digits as usize;
+        for &byte in digit_buffer[decimal_start..decimal_start + scale as usize].iter() {
             // Don't write anything beyond max_scale
-            if let Some(max_scale) = self.max_scale
-                && i >= max_scale as usize
-            {
+            if !self.parts.is_empty() && fraction_parts.next().is_none() {
                 break;
             }
+
             if !written_dec_sep {
                 writer.write_char(self.decimal_separator as char)?;
                 written_dec_sep = true;
             }
             writer.write_char(byte as char)?;
-            written_scale += 1;
         }
-        // Add padding zeros if needed
-        if Some(written_scale) < self.min_scale {
-            if !written_dec_sep {
-                writer.write_char(self.decimal_separator as char)?;
-            }
-            for _ in written_scale..self.min_scale.unwrap() {
-                writer.write_char('0')?;
+
+        for part in fraction_parts {
+            match part {
+                NumberFormatPart::Zero => {
+                    if !written_dec_sep {
+                        writer.write_char(self.decimal_separator as char)?;
+                        written_dec_sep = true;
+                    }
+                    writer.write_char('0')?;
+                }
+                NumberFormatPart::Hash => {}
+                NumberFormatPart::QuestionMark => {
+                    writer.write_char(' ')?;
+                }
+                _ => {}
             }
         }
 
@@ -617,6 +682,8 @@ impl NumberFormat {
         num
     }
 
+    /*
+
     /// Ensure at least `self.min_scale` number of zeros are on the end
     fn add_padding_zeros(&self, num: &mut String) {
         if let Some(min_scale) = self.min_scale {
@@ -633,17 +700,16 @@ impl NumberFormat {
                 num.push('0');
             }
         }
-    }
+    }*/
 }
 
 impl Default for NumberFormat {
     fn default() -> Self {
         Self {
             negative_style: NegativeStyle::NegativeSign,
+            parts: vec![],
             thousands_separator: b',',
             decimal_separator: b'.',
-            min_scale: None,
-            max_scale: None,
         }
     }
 }
@@ -654,6 +720,26 @@ impl fmt::Display for NumberFormat {
             write!(f, "(")?;
         } else {
             write!(f, "-")?;
+        }
+        for part in &self.parts {
+            match part {
+                NumberFormatPart::Zero => write!(f, "0")?,
+                NumberFormatPart::Hash => write!(f, "#")?,
+                NumberFormatPart::QuestionMark => write!(f, "?")?,
+                NumberFormatPart::Separator(c) => write!(f, "{}", *c as char)?,
+            }
+        }
+        /*
+        let to_go = self.significant_digits.min(4);
+        for i in (0..to_go).rev() {
+            if i.is_multiple_of(3) {
+                write!(f, "{}", self.thousands_separator as char)?;
+            }
+            if to_go > self.significant_digits {
+                write!(f, "#")?;
+            } else {
+                write!(f, "0")?;
+            }
         }
         write!(f, "1{}000", self.thousands_separator as char)?;
 
@@ -678,7 +764,7 @@ impl fmt::Display for NumberFormat {
                 }
             }
             _ => {}
-        }
+        }*/
         Ok(())
     }
 }
@@ -774,8 +860,8 @@ impl UnitFormat {
         Self { number_format, code, code_position, negative_position }
     }
 
-    pub fn number_format(&self) -> NumberFormat {
-        self.number_format
+    pub fn number_format(&self) -> &NumberFormat {
+        &self.number_format
     }
 
     pub fn negative_position(&self) -> NegativePosition {
@@ -814,7 +900,7 @@ impl UnitFormat {
 
     pub fn format_precise(&self, amount: Amount) -> SS {
         let mut s = SS::new();
-        self.write_amount(amount, &mut s, Some(self.number_format.with_max_scale(None))).unwrap();
+        self.write_amount(amount, &mut s, Some(&self.number_format.with_full_precision())).unwrap();
         s
     }
 
@@ -871,11 +957,11 @@ impl UnitFormat {
         &self,
         amount: Amount,
         writer: &mut impl fmt::Write,
-        alt_number_fmt: Option<NumberFormat>,
+        alt_number_fmt: Option<&NumberFormat>,
     ) -> fmt::Result {
         let number_format = match alt_number_fmt {
             Some(nf) => nf,
-            None => self.number_format,
+            None => &self.number_format,
         };
         let mut quantity = amount.quantity();
         if let Some(max_scale) = number_format.max_scale() {

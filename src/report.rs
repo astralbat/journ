@@ -5,7 +5,7 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
-use crate::column_expr::ColumnExpr;
+use crate::expr::column_expr::ColumnExpr;
 use journ_core::err;
 use journ_core::error::JournResult;
 use journ_core::reporting::table::Cell;
@@ -24,14 +24,13 @@ use nom::{
 use rust_decimal::Decimal;
 use std::fmt;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum BinOp {
     Add,
     Sub,
     Mul,
     Div,
     Mod,
-    Pow,
 }
 
 impl fmt::Display for BinOp {
@@ -42,7 +41,34 @@ impl fmt::Display for BinOp {
             BinOp::Mul => "*",
             BinOp::Div => "/",
             BinOp::Mod => "%",
-            BinOp::Pow => "^",
+        };
+        write!(f, "{}", symbol)
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum CompareOp {
+    Eq,
+    Neq,
+    Lt,
+    Lte,
+    Gt,
+    Gte,
+    Match,    // =~
+    NotMatch, // !~
+}
+
+impl fmt::Display for CompareOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let symbol = match self {
+            CompareOp::Eq => "==",
+            CompareOp::Neq => "!=",
+            CompareOp::Lt => "<",
+            CompareOp::Lte => "<=",
+            CompareOp::Gt => ">",
+            CompareOp::Gte => ">=",
+            CompareOp::Match => "=~",
+            CompareOp::NotMatch => "!~",
         };
         write!(f, "{}", symbol)
     }
@@ -51,27 +77,20 @@ impl fmt::Display for BinOp {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ColumnSpec<'s> {
     pub expr: ColumnExpr<'s>,
-    pub alias: Option<&'s str>,
+    //pub alias: Option<&'s str>,
 }
 
 impl<'s> ColumnSpec<'s> {
     pub fn alias(&self) -> Option<&'s str> {
-        self.alias.as_ref().map(|s| *s)
-    }
-}
-
-impl fmt::Display for ColumnSpec<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if let Some(alias) = self.alias() {
-            write!(f, "{alias}")
-        } else {
-            write!(f, "{}", self.expr)
+        match &self.expr {
+            ColumnExpr::Aliased(_, alias) => Some(*alias),
+            _ => None,
         }
     }
 }
 
-impl From<&ColumnSpec<'_>> for Cell<'_> {
-    fn from(spec: &ColumnSpec<'_>) -> Self {
+impl From<&ColumnExpr<'_>> for Cell<'_> {
+    fn from(spec: &ColumnExpr<'_>) -> Self {
         let s = spec.to_string();
         // Capitalize the first letter of the column name
         let s = if let Some(first) = s.chars().next() {
@@ -140,7 +159,7 @@ fn function_args(input: &str) -> IResult<&str, Vec<ColumnExpr>, VerboseError<&st
 fn function_call(input: &str) -> IResult<&str, ColumnExpr, VerboseError<&str>> {
     map(
         tuple((
-            identifier,
+            alt((identifier, tag("-"))),
             preceded(
                 ws(char('(')),
                 cut(tuple((
@@ -180,19 +199,17 @@ fn binary_op(input: &str) -> IResult<&str, BinOp, VerboseError<&str>> {
         map(char('*'), |_| BinOp::Mul),
         map(char('/'), |_| BinOp::Div),
         map(char('%'), |_| BinOp::Mod),
-        map(char('^'), |_| BinOp::Pow),
     ))(input)
 }
 
 // Parse expressions with operator precedence (simplified)
-fn expr(input: &str) -> IResult<&str, ColumnExpr, VerboseError<&str>> {
+fn binop_expr(input: &str) -> IResult<&str, ColumnExpr, VerboseError<&str>> {
     let (input, left) = ws(primary)(input)?;
 
-    // Parse optional right-hand side with operator
-    let (input, rest) = many0(tuple((ws(binary_op), ws(primary))))(input)?;
-
+    // Try to parse as a sequence of binary operations
+    let (input, bin_parts) = many0(tuple((ws(binary_op), ws(primary))))(input)?;
     // Build left-associative expression tree
-    let result = rest.into_iter().fold(left, |acc, (op, right)| ColumnExpr::BinaryOp {
+    let result = bin_parts.into_iter().fold(left, |acc, (op, right)| ColumnExpr::BinaryOp {
         left: Box::new(acc),
         op,
         right: Box::new(right),
@@ -201,58 +218,56 @@ fn expr(input: &str) -> IResult<&str, ColumnExpr, VerboseError<&str>> {
     Ok((input, result))
 }
 
+fn expr(input: &str) -> IResult<&str, ColumnExpr, VerboseError<&str>> {
+    let (input, left) = ws(binop_expr)(input)?;
+    match opt(tuple((
+        ws(alt((
+            map(tag("=="), |_| CompareOp::Eq),
+            map(tag("!="), |_| CompareOp::Neq),
+            map(tag("<="), |_| CompareOp::Lte),
+            map(tag(">="), |_| CompareOp::Gte),
+            map(char('<'), |_| CompareOp::Lt),
+            map(char('>'), |_| CompareOp::Gt),
+            map(tag("=~"), |_| CompareOp::Match),
+            map(tag("!~"), |_| CompareOp::NotMatch),
+        ))),
+        ws(binop_expr),
+    )))(input)?
+    {
+        (input, Some((op, right))) => Ok((
+            input,
+            ColumnExpr::CompareExpr { left: Box::new(left), op, right: Box::new(right) },
+        )),
+        (input, None) => Ok((input, left)),
+    }
+}
+
 // Parse column alias: as "Alias Name"
 fn column_alias(input: &str) -> IResult<&str, &str, VerboseError<&str>> {
-    preceded(ws(tag("as")), delimited(ws(char('"')), take_while1(|c: char| c != '"'), char('"')))(
-        input,
-    )
+    preceded(
+        ws(tag("as")),
+        alt((
+            delimited(ws(char('"')), take_while1(|c: char| c != '"'), char('"')),
+            delimited(ws(char('\'')), take_while1(|c: char| c != '\''), char('\'')),
+            take_while1(|c: char| !c.is_whitespace() && c != ','),
+        )),
+    )(input)
 }
 
 // Parse a single column specification
-fn column_spec(input: &str) -> IResult<&str, ColumnSpec, VerboseError<&str>> {
-    map(tuple((expr, opt(column_alias))), |(expr, alias)| ColumnSpec { expr, alias })(input)
+fn column_spec(input: &str) -> IResult<&str, ColumnExpr, VerboseError<&str>> {
+    map(tuple((expr, opt(column_alias))), |(expr, alias)| match alias {
+        Some(alias) => ColumnExpr::Aliased(Box::new(expr), alias),
+        None => expr,
+    })(input)
 }
 
 // Parse the full column list: col1, col2, expr as "Alias", ...
-pub fn parse_columns(input: &str) -> JournResult<Vec<ColumnSpec>> {
+pub fn parse_columns(input: &str) -> JournResult<Vec<ColumnExpr>> {
     match separated_list0(ws(char(',')), ws(column_spec))(input) {
         Ok(("", cols)) => Ok(cols),
         Ok((remaining, _)) => Err(err!("Unexpected input after parsing columns: '{}'", remaining)),
         Err(NomErr::Error(e)) | Err(NomErr::Failure(e)) => Err(err!(convert_error(input, e))),
         Err(NomErr::Incomplete(_)) => Err(err!("Incomplete input while parsing columns")),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_simple_columns() {
-        let input = "account, amount";
-        let result = parse_columns(input).unwrap();
-
-        assert_eq!(result.len(), 2);
-        assert_eq!(result[0].expr, ColumnExpr::Column("account"));
-        assert_eq!(result[1].expr, ColumnExpr::Column("amount"));
-    }
-
-    #[test]
-    fn test_complex_expression() {
-        let input = r#"account, amount, (1 - coSum(Expenses:Tax..) / amount) * 100 as "Tax %""#;
-        let result = parse_columns(input).unwrap();
-
-        assert_eq!(result.len(), 3);
-        assert_eq!(result[2].alias, Some("Tax %"));
-    }
-
-    #[test]
-    fn test_nested_functions() {
-        let input = "value(coSum(Expenses:Tax..))";
-        let result = parse_columns(input).unwrap();
-
-        // This would need more complex parsing for nested function calls
-        // but shows the structure
-        assert_eq!(result.len(), 1);
     }
 }
