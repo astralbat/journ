@@ -10,7 +10,6 @@ use std::cell::RefCell;
 use std::fmt;
 use std::fmt::Write;
 use std::sync::Mutex;
-use std::time::Instant;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]

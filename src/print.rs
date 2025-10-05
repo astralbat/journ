@@ -36,7 +36,7 @@ impl IntoExecCommand for PrintArguments {
 }
 
 impl ExecCommand for PrintCommand {
-    fn execute(&self, journ: Journal) -> JournResult<()> {
+    fn execute<'h>(&self, journ: &'h mut Journal<'h>) -> JournResult<()> {
         let account_filter = &self.account_filter;
         match self.print_file.as_ref().map(|s| s.to_string()) {
             Some(pf) => match journ.find_node_by_filename(Path::new(&pf)) {

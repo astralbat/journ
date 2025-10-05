@@ -135,11 +135,6 @@ where
                     unit.set_format(format);
                     Ok(())
                 },
-                param_value("valueformat") => |input| {
-                    let format = promote("Invalid unit value format", map_parser(line_value, parsing::amount::unit_format(true)))(input)?.1;
-                    unit.set_value_format(format);
-                    Ok(())
-                },
                 param_value("rounding") => |input: I| {
                     let rounding = promote("Rounding mode must be one of: 'up', 'down', 'halfup', 'halfdown' or 'halfeven'", map_res(line_value, |v: I| RoundingStrategy::from_str(v.text())))(input)?.1;
                     unit.set_rounding_strategy(rounding);

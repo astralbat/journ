@@ -87,8 +87,6 @@ pub struct Unit<'h> {
     /// All codes this unit is known by, including this one.
     aliases: Vec<String>,
     format: Option<UnitFormat>,
-    /// An alternative formatter for valuation amounts. Falls back to `format` if not specified.
-    value_format: Option<UnitFormat>,
     conversion_expression: Option<Lambda>,
     prices: Option<Arc<PriceDatabase<'h>>>,
     rounding_strategy: RoundingStrategy,
@@ -104,14 +102,12 @@ impl<'h> Unit<'h> {
         let code = code.into();
         assert!(!code.is_empty(), "Unit code cannot be empty string");
 
-        let mut aliases = Vec::new();
-        aliases.push(code.clone());
+        let aliases = vec![code.clone()];
         Unit {
             code,
             aliases,
             name: None,
             format: None,
-            value_format: None,
             conversion_expression: None,
             prices: None,
             rounding_strategy: RoundingStrategy::default(),
@@ -128,7 +124,6 @@ impl<'h> Unit<'h> {
             name: None,
             aliases: vec![],
             format: None,
-            value_format: None,
             conversion_expression: None,
             prices: None,
             rounding_strategy: RoundingStrategy::HalfUp,
@@ -219,10 +214,6 @@ impl<'h> Unit<'h> {
         self.format.is_some()
     }
 
-    pub fn has_value_format(&self) -> bool {
-        self.value_format.is_some()
-    }
-
     /*
     /// Gets whether the code will appear on the left of the quantity when this unit is formatted.
     pub fn code_on_left(&self) -> bool {
@@ -242,17 +233,6 @@ impl<'h> Unit<'h> {
 
     pub fn set_format(&mut self, format: UnitFormat) {
         self.format = Some(format)
-    }
-
-    pub fn value_format(&self) -> &UnitFormat {
-        match &self.value_format {
-            Some(cf) => cf,
-            None => self.format(),
-        }
-    }
-
-    pub fn set_value_format(&mut self, format: UnitFormat) {
-        self.value_format = Some(format)
     }
 
     pub fn conversion_expression(&self) -> Option<&Lambda> {

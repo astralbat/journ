@@ -6,25 +6,23 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 pub mod concat;
-pub mod cosum;
+mod date;
+mod datevalue;
 pub mod max;
 pub mod min;
 pub mod neg;
 pub mod num;
 pub mod round;
-pub mod sum;
-pub mod sumif;
 pub mod text;
 pub mod value;
 
 pub use concat::concat;
-pub use cosum::cosum;
+pub use date::date;
+pub use datevalue::datevalue;
 pub use max::max;
 pub use min::min;
 pub use neg::neg;
 pub use num::num;
 pub use round::round;
-pub use sum::sum;
-pub use sumif::sumif;
 pub use text::text;
 pub use value::value;

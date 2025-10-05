@@ -15,7 +15,6 @@ mod expr;
 mod grouping;
 mod print;
 mod reg;
-pub mod report;
 
 extern crate chrono;
 #[macro_use]
@@ -93,13 +92,13 @@ pub struct DateTimeFormatArguments {
         value_name = "DATE_FORMAT",
         help = "The reporting date format to use"
     )]
-    date_format: Option<DateFormat<'static>>,
+    date_format: Option<&'static DateFormat<'static>>,
     #[arg(
         long = "time-format",
         value_name = "TIME_FORMAT",
         help = "The reporting time format to use"
     )]
-    time_format: Option<TimeFormat<'static>>,
+    time_format: Option<&'static TimeFormat<'static>>,
     #[arg(long = "timezone", value_name = "TIMEZONE", help = "The reporting timezone to use")]
     timezone: Option<Tz>,
 }
@@ -114,7 +113,7 @@ enum CommandArguments {
 }
 
 impl CommandArguments {
-    pub fn exec(self, journ: Journal) -> JournResult<()> {
+    pub fn exec<'h>(self, journ: &'h mut Journal<'h>) -> JournResult<()> {
         let args = Arguments::get();
         match self {
             CommandArguments::Print(print_args) => {
@@ -144,7 +143,7 @@ pub trait IntoExecCommand {
 }
 
 pub trait ExecCommand: Command {
-    fn execute<'h>(&self, journ: Journal<'h>) -> JournResult<()>;
+    fn execute<'h>(&'h self, journ: &'h mut Journal<'h>) -> JournResult<()>;
 }
 
 fn main() {
@@ -195,9 +194,9 @@ fn main() {
     args.set_color(main_args.color);
     args.set_no_color(main_args.no_color);
     args.datetime_args.date_format =
-        main_args.datetime_args.date_format.unwrap_or(DEFAULT_DATE_FORMAT.clone());
+        main_args.datetime_args.date_format.unwrap_or(&DEFAULT_DATE_FORMAT);
     args.datetime_args.time_format =
-        main_args.datetime_args.time_format.unwrap_or(DEFAULT_TIME_FORMAT.clone());
+        main_args.datetime_args.time_format.unwrap_or(&DEFAULT_TIME_FORMAT);
     args.datetime_args.timezone = main_args.datetime_args.timezone.unwrap_or(Tz::UTC);
 
     let now = SystemTime::now();
@@ -246,7 +245,7 @@ fn main() {
     let args = Arguments::set(args);
     let file_name = herd_allocator.alloc(PathBuf::from(file_path.file_name().unwrap()));
     PythonEnvironment::startup();
-    let journ = match TextBlock::from_file(file_name.as_path(), herd_allocator, None)
+    let mut journ = match TextBlock::from_file(file_name.as_path(), herd_allocator, None)
         .and_then(|block| Journal::parse(args, file_name.as_path(), block, herd_allocator))
     {
         Ok(journ) => {
@@ -274,7 +273,7 @@ fn main() {
     };
 
     // Execute the command
-    if let Err(e) = main_args.command.exec(journ) {
+    if let Err(e) = main_args.command.exec(journ.allocator().alloc(journ)) {
         print_jerror(e);
         exit(1)
     }

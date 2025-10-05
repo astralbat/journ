@@ -45,7 +45,7 @@ impl<'h> AggregatedPosting<'h> {
             balance,
         }
     }
-    pub fn datetime(&self) -> JDateTimeRange {
+    pub fn datetime(&self) -> JDateTimeRange<'h> {
         self.datetime
     }
     pub fn descriptions(&self) -> &Vec<String> {

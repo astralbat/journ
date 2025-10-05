@@ -6,22 +6,8 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use journ_core::account::Account;
-use journ_core::amount::Amount;
 use journ_core::date_and_time::JDate;
-use std::collections::HashMap;
 use std::fmt;
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum Grouping {
-    /// Group by date, with the date as the key.
-    Date,
-    /// Group by account, with the account name as the key.
-    Account,
-    /// Group by metadata, with the metadata key as the key.
-    Metadata,
-    /// Group by description, with the description as the key.
-    Description,
-}
 
 /// Represents single item in a grouped report.
 pub enum GroupKey<'h, 'a> {

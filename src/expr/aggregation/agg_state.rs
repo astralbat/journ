@@ -6,25 +6,14 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::expr::ColumnValue;
-use crate::expr::context::EvalContext;
-use journ_core::err;
+use crate::expr::context::IdentifierContext;
 use journ_core::error::JournResult;
-use std::mem;
 
-pub fn neg<'h, 'a>(args: &mut [ColumnValue<'h>]) -> JournResult<ColumnValue<'h>> {
-    if args.len() != 1 {
-        return Err(err!("Function '-' requires one argument"));
-    }
-    match mem::take(&mut args[0]) {
-        ColumnValue::Amount(amount) => Ok(ColumnValue::Amount(-amount)),
-        ColumnValue::List(mut values) => {
-            for amt in &mut values {
-                *amt = ColumnValue::Amount(
-                    -amt.as_amount().ok_or_else(|| err!("Only `Amount` types may be negated"))?,
-                );
-            }
-            Ok(ColumnValue::List(values))
-        }
-        _ => Err(err!("Function '-' requires an `Amount`, `List` type argument")),
-    }
+/// A trait for maintaining the state of an aggregation operation. E.g. sum(), count(), avg(), etc.
+pub trait AggState<'h> {
+    /// Add a value to the aggregation state.
+    fn add(&mut self, context: &mut dyn IdentifierContext<'h>) -> JournResult<()>;
+
+    /// Finalize the aggregation and return the result.
+    fn finalize(&self) -> ColumnValue<'h>;
 }

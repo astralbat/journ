@@ -5,25 +5,24 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
-use crate::expr::column_expr::{ColumnExpr, ColumnValue, EvalContext};
+use crate::expr::ColumnValue;
+use crate::expr::context::EvalContext;
 use journ_core::err;
 use journ_core::error::JournResult;
+use std::mem;
 
-pub fn round<'h, 'a, 's>(
-    args: &[ColumnExpr<'a>],
-    eval_context: &mut EvalContext<'h, 'a>,
-) -> JournResult<ColumnValue<'h, 'a>> {
+pub fn round<'h, 'a, 's>(args: &mut [ColumnValue<'h>]) -> JournResult<ColumnValue<'h>> {
     if args.len() < 1 || args.len() > 2 {
         return Err(err!("Function 'round' requires one or two arguments"));
     }
-    let mut value = args[0].eval(eval_context)?;
+    let mut value = mem::take(&mut args[0]);
     let num_dp = if args.len() == 2 {
-        args[1].eval(eval_context)?
+        mem::take(&mut args[1])
     } else {
-        ColumnValue::Amount { amount: journ_core::amount::Amount::nil(), is_valuation: false }
+        ColumnValue::Amount(journ_core::amount::Amount::nil())
     };
 
-    if value.is_nan() || num_dp.is_nan() {
+    if value.is_undefined() || num_dp.is_undefined() {
         return Ok(value);
     }
 

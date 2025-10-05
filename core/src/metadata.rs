@@ -8,10 +8,10 @@
 use crate::err;
 use crate::error::{BlockContext, BlockContextError, JournError};
 use crate::ext::StrExt;
+use crate::parsing::IParseResult;
 use crate::parsing::text_block::TextBlock;
 use crate::parsing::text_input::TextInput;
 use crate::parsing::util::{blank_lines0, double_space, param_value, rest1, spaced_word};
-use crate::parsing::IParseResult;
 use nom::bytes::complete::tag;
 use nom::character::complete::{space0, space1};
 use nom::combinator::{opt, recognize};
@@ -82,7 +82,7 @@ impl<'h> Metadata<'h> {
         self.parse_components().0
     }
 
-    pub fn key(&self) -> MetadataKey {
+    pub fn key(&self) -> MetadataKey<'h> {
         MetadataKey(self.parse_components().1)
     }
 

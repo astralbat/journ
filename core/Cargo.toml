@@ -28,7 +28,7 @@ supports-color = "3.0.2"
 palette = "0.7.6"
 
 tinyvec = "1.6.0"
-smallvec = "1.4.2"
+smallvec = "1.11.1"
 smartstring = "1.0.1"
 linked_hash_set = "0.1.4"
 rayon = "1.5.3"

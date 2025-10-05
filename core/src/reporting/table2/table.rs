@@ -68,6 +68,9 @@ impl<'cell> Table<'cell> {
     }
 
     pub fn print<W: fmt::Write>(&self, writer: &mut W) -> fmt::Result {
+        if self.rows.iter().all(Row::is_header) {
+            return Ok(());
+        }
         let mut formatter = TableCellFormatter::new(writer);
         formatter.set_color(self.color);
         formatter.set_striped();

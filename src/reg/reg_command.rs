@@ -6,8 +6,8 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::ExecCommand;
-use crate::expr::column_expr::{ColumnExpr, ColumnValue, DataContext, EvalContext};
-use crate::report::parse_columns;
+use crate::expr::parser::parse_columns;
+use crate::expr::{ColumnValue, Expr};
 use journ_core::account::Account;
 use journ_core::arguments::{Arguments, Command};
 use journ_core::configuration::{AccountFilter, DescriptionFilter, FileFilter, Filter, UnitFilter};
@@ -28,7 +28,6 @@ pub struct RegCommand {
     account_filter: Vec<String>,
     unit_filter: Vec<String>,
     description_filter: Vec<String>,
-    group_postings_by: Option<String>,
     column_spec: String,
 }
 
@@ -73,15 +72,13 @@ impl RegCommand {
 impl Command for RegCommand {}
 
 impl ExecCommand for RegCommand {
-    fn execute<'h>(&self, mut journ: Journal<'h>) -> JournResult<()> {
+    fn execute<'h>(&self, journ: &'h mut Journal<'h>) -> JournResult<()> {
         let args = Arguments::get();
         let cmd: &RegCommand = args.cast_cmd().unwrap();
         let config = journ.config();
 
         // Parse the column specification. We need a lower-case version for evaluation.
-        let lowercase_spec = cmd.column_spec.to_ascii_lowercase();
-        let lower_column_spec = parse_columns(&lowercase_spec)?;
-        let column_spec = parse_columns(&cmd.column_spec)?;
+        let (column_spec, agg_functions) = parse_columns(&cmd.column_spec)?;
 
         // Get all the accounts to balance for.
         let description_filter = cmd.description_filter();
@@ -113,29 +110,27 @@ impl ExecCommand for RegCommand {
             .collect::<Vec<_>>();
         table.set_heading_row(headings);
 
+        /*
         let mut balance = vec![];
         for (entry, pst) in filtered_postings() {
             let mut context = EvalContext::new(&journ, DataContext::Single(entry, pst));
             balance += pst.amount();
-            context.add_variable(
-                "balance",
-                ColumnValue::Amount { amount: balance.balance(pst.unit()), is_valuation: false },
-            );
+            context.add_variable("balance", ColumnValue::Amount(balance.balance(pst.unit())));
             let mut row: Vec<CellRef> = vec![];
-            for (i, col) in lower_column_spec.iter().enumerate() {
+            for (i, col) in column_spec.iter().enumerate() {
                 let value = col
                     .eval(&mut context)
                     .map_err(|e| err!("Unable to evaluate column: '{}'", col).with_source(e))?;
 
                 // Allow these columns to expand. Look better.
-                if let ColumnExpr::Column("description") | ColumnExpr::Column("account") = &col {
+                if let Expr::Identifier("description") | Expr::Identifier("account") = &col {
                     table.expand_column(i);
                 }
 
                 row.push(value.into());
             }
             table.push_row(row);
-        }
+        }*/
         let mut output = String::new();
         table.print(&mut output).unwrap();
         print!("{output}");

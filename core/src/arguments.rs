@@ -39,8 +39,8 @@ pub struct Arguments {
 
 #[derive(Debug)]
 pub struct DateTimeArguments {
-    pub date_format: DateFormat<'static>,
-    pub time_format: TimeFormat<'static>,
+    pub date_format: &'static DateFormat<'static>,
+    pub time_format: &'static TimeFormat<'static>,
     pub timezone: Tz,
 }
 
@@ -57,8 +57,8 @@ impl DateTimeArguments {
 impl Default for DateTimeArguments {
     fn default() -> Self {
         DateTimeArguments {
-            date_format: DEFAULT_DATE_FORMAT.clone(),
-            time_format: DEFAULT_TIME_FORMAT.clone(),
+            date_format: &DEFAULT_DATE_FORMAT,
+            time_format: &DEFAULT_TIME_FORMAT,
             timezone: Tz::UTC,
         }
     }

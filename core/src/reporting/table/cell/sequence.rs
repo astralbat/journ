@@ -42,11 +42,11 @@ impl<'cell> CellSequence<'cell> {
         &self.cells
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = Ref<Cell<'cell>>> {
+    pub fn iter(&self) -> impl Iterator<Item = Ref<'_, Cell<'cell>>> {
         self.cells.iter().map(|c| c.borrow())
     }
 
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = RefMut<Cell<'cell>>> {
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = RefMut<'_, Cell<'cell>>> {
         self.cells.iter().map(|c| c.borrow_mut())
     }
 

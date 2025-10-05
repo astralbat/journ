@@ -327,7 +327,7 @@ impl<'h> Adjustment<'h> {
         self.consideration_adj.as_ref()
     }*/
 
-    pub fn id(&self) -> AdjustmentId {
+    pub fn id(&self) -> AdjustmentId<'h> {
         self.id
     }
 

@@ -5,19 +5,16 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
-use crate::expr::column_expr::{ColumnExpr, ColumnValue, EvalContext};
+use crate::expr::column_value::ColumnValue;
+use crate::expr::context::EvalContext;
 use journ_core::error::JournResult;
 use smartstring::alias::String as SS;
 
-pub fn concat<'h, 'a, 's>(
-    args: &[ColumnExpr<'a>],
-    eval_context: &mut EvalContext<'h, 'a>,
-) -> JournResult<ColumnValue<'h, 'a>> {
+pub fn concat<'h, 'a, 's>(args: &[ColumnValue<'h>]) -> JournResult<ColumnValue<'h>> {
     let mut result = SS::new();
 
     for arg in args {
-        let value = arg.eval(eval_context)?;
-        for v in value.as_list() {
+        for v in arg.as_list() {
             result.push_str(&v.to_string());
         }
     }

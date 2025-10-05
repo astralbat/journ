@@ -5,27 +5,22 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
-use crate::expr::column_expr::{ColumnExpr, ColumnValue, EvalContext};
+use crate::expr::ColumnValue;
+use crate::expr::context::EvalContext;
 use journ_core::amount::Amount;
 use journ_core::err;
 use journ_core::error::JournResult;
 
-pub fn num<'h, 'a, 's>(
-    args: &[ColumnExpr<'a>],
-    eval_context: &mut EvalContext<'h, 'a>,
-) -> JournResult<ColumnValue<'h, 'a>> {
+pub fn num<'h, 'a, 's>(args: &[ColumnValue<'h>]) -> JournResult<ColumnValue<'h>> {
     if args.len() != 1 {
         return Err(err!("Function 'num' requires exactly one argument"));
     }
-    let mut arg = args[0].eval(eval_context)?;
 
-    for mut a in arg.as_list_mut() {
+    let mut arg = args[0].clone();
+    for a in arg.as_list_mut() {
         match a {
-            ColumnValue::Amount { amount, is_valuation } => {
-                *a = ColumnValue::Amount {
-                    amount: Amount::nil().with_quantity(amount.quantity()),
-                    is_valuation: *is_valuation,
-                };
+            ColumnValue::Amount(amount) => {
+                *a = ColumnValue::Amount(Amount::nil().with_quantity(amount.quantity()));
             }
             _ => return Err(err!("Function 'num' requires an argument of type `Amount`")),
         }

@@ -10,6 +10,7 @@ use crate::error::JournResult;
 use crate::unit::{NegativeStyle, NumberFormat};
 use itertools::{EitherOrBoth, Itertools};
 use rust_decimal::Decimal;
+use smallvec::{Array, SmallVec};
 use std::cell::LazyCell;
 use std::cell::RefCell;
 use std::cmp::Ordering;
@@ -143,7 +144,7 @@ impl<'a, 'b> Iterator for SplitNFields<'a, 'b> {
 }
 
 pub trait StrExt {
-    fn splitn_whitespace(&self, n: usize) -> SplitNWhitespace;
+    fn splitn_whitespace(&self, n: usize) -> SplitNWhitespace<'_>;
     /// Splits some char separated text in to fields. Text surrounded by double quotes
     /// is treated as one field.
     fn split_fields<'a, 'b>(&'a self, field_seps: &'b [char]) -> SplitFields<'a, 'b>;
@@ -175,7 +176,7 @@ pub trait StringExt {
 }
 impl StrExt for str {
     #[inline]
-    fn splitn_whitespace(&self, n: usize) -> SplitNWhitespace {
+    fn splitn_whitespace(&self, n: usize) -> SplitNWhitespace<'_> {
         SplitNWhitespace { string: self, n, split_count: 0 }
     }
     fn split_fields<'a, 'b>(&'a self, field_seps: &'b [char]) -> SplitFields<'a, 'b> {
@@ -318,7 +319,7 @@ impl StrExt for str {
 }
 impl StrExt for String {
     #[inline]
-    fn splitn_whitespace(&self, n: usize) -> SplitNWhitespace {
+    fn splitn_whitespace(&self, n: usize) -> SplitNWhitespace<'_> {
         SplitNWhitespace { string: self, n, split_count: 0 }
     }
     fn split_fields<'a, 'b>(&'a self, field_seps: &'b [char]) -> SplitFields<'a, 'b> {
@@ -656,5 +657,62 @@ mod tests {
             (Bound::Excluded(0), Bound::Excluded(3)).intersection(&(1..5)),
             Some((Bound::Included(1), Bound::Excluded(3)))
         );
+    }
+}
+
+pub trait VecLike<T> {
+    fn as_slice(&self) -> &[T];
+    fn as_mut_slice(&mut self) -> &mut [T];
+
+    fn len(&self) -> usize {
+        self.as_slice().len()
+    }
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    fn get(&self, index: usize) -> Option<&T> {
+        self.as_slice().get(index)
+    }
+    fn get_mut(&mut self, index: usize) -> Option<&mut T> {
+        self.as_mut_slice().get_mut(index)
+    }
+    fn first(&self) -> Option<&T> {
+        self.as_slice().first()
+    }
+    fn first_mut(&mut self) -> Option<&mut T> {
+        self.as_mut_slice().first_mut()
+    }
+    fn last(&self) -> Option<&T> {
+        self.as_slice().last()
+    }
+    fn last_mut(&mut self) -> Option<&mut T> {
+        self.as_mut_slice().last_mut()
+    }
+}
+impl<T> VecLike<T> for Vec<T> {
+    fn as_slice(&self) -> &[T] {
+        self
+    }
+    fn as_mut_slice(&mut self) -> &mut [T] {
+        self
+    }
+}
+impl<T, const N: usize> VecLike<T> for [T; N] {
+    fn as_slice(&self) -> &[T] {
+        self
+    }
+    fn as_mut_slice(&mut self) -> &mut [T] {
+        self
+    }
+}
+impl<T, A> VecLike<T> for SmallVec<A>
+where
+    A: Array<Item = T>,
+{
+    fn as_slice(&self) -> &[T] {
+        self
+    }
+    fn as_mut_slice(&mut self) -> &mut [T] {
+        self
     }
 }

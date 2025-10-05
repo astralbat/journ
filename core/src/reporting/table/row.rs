@@ -52,11 +52,11 @@ impl<'cell> Row<'cell> {
         self.root.borrow_mut().as_branch_mut().unwrap().set_separator(separator)
     }
 
-    pub fn root(&self) -> Ref<Cell<'cell>> {
+    pub fn root(&self) -> Ref<'_, Cell<'cell>> {
         self.root.borrow()
     }
 
-    pub fn root_mut(&self) -> RefMut<Cell<'cell>> {
+    pub fn root_mut(&self) -> RefMut<'_, Cell<'cell>> {
         self.root.borrow_mut()
     }
 

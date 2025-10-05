@@ -7,7 +7,7 @@
  */
 use std::iter::Sum;
 use std::mem;
-use std::ops::{Add, Deref};
+use std::ops::Add;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub enum SpaceDistribution {

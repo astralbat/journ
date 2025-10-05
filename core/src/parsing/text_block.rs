@@ -171,7 +171,7 @@ impl<'h> TextBlock<'h> {
         }
     }
 
-    pub fn trimmed_start_lines(&self) -> TextBlock {
+    pub fn trimmed_start_lines(&self) -> TextBlock<'_> {
         let (rem, blanks) = blank_lines0(&*self.text).unwrap();
         let blank_lines_count = blanks.lines().count();
 

@@ -11,7 +11,7 @@ use std::fmt;
 
 // public to crate only so that we can ensure it is not used outside. We use this to compare for filler cells
 // on multi-spanned cells.
-pub(crate) static BLANK_CELL: BlankCell = BlankCell;
+pub static BLANK_CELL: BlankCell = BlankCell;
 
 /// A special cell that does not write anything; its width is 0.
 pub struct BlankCell;

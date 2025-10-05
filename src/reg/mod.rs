@@ -7,8 +7,8 @@
  */
 mod reg_command;
 
+use crate::IntoExecCommand;
 use crate::reg::reg_command::RegCommand;
-use crate::{IntoExecCommand, read_date_time_args};
 use journ_core::error::JournResult;
 use journ_core::journal::Journal;
 

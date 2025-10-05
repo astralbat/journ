@@ -11,46 +11,6 @@ use crate::IntoExecCommand;
 use crate::bal::bal_command::BalCommand;
 use journ_core::error::JournResult;
 use journ_core::journal::Journal;
-use std::fmt::Display;
-use std::str::FromStr;
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum BalColumn {
-    Account,
-    Amount,
-    Value(String),
-    Metadata(String),
-}
-
-impl FromStr for BalColumn {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_ascii_lowercase().as_str() {
-            "account" => Ok(BalColumn::Account),
-            "amount" => Ok(BalColumn::Amount),
-            value if value.starts_with("value:") => {
-                let unit = s[6..].to_string();
-                Ok(BalColumn::Value(unit))
-            }
-            metadata if metadata.starts_with("+") => {
-                Ok(BalColumn::Metadata(metadata[1..].to_string()))
-            }
-            _ => Err(format!("Invalid column name: {s}")),
-        }
-    }
-}
-
-impl Display for BalColumn {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            BalColumn::Account => write!(f, "Account"),
-            BalColumn::Amount => write!(f, "Amount"),
-            BalColumn::Value(unit) => write!(f, "{unit}"),
-            BalColumn::Metadata(key) => write!(f, "+{key}"),
-        }
-    }
-}
 
 #[derive(clap::Args, Debug)]
 #[command(name = "bal", about = "Print balances of accounts")]
@@ -97,16 +57,19 @@ pub struct BalArguments {
         default_value = "Account,Sum(amount)"
     )]
     column_spec: String,
-    #[arg(
-        short = 'w',
-        long = "write",
-        help = "write the file(s) with any new entry valuations if any were not explicitly set"
-    )]
-    write_file: bool,
     #[arg(short = 'H', long = "no-header", help = "do not print header row")]
     no_header: bool,
     #[arg(short = 'T', long = "no-total", help = "do not print total row")]
     no_total: bool,
+    #[arg(short = 'z', long = "zero", help = "show groups that have zero amounts")]
+    show_zeros: bool,
+    #[arg(
+        short = 'g',
+        long = "group-by",
+        help = "group by a column, e.g. unit, account, date. Default is account",
+        default_value = "account"
+    )]
+    group_by: String,
 }
 
 impl IntoExecCommand for BalArguments {
@@ -119,9 +82,10 @@ impl IntoExecCommand for BalArguments {
         bal_cmd.set_file_filter(self.file_filter);
         bal_cmd.set_write_csv(self.write_csv);
         bal_cmd.set_column_spec(self.column_spec);
-        bal_cmd.set_write_file(self.write_file);
         bal_cmd.set_no_header(self.no_header);
         bal_cmd.set_no_total(self.no_total);
+        bal_cmd.set_show_zeros(self.show_zeros);
+        bal_cmd.set_group_by(self.group_by);
         Ok(bal_cmd)
     }
 }

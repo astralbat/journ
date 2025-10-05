@@ -6,9 +6,8 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::ExecCommand;
-use crate::expr::column_expr::{ColumnValue, DataContext, EvalContext, PostingGroup};
-use crate::grouping::GroupKey;
-use crate::report::parse_columns;
+use crate::expr::parser::parse_plan;
+use crate::expr::{ColumnValue, GroupKey, GroupState, LateContext, PostingContext, TotalContext};
 use journ_core::account::Account;
 use journ_core::arguments::{Arguments, Command};
 use journ_core::configuration::{AccountFilter, DescriptionFilter, FileFilter, Filter, UnitFilter};
@@ -21,6 +20,8 @@ use journ_core::posting::Posting;
 use journ_core::reporting::table2::{CellRef, StyledCell};
 use journ_core::reporting::term_style::{Style, Weight};
 use journ_core::unit::Unit;
+use std::collections::hash_map::Entry;
+use std::collections::{BTreeMap, HashMap};
 
 #[derive(Default, Debug)]
 pub struct BalCommand {
@@ -29,9 +30,10 @@ pub struct BalCommand {
     unit_filter: Vec<String>,
     description_filter: Vec<String>,
     write_csv: bool,
-    write_file: bool,
     no_header: bool,
     no_total: bool,
+    show_zeros: bool,
+    group_by: String,
     column_spec: String,
 }
 
@@ -84,12 +86,8 @@ impl BalCommand {
         self.column_spec = column_spec;
     }
 
-    pub fn write_file(&self) -> bool {
-        self.write_file
-    }
-
-    pub fn set_write_file(&mut self, write_file: bool) {
-        self.write_file = write_file;
+    pub fn group_by(&self) -> &str {
+        &self.group_by
     }
 
     pub fn set_no_header(&mut self, no_header: bool) {
@@ -98,6 +96,14 @@ impl BalCommand {
 
     pub fn set_no_total(&mut self, no_total: bool) {
         self.no_total = no_total;
+    }
+
+    pub fn set_show_zeros(&mut self, show_zeros: bool) {
+        self.show_zeros = show_zeros;
+    }
+
+    pub fn set_group_by(&mut self, group_by: String) {
+        self.group_by = group_by;
     }
 
     pub fn filtered_entries<'h, 'a, A>(
@@ -128,22 +134,20 @@ impl BalCommand {
         }
     }
 
-    pub fn filtered_postings<'h, 'j, 'a, A>(
+    pub fn filtered_postings<'h, 'j, 'a>(
         &'a self,
         journ: &'j Journal<'h>,
-        account_filter: A,
-    ) -> impl Fn() -> Box<dyn Iterator<Item = (&'h JournalEntry<'h>, &'a Posting<'h>)> + 'a> + 'a
+    ) -> impl Fn() -> Box<dyn Iterator<Item = (&'h JournalEntry<'h>, &'h Posting<'h>)> + 'a> + 'a
     where
         'h: 'j,
         'j: 'a,
-        A: Filter<Account<'h>> + Clone + 'a,
     {
         move || {
             let args = Arguments::get();
             let description_filter = self.description_filter();
             let file_filter = self.file_filter();
             let unit_filter = self.unit_filter();
-            let account_filter = account_filter.clone();
+            let account_filter = self.account_filter();
             Box::new(
                 journ
                     .entry_range(args.begin_end_range())
@@ -163,51 +167,62 @@ impl BalCommand {
 impl Command for BalCommand {}
 
 impl ExecCommand for BalCommand {
-    fn execute<'h>(&self, journ: Journal<'h>) -> JournResult<()> {
+    fn execute<'h>(&'h self, journ: &'h mut Journal<'h>) -> JournResult<()> {
         let args = Arguments::get();
 
         let config = journ.config();
-        let column_spec = parse_columns(self.column_spec())?;
-
-        // Get all the accounts to balance for.
-        let account_filter = self.account_filter();
+        let plan = parse_plan(self.column_spec(), self.group_by())?;
 
         let mut table = journ_core::reporting::table2::Table::default();
         table.set_color(table.color() && !args.no_color);
         // Heading Row
         if !self.no_header {
             let heading_style = Style::default().with_weight(Weight::Bold);
-            let headings = column_spec
+            let headings = plan
+                .column_spec()
                 .iter()
                 .map(|col| StyledCell::new(col.to_string(), heading_style))
                 .collect::<Vec<_>>();
             table.set_heading_row(headings);
         }
 
-        let mut accounts_to_bal = vec![];
-        for acc in config.accounts() {
-            if account_filter.is_included(&**acc) {
-                accounts_to_bal.push(acc);
-            }
-        }
-        accounts_to_bal.sort();
+        // Aggregate postings into groups
+        let mut groups: HashMap<GroupKey, GroupState> = HashMap::new();
+        let mut total_group = GroupState::new(&plan)?;
+        for (entry, pst) in self.filtered_postings(&journ)() {
+            let mut context = PostingContext::new(journ, entry, pst);
 
-        for account in accounts_to_bal.into_iter() {
-            let mut context = EvalContext::new(
-                &journ,
-                DataContext::Group(PostingGroup::new(
-                    Box::new(self.filtered_entries(&journ, |a: &Account<'h>| a == &**account)),
-                    Box::new(self.filtered_postings(&journ, |a: &Account<'h>| a == &**account)),
-                    Some(GroupKey::Account(account)),
-                )),
+            let key = GroupKey::new(
+                plan.group_by()
+                    .iter()
+                    .map(|e| e.eval(&mut context).map(|v| (e.clone(), v)))
+                    .collect::<JournResult<Vec<(_)>>>()?,
             );
+            let group = match groups.entry(key) {
+                Entry::Occupied(e) => e.into_mut(),
+                Entry::Vacant(e) => e.insert(GroupState::new(&plan)?),
+            };
+            group.add(&mut context)?;
+            total_group.add(&mut context)?;
+        }
 
+        // Finalize groups and add to table
+        let mut sorted_groups = groups.into_iter().collect::<BTreeMap<_, _>>();
+        for (key, group) in sorted_groups.iter() {
+            let mut context = LateContext::new(journ, key.clone(), group.finalize());
             let mut row: Vec<CellRef> = vec![];
             let mut found_non_zero = false;
-            for col in column_spec.iter() {
-                let value = col
-                    .eval(&mut context)
-                    .map_err(|e| err!("Unable to evaluate column: '{}'", col).with_source(e))?;
+            for col in plan.column_spec().iter() {
+                // Get the value from the group key if possible, otherwise evaluate the expression
+                let value = key
+                    .get(col)
+                    .cloned()
+                    .ok_or_else(|| err!("Unable to get group key for column: '{}'", col))
+                    .or_else(|_| {
+                        col.eval(&mut context).map_err(|e| {
+                            err!("Unable to evaluate column: '{}'", col).with_source(e)
+                        })
+                    })?;
 
                 match &value {
                     ColumnValue::List(list) => {
@@ -216,7 +231,7 @@ impl ExecCommand for BalCommand {
                             found_non_zero = true;
                         }
                     }
-                    ColumnValue::Amount { amount, .. } => {
+                    ColumnValue::Amount(amount) => {
                         if !amount.is_zero() {
                             found_non_zero = true;
                         }
@@ -225,24 +240,17 @@ impl ExecCommand for BalCommand {
                 }
                 row.push(value.into());
             }
-            if found_non_zero {
+            if found_non_zero || self.show_zeros {
                 table.push_row(row);
             }
         }
 
         // Total row
         if !self.no_total && table.rows()[1..].len() > 1 {
-            table.push_separator_row('-', column_spec.len());
+            table.push_separator_row('-', plan.column_spec().len());
+            let mut context = TotalContext::new(journ, total_group.finalize());
             let mut total_row: Vec<CellRef> = vec![];
-            let mut context = EvalContext::new(
-                &journ,
-                DataContext::Group(PostingGroup::new(
-                    Box::new(self.filtered_entries(&journ, account_filter.clone())),
-                    Box::new(self.filtered_postings(&journ, account_filter)),
-                    None,
-                )),
-            );
-            for col in column_spec.iter() {
+            for col in plan.column_spec().iter() {
                 let value = col.eval(&mut context).unwrap_or(ColumnValue::StringRef(""));
 
                 total_row.push(value.into());

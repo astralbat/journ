@@ -5,7 +5,6 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
-use crate::reporting::table2::cell_width::CellWidth;
 use crate::reporting::table2::column::{ColumnsVec, TableColumn};
 use crate::reporting::table2::fmt::cell_formatter::{CellFormatter, lines_and_cols};
 use crate::reporting::table2::fmt::row_formatter::RowFormatter;
@@ -154,7 +153,6 @@ impl<'w, 'format> CellFormatter for TableCellFormatter<'w, 'format> {
 
         // Visit the cell to print its content
         let print_res = cell.print(self, line, Some(width.clone()));
-        //apply_transformers(&mut self.cell_line_buf, &mut self.transformers);
 
         // Pad to the column width
         for _ in self.cursor_col..(start_col + width.width()) {

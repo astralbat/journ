@@ -210,20 +210,26 @@ where
     }
 }
 
-impl Cell for &Account<'_> {
-    fn print<'format>(
-        &self,
-        f: &mut dyn CellFormatter,
-        line: usize,
-        _width: Option<ColumnWidth>,
-    ) -> fmt::Result {
-        if line == 0 { write!(f, "{}", self.name()) } else { Err(fmt::Error) }
-    }
+macro_rules! cell_from_account {
+    ($t:ty) => {
+        impl Cell for $t {
+            fn print<'format>(
+                &self,
+                f: &mut dyn CellFormatter,
+                line: usize,
+                _width: Option<ColumnWidth>,
+            ) -> fmt::Result {
+                if line == 0 { write!(f, "{}", self.name()) } else { Err(fmt::Error) }
+            }
 
-    fn width(&self) -> CellWidth {
-        CellWidth::Unary(self.name().chars().count())
-    }
+            fn width(&self) -> CellWidth {
+                CellWidth::Unary(self.name().chars().count())
+            }
+        }
+    };
 }
+cell_from_account!(&Account<'_>);
+cell_from_account!(Arc<Account<'_>>);
 
 impl<'a> From<&'a Account<'_>> for Box<dyn Cell + 'a> {
     fn from(account: &'a Account) -> Self {

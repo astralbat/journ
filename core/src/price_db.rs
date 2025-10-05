@@ -29,7 +29,7 @@ impl<'h> PriceDatabase<'h> {
         Self { node: Some(node), ..Default::default() }
     }
 
-    fn prices_init(&self) -> MutexGuard<(Vec<Arc<Price<'h>>>, bool)> {
+    fn prices_init(&self) -> MutexGuard<'_, (Vec<Arc<Price<'h>>>, bool)> {
         let mut prices_lock = self.prices.lock().unwrap();
         let (prices, initialised) = &mut *prices_lock;
         if !*initialised {

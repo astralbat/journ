@@ -449,7 +449,7 @@ impl CagCommand {
         self.unit_filter = units;
     }
 
-    pub fn event_filter(&self) -> EventFilter {
+    pub fn event_filter(&self) -> EventFilter<'_> {
         EventFilter(&self.event_filter)
     }
 

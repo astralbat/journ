@@ -31,7 +31,7 @@ impl<'c> Cell for MultiLineCell<'c> {
         width: Option<ColumnWidth>,
     ) -> std::fmt::Result {
         let mut lines_to_go = line;
-        for (i, cell) in self.cells.iter().enumerate() {
+        for cell in self.cells.iter() {
             if cell.height() > lines_to_go {
                 return cell.print(f, lines_to_go, width);
             } else {

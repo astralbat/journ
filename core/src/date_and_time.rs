@@ -29,18 +29,21 @@ use nom::combinator::{map_res, opt, rest};
 use nom::error::context;
 use nom::sequence::{pair, preceded};
 use nom::{Err as NomErr, Finish};
+use smartstring::alias::String as SS;
 use std::borrow::Cow;
 use std::cmp::Ordering;
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+use std::hash::Hash;
 use std::ops::{Add, Deref, Range, Sub};
 use std::str::FromStr;
-use std::sync::LazyLock;
+use std::sync::{LazyLock, Mutex};
 use std::{fmt, iter};
 use yaml_rust::Yaml;
-use yaml_rust::yaml::Hash;
 
-pub static DEFAULT_DATE_FORMAT: LazyLock<DateFormat<'static>> =
+pub static DEFAULT_DATE_FORMAT: LazyLock<&'static DateFormat<'static>> =
     LazyLock::new(|| "yyyy-mm-dd".parse().unwrap());
-pub static DEFAULT_TIME_FORMAT: LazyLock<TimeFormat<'static>> =
+pub static DEFAULT_TIME_FORMAT: LazyLock<&'static TimeFormat<'static>> =
     LazyLock::new(|| "hh:mm:ss".parse().unwrap());
 static DEFAULT_TIMEZONE: LazyLock<Tz> = LazyLock::new(|| Tz::UTC);
 pub static DEFAULT_NUMBER_FORMAT: LazyLock<NumberFormat> = LazyLock::new(NumberFormat::default);
@@ -184,6 +187,10 @@ impl<'h> JDate<'h> {
             Ok((rem, Self::new(date, date_format)))
         }
     }
+
+    pub fn with_format(self, format: &'h DateFormat<'h>) -> Self {
+        JDate { date: self.date, format }
+    }
 }
 
 impl From<JDate<'_>> for Cell<'_> {
@@ -227,6 +234,32 @@ impl PartialEq for JDate<'_> {
 }
 
 impl Eq for JDate<'_> {}
+
+impl PartialOrd for JDate<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for JDate<'_> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.date.cmp(&other.date)
+    }
+}
+
+impl Hash for JDate<'_> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.date.hash(state);
+    }
+}
+
+impl From<JDate<'_>> for SS {
+    fn from(value: JDate) -> Self {
+        let mut s = SS::new();
+        fmt::write(&mut s, format_args!("{}", value)).unwrap();
+        s
+    }
+}
 
 #[derive(Copy, Clone, Debug)]
 pub struct JTime<'h> {
@@ -280,10 +313,34 @@ impl fmt::Display for JTime<'_> {
     }
 }
 
+impl PartialEq for JTime<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.time == other.time
+    }
+}
+impl Eq for JTime<'_> {}
+
+impl PartialOrd for JTime<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for JTime<'_> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.time.cmp(&other.time)
+    }
+}
+
+impl Hash for JTime<'_> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.time.hash(state);
+    }
+}
+
 #[derive(Copy, Clone, Debug)]
 pub struct JDateTime<'h> {
     datetime: DateTime<Tz>,
-    // TODO: Look at getting rid of these formats and replacing with a boolean/flags for whether the time should be printed. The formats themselves can be taken from the configuration. This should save memory.
     date_format: Option<&'h DateFormat<'h>>,
     time_format: Option<&'h TimeFormat<'h>>,
     print_utc_marker: bool,
@@ -448,6 +505,14 @@ impl<'h> JDateTime<'h> {
             DateTimePrecision::Week => *self + Duration::days(7),
         }
     }
+
+    pub fn with_date_and_time_format(
+        &self,
+        date_format: Option<&'h DateFormat<'h>>,
+        time_format: Option<&'h TimeFormat<'h>>,
+    ) -> JDateTime<'h> {
+        JDateTime { date_format, time_format, ..*self }
+    }
 }
 
 impl fmt::Display for JDateTime<'_> {
@@ -496,6 +561,14 @@ impl From<JDateTime<'_>> for Cell<'_> {
     }
 }
 
+impl From<JDateTime<'_>> for SS {
+    fn from(value: JDateTime) -> Self {
+        let mut s = SS::new();
+        fmt::write(&mut s, format_args!("{}", value)).unwrap();
+        s
+    }
+}
+
 impl table2::Cell for JDateTime<'_> {
     fn print<'format>(
         &self,
@@ -528,6 +601,12 @@ impl PartialOrd for JDateTime<'_> {
 impl Ord for JDateTime<'_> {
     fn cmp(&self, other: &Self) -> Ordering {
         self.datetime.cmp(&other.datetime)
+    }
+}
+
+impl Hash for JDateTime<'_> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.datetime.hash(state);
     }
 }
 
@@ -792,7 +871,7 @@ impl From<JDateTimeRange<'_>> for Cell<'_> {
 
 impl From<JDateTimeRange<'_>> for Yaml {
     fn from(range: JDateTimeRange) -> Self {
-        let mut map = Hash::new();
+        let mut map = yaml_rust::yaml::Hash::new();
         // Format in ISO UTC for consistency.
         map.insert(
             Yaml::String("start".to_string()),
@@ -1174,7 +1253,7 @@ impl<'h> DateTimeFormatInner<'h> {
         smallest
     }
 
-    /// Leaks the inner values to create a `DateFormat`
+    /// Converts all inner items to be owned
     pub fn into_owned(self) -> DateTimeFormatInner<'static> {
         let mut items = vec![];
         for item in self.items.into_iter() {
@@ -1220,6 +1299,10 @@ impl Ord for DateTimeFormatInner<'_> {
 pub struct DateFormat<'h> {
     inner: DateTimeFormatInner<'h>,
 }
+
+/// Cache of leaked date formats.
+static DATE_FORMATS: LazyLock<Mutex<HashMap<Cow<'static, str>, &'static DateFormat<'static>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 impl<'h> DateFormat<'h> {
     pub fn parse_format<I>(input: I) -> JParseResult<I, Self>
@@ -1308,12 +1391,23 @@ impl<'h> DateFormat<'h> {
     }
 
     /// Leaks the inner values to create a `DateFormat`
-    pub fn into_owned(self) -> DateFormat<'static> {
-        DateFormat { inner: self.inner.into_owned() }
+    pub fn into_owned(self) -> &'static DateFormat<'static> {
+        let mut map = DATE_FORMATS.lock().unwrap();
+
+        if let Some(df) = map.get(&self.inner.format_str) {
+            return df;
+        }
+
+        let df = DateFormat { inner: self.inner.into_owned() };
+        let key = df.inner.format_str.clone();
+        match map.entry(key) {
+            Entry::Vacant(e) => e.insert(Box::leak(Box::new(df))),
+            Entry::Occupied(e) => e.into_mut(),
+        }
     }
 }
 
-impl FromStr for DateFormat<'static> {
+impl FromStr for &'static DateFormat<'static> {
     type Err = JournError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -1321,10 +1415,19 @@ impl FromStr for DateFormat<'static> {
     }
 }
 
+impl fmt::Display for DateFormat<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        write!(f, "{}", self.inner.format_str)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TimeFormat<'h> {
     inner: DateTimeFormatInner<'h>,
 }
+/// Cache of leaked time formats.
+static TIME_FORMATS: LazyLock<Mutex<HashMap<Cow<'static, str>, &'static TimeFormat<'static>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 impl<'h> TimeFormat<'h> {
     pub fn parse_format<I>(input: I) -> JParseResult<I, Self>
@@ -1398,16 +1501,33 @@ impl<'h> TimeFormat<'h> {
     }
 
     /// Leaks the inner values to create a `DateFormat`
-    pub fn into_owned(self) -> TimeFormat<'static> {
-        TimeFormat { inner: self.inner.into_owned() }
+    pub fn into_owned(self) -> &'static TimeFormat<'static> {
+        let mut map = TIME_FORMATS.lock().unwrap();
+
+        if let Some(tf) = map.get(&self.inner.format_str) {
+            return tf;
+        }
+
+        let tf = TimeFormat { inner: self.inner.into_owned() };
+        let key = tf.inner.format_str.clone();
+        match map.entry(key) {
+            Entry::Vacant(e) => e.insert(Box::leak(Box::new(tf))),
+            Entry::Occupied(e) => e.into_mut(),
+        }
     }
 }
 
-impl FromStr for TimeFormat<'_> {
+impl FromStr for &'static TimeFormat<'_> {
     type Err = JournError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         TimeFormat::parse_format(s).finish().map(|(_, tf)| tf.into_owned())
+    }
+}
+
+impl fmt::Display for TimeFormat<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        write!(f, "{}", self.inner.format_str)
     }
 }
 

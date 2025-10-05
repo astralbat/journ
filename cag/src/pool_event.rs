@@ -1099,7 +1099,7 @@ impl<'h, 'e> AggregatedPoolEvent<'h, 'e> {
         }
     }
 
-    pub fn as_table_rows(&self, include_sub_events: bool, total_row: bool) -> Vec<Row> {
+    pub fn as_table_rows(&self, include_sub_events: bool, total_row: bool) -> Vec<Row<'_>> {
         let cag = Arguments::get().cast_cmd::<CagCommand>().unwrap();
         let mut event_date = self.event_datetime();
         //event_date.with_brief_format(true);

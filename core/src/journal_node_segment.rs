@@ -52,7 +52,7 @@ impl<'h> JournalNodeSegment<'h> {
         }
     }
 
-    pub fn directives(&self) -> MutexGuard<Vec<Directive<'h>>> {
+    pub fn directives(&self) -> MutexGuard<'_, Vec<Directive<'h>>> {
         self.directives.lock().unwrap()
     }
 

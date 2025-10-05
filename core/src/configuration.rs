@@ -344,7 +344,7 @@ impl<'h> Configuration<'h> {
         self.base_config.args
     }
 
-    pub fn version(&self) -> ConfigurationVersion {
+    pub fn version(&self) -> ConfigurationVersion<'h> {
         self.base_config.version
     }
 
@@ -383,7 +383,7 @@ impl<'h> Configuration<'h> {
     }
 
     pub fn number_format(&self) -> &'h NumberFormat {
-        &self.base_config.number_format
+        self.base_config.number_format
     }
 
     pub fn default_unit(&self) -> &'h Unit<'h> {
@@ -473,13 +473,6 @@ impl<'h> Configuration<'h> {
             builder.set_format(primary.format().clone());
         } else if secondary.has_format() {
             builder.set_format(secondary.format().clone());
-        }
-
-        // Set the value format if one is set
-        if primary.has_value_format() {
-            builder.set_value_format(primary.value_format().clone());
-        } else if secondary.has_value_format() {
-            builder.set_value_format(secondary.value_format().clone());
         }
 
         // Set the rounding strategy if one is set
@@ -642,7 +635,7 @@ impl PartialEq for Configuration<'_> {
 impl Eq for Configuration<'_> {}
 
 impl Debug for Configuration<'_> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         self.base_config.fmt(f)?;
         Ok(())
     }
@@ -680,6 +673,11 @@ impl Deref for Expression {
 
     fn deref(&self) -> &Self::Target {
         &self.regex
+    }
+}
+impl PartialEq for Expression {
+    fn eq(&self, other: &Self) -> bool {
+        self.input == other.input
     }
 }
 
@@ -721,7 +719,7 @@ impl<'h> Filter<Unit<'h>> for UnitFilter {
 
 /// The standard account filter. The filter will match accounts exactly (case insensitive) except where '..' sequence is used
 /// to represent a wildcard match for any number of characters in the account name.
-#[derive(Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AccountFilter {
     expressions: Vec<Expression>,
 }

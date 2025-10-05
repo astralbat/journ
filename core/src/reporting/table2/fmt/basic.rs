@@ -5,21 +5,18 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
-use crate::reporting::table2::fmt::cell_formatter::{CellFormatter, lines_and_cols};
-use crate::reporting::table2::{Cell, CellWidth, ColumnWidth};
+use crate::reporting::table2::fmt::cell_formatter::CellFormatter;
+use crate::reporting::table2::{Cell, ColumnWidth};
 use std::fmt;
 use std::fmt::Write;
 
 /// Cell formatter that prints cells to a string
 pub struct BasicCellFormatter<'w> {
     writer: &'w mut dyn Write,
-    line: usize,
-    col: usize,
-    width: Option<CellWidth>,
 }
 impl<'w> BasicCellFormatter<'w> {
     pub fn new(writer: &'w mut dyn Write) -> Self {
-        Self { writer, width: None, line: 0, col: 0 }
+        Self { writer }
     }
 }
 

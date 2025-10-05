@@ -45,7 +45,7 @@ impl<'a> CellNodeKind<'a> {
     }
 }
 
-#[derive(Default, Copy, Clone, PartialEq, Eq)]
+#[derive(Default, Copy, Clone)]
 pub enum WrapPolicy {
     #[default]
     Any,

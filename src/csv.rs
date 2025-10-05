@@ -5,7 +5,7 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
-use crate::{read_date_time_args, ExecCommand, IntoExecCommand};
+use crate::{ExecCommand, IntoExecCommand, read_date_time_args};
 use journ_core::arguments::{Arguments, CsvCommand};
 use journ_core::error::JournResult;
 use journ_core::journal::Journal;
@@ -38,7 +38,7 @@ impl IntoExecCommand for CsvArguments {
 }
 
 impl ExecCommand for CsvCommand {
-    fn execute(&self, mut journ: Journal) -> JournResult<()> {
+    fn execute<'h>(&self, mut journ: &'h mut Journal<'h>) -> JournResult<()> {
         let args = Arguments::get();
         journ.csv(args)
     }

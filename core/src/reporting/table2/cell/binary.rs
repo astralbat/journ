@@ -8,7 +8,7 @@
 use crate::reporting::table2::ColumnWidth;
 use crate::reporting::table2::cell::{Cell, lease_formatter, return_formatter};
 use crate::reporting::table2::cell_width::{CellWidth, SpaceDistribution};
-use crate::reporting::table2::fmt::{CellFormatter, StringCellFormatter};
+use crate::reporting::table2::fmt::CellFormatter;
 use log::Level;
 use std::fmt;
 

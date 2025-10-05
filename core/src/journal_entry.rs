@@ -267,155 +267,6 @@ impl<'h> JournalEntry<'h> {
             .any(|p| **p.account() == *account)
     }
 
-    /*
-    /// Gets a map of all the exchange rates from `base_unit` that are available
-    /// from examination of the entry data alone.
-    /// This can only be done for postings in the balanced set as postings that don't balance
-    /// may conflict.
-    pub fn exchange_rates(&self, base_unit: &'h Unit<'h>) -> JournResult<UnitAmountMap<'h>> {
-        let units = self.units();
-
-        // Avoid units.len() - 1 problems below
-        if units.len() == 0 {
-            return Ok(UnitAmountMap::with_capacity(0));
-        }
-
-        let mut rates = UnitAmountMap::with_capacity(units.len() - 1);
-
-        // First add all unit values that have been explicitly set for base_unit in the entry. These override others.
-        rates.extend(self.balanced_postings().filter(|p| p.unit() == base_unit).flat_map(|p| {
-            p.valuations().filter_map(|v| {
-                if let Valuation::Unit(unit_val) = v {
-                    Some(**unit_val)
-                } else {
-                    None
-                }
-            })
-        }));
-        if rates.len() == units.len() - 1 {
-            return Ok(rates);
-        }
-
-        // The entry's postings and valuations can be thought of as a linear system that may or not be complete.
-        // Using a linear algebra library, we are able to throw all of the posting amounts in to a matrix to work
-        // out the exchange rates in terms of a particular unit (Ax = b).
-        // This method seems to work even if the system is not complete. That is, there just isn't enough valuations
-        // within the entry to determine all the exchange rates; for these currencies 0 is returned which will be interpreted
-        // as the exchange rate not existing.
-        // Also note that this currently works with f64 values which should be accurate enough for most cases. This could
-        // be made to work with Decimal for improved accuracy, but a wrapper type would likely be needed that implements ComplexField.
-
-        // Iterator of all the valuations we are using.
-        let total_valuations = || {
-            self.balanced_postings().flat_map(|p| {
-                p.valuations().filter_map(move |v| {
-                    if let Valuation::Total(m, _) = v {
-                        // Zero valuations create a contradiction for the base unit whose solution we
-                        // have set to 1.0.
-                        if p.unit() == base_unit && m.is_zero() {
-                            None
-                        } else {
-                            Some((
-                                p.amount(),
-                                if p.amount().is_positive() {
-                                    m.amount() * dec!(-1)
-                                } else {
-                                    m.amount()
-                                },
-                            ))
-                        }
-                    } else {
-                        None
-                    }
-                })
-            })
-        };
-        // Gets the column position (0-based) of the specified unit
-        let unit_col = |curr| units.iter().position(|c| *c == curr).unwrap();
-        assert!(units.iter().any(|c| *c == base_unit), "base_curr not found in entry");
-
-        // Initialise matrix data with 0's.
-        let mut data = Vec::with_capacity((total_valuations().count() + 2) * units.len());
-        (0..data.capacity()).for_each(|_| data.push(0.0f64));
-
-        // The first row is special in that 1.0 is set against the column of the base_curr and
-        // 0 for all others. This matches the 1.0 in the b vector and defines the system's solution to be in terms of
-        // the base unit.
-        for (j, _unit) in units.iter().enumerate() {
-            if unit_col(base_unit) == j {
-                data[j] = 1.0;
-                break;
-            }
-        }
-
-        // The second row is also special in that we enter the coefficients in the implied Debits = Credits rule
-        // of the entry. We rearrange the equation to be Debits - Credits = 0. These are applied additively so that a
-        // $5 on both sides will make the cell 0 again.
-        #[allow(clippy::needless_range_loop)]
-        for p in units.len()..units.len() * 2 {
-            let j = p - units.len();
-            for pst in self.balanced_postings() {
-                if j == unit_col(pst.unit()) {
-                    data[p] += f64::try_from(pst.amount().quantity()).unwrap();
-                }
-            }
-        }
-
-        // The remaining rows are the total valuations, with equations rearranged to be Amount - Value = 0.
-        for (pos, (amount, val)) in total_valuations().enumerate() {
-            let i = pos + 2;
-            data[i * units.len() + unit_col(amount.unit())] =
-                f64::try_from(amount.quantity()).unwrap();
-            data[i * units.len() + unit_col(val.unit())] = f64::try_from(val.quantity()).unwrap();
-        }
-
-        let a = DMatrix::from_row_slice(total_valuations().count() + 2, units.len(), &data);
-        let b = DVector::from_fn(a.nrows(), |i, _| if i == 0 { 1.0 } else { 0.0 });
-
-        let mut entry_str = String::new();
-        self.write(&mut entry_str, true).unwrap();
-        trace!(
-            "Exchange rates solution for base unit: \"{}\" and entry:\n{}",
-            base_unit,
-            entry_str
-        );
-        trace!("A = {}", a);
-        trace!("b = {}", b);
-        let svd = a.svd(true, true);
-        // The rank tells us how many rates there are.
-        let rank = svd.rank(1e-15);
-        if rank == 0 {
-            return Ok(rates);
-        }
-        let x = svd.solve(&b, 1e-15).unwrap();
-        trace!("x = {}", x);
-
-        // If the matrix A is not full rank, then it is an under-determined system and impossible to solve fully.
-        // It will have an infinite number of solutions if it has any solutions at all. Presumably, we'll get
-        // a least squares solution. This is a scalar for scaling the solution to make the exchange rate for the
-        // base unit to be 1.0.
-        let base_rate_adj = 1.0 / x.column(0)[unit_col(base_unit)];
-
-        for i in 0..x.column(0).len() {
-            if i != unit_col(base_unit) {
-                let rate = x.column(0)[i] * base_rate_adj;
-                // A rate of approximately zero means there is no solution. The power should not be set too high - as high as experience allows.
-                let zero_check = (rate * 10.0f64.powf(11.0)).round();
-
-                if zero_check != 0.0 {
-                    rates.insert(units[i].with_quantity(
-                        Decimal::try_from(1.0 / rate).unwrap_or_else(|e| {
-                            panic!("Unable to convert {}, to Decimal: {}", 1.0 / rate, e)
-                        }),
-                    ))
-                }
-            }
-        }
-
-        trace!("rates = {:?}", rates);
-        Ok(rates)
-    }*/
-
     /// Gets a unique list of all units (within postings) in this entry in order of occurrence.
     pub fn units(&self) -> SmallVec<[&'h Unit<'h>; 2]> {
         let mut units = smallvec!();
@@ -725,8 +576,15 @@ impl<'h> JournalEntry<'h> {
         }
         match bals.into_iter().filter(|b: &Amount| !b.is_zero()).count() {
             0 => Ok(()),
-            1 => Err(err!("Unbalanced entry. Amounts should total to zero.")),
-            // This is a trade between multiple currencies which is acceptable
+            1 => {
+                // We have a transaction between multiple units and one of the amounts is explicitly zero. We allow this.
+                if self.postings().any(|p| p.amount().is_zero()) && self.units().len() > 1 {
+                    Ok(())
+                } else {
+                    Err(err!("Unbalanced entry. Amounts should total to zero."))
+                }
+            }
+            // This is a transaction between multiple units which is acceptable
             _ => Ok(()),
         }
     }
@@ -897,14 +755,14 @@ impl PartialEq for JournalEntry<'_> {
 impl Eq for JournalEntry<'_> {}
 
 impl PartialOrd for JournalEntry<'_> {
-    fn partial_cmp(&self, other: &Self) -> Option<::std::cmp::Ordering> {
-        Some(self.date_id.cmp(&other.date_id))
+    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
+        Some(self.cmp(other))
     }
 }
 
 impl Ord for JournalEntry<'_> {
     fn cmp(&self, other: &Self) -> cmp::Ordering {
-        self.partial_cmp(other).unwrap()
+        self.date_id.cmp(&other.date_id)
     }
 }
 
@@ -919,16 +777,6 @@ impl fmt::Debug for JournalEntry<'_> {
         self.write(f, true)
     }
 }
-
-/*
-impl From<&JournalEntry<'_>> for BlockContext {
-    fn from(entry: &JournalEntry) -> Self {
-        match entry.text_block {
-            Some(tb) => BlockContext::from(tb),
-            None => BlockContext::from(&TextBlock::from(entry.to_string().as_str())),
-        }
-    }
-}*/
 
 #[cfg(test)]
 mod tests {

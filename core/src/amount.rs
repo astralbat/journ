@@ -17,6 +17,7 @@ use rust_decimal::Decimal;
 use rust_decimal::prelude::Zero;
 use smartstring::alias::String as SS;
 use std::borrow::Borrow;
+use std::hash::Hash;
 use std::iter::Sum;
 use std::ops::{
     Add, AddAssign, Bound, Deref, Div, DivAssign, Mul, MulAssign, Neg, Rem, RemAssign, Sub,
@@ -24,7 +25,6 @@ use std::ops::{
 };
 use std::{cmp, fmt, mem};
 use yaml_rust::Yaml;
-use yaml_rust::yaml::Hash;
 
 /// A quantity is a `Decimal` that forms the numeric part of an `Amount`. E.g. the '5' in '$5'.
 pub type Quantity = Decimal;
@@ -356,7 +356,8 @@ impl<'h> Amount<'h> {
         self.handle_parts(&mut handler, format);
 
         let left: Box<dyn table2::Cell> = if !handler.code_before_amount.is_empty() {
-            let left = Box::new(AlignedCell::new(handler.code_before_amount, Alignment::Left))
+            // Align right so that "-$" and "$" line up on the $.
+            let left = Box::new(AlignedCell::new(handler.code_before_amount, Alignment::Right))
                 as Box<dyn table2::Cell>;
             let right = Box::new(AlignedCell::new(handler.part_before_decimal, Alignment::Right))
                 as Box<dyn table2::Cell>;
@@ -505,6 +506,13 @@ where
     }
 }
 
+impl Hash for Amount<'_> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.unit.hash(state);
+        self.quantity.hash(state);
+    }
+}
+
 impl fmt::Debug for Amount<'_> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}", self.unit.format().format_precise(*self))
@@ -574,7 +582,7 @@ impl<'h, 'a> From<Amount<'h>> for Cell<'a> {
 impl<'h> From<&Amount<'h>> for Yaml {
     fn from(amount: &Amount<'h>) -> Self {
         // Converts the amount to a hash of unit and quantity.
-        let mut hash = Hash::new();
+        let mut hash = yaml_rust::yaml::Hash::new();
         hash.insert(
             Yaml::String("unit".to_string()),
             Yaml::String(amount.unit().code().to_string()),
