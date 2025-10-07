@@ -645,7 +645,7 @@ impl<'s, 'h> DerefMutAndDebug<'h, 's, Configuration<'h>> for &'s mut Configurati
 
 impl<'s, 'h> DerefMutAndDebug<'h, 's, Configuration<'h>> for MutexGuard<'s, Configuration<'h>> {}
 
-fn as_expressions<S: AsRef<str>>(items: &[S]) -> Vec<Expression> {
+fn as_expressions<S: AsRef<str>, I: Iterator<Item = S>>(items: I) -> Vec<Expression> {
     let mut expressions = vec![];
     for item in items {
         // Replace the escaped '..' with a regex that matches any characters.
@@ -681,12 +681,12 @@ impl PartialEq for Expression {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct UnitFilter {
     expressions: Vec<Expression>,
 }
 impl UnitFilter {
-    pub fn new<S: AsRef<str>>(units: &'_ [S]) -> Self {
+    pub fn new<S: AsRef<str>, I: Iterator<Item = S>>(units: I) -> Self {
         Self { expressions: as_expressions(units) }
     }
 }
@@ -719,13 +719,13 @@ impl<'h> Filter<Unit<'h>> for UnitFilter {
 
 /// The standard account filter. The filter will match accounts exactly (case insensitive) except where '..' sequence is used
 /// to represent a wildcard match for any number of characters in the account name.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct AccountFilter {
     expressions: Vec<Expression>,
 }
 impl AccountFilter {
     /// Creates a new account filter from the given slice of strings.
-    pub fn new<S: AsRef<str>>(accounts: &'_ [S]) -> Self {
+    pub fn new<S: AsRef<str>, I: Iterator<Item = S>>(accounts: I) -> Self {
         Self { expressions: as_expressions(accounts) }
     }
 }
@@ -769,7 +769,7 @@ impl<S: AsRef<str> + Clone> Filter<str> for DescriptionFilter<'_, S> {
 #[derive(Clone)]
 pub struct FileFilter<'a, S: AsRef<str>>(pub &'a [S]);
 
-impl<'a, 'h, S: AsRef<str> + Clone> Filter<JournalNode<'h>> for FileFilter<'_, S> {
+impl<'h, S: AsRef<str> + Clone> Filter<JournalNode<'h>> for FileFilter<'_, S> {
     fn is_included(&self, node: &JournalNode<'h>) -> bool {
         // When the filter is empty, all accounts are included.
         if self.0.is_empty() {

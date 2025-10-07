@@ -132,7 +132,7 @@ impl fmt::Display for Expr<'_> {
             Literal(lit) => write!(f, "\"{}\"", lit),
             Identifier(name) => write!(f, "{}", name),
             Number(num) => write!(f, "{}", num),
-            Aliased(inner, alias) => write!(f, "{} as {}", inner, alias),
+            Aliased(inner, alias) => write!(f, "{}", alias),
         }
     }
 }
@@ -271,47 +271,27 @@ fn eval_binary_op<'h, 'a>(
         }};
     }
 
-    match (left, right) {
-        (ColumnValue::Amount(a), ColumnValue::Amount(b)) => Ok(binary_op!(a, b)
-            .map(|amount| ColumnValue::Amount(amount))
-            .unwrap_or_else(|_: JournError| ColumnValue::Undefined)),
-        (v, _) | (_, v) if v.is_undefined() => Ok(ColumnValue::Undefined),
-        (ColumnValue::List(va), ColumnValue::List(vb)) => {
-            let mut vec_res = Vec::with_capacity(va.len());
-            // Should be safe to assume lists are normalized - each unit appears only once.
-            // Lists do not have to have the same units, just operate where units match.
-            for cv_a in va.into_iter() {
-                match cv_a.as_amount() {
-                    Some(a) => {
-                        if let Some(b) = vb
-                            .iter()
-                            .filter_map(ColumnValue::as_amount)
-                            .filter(|b| a.unit() == b.unit())
-                            .next()
-                        {
-                            binary_op!(a, b)
-                                .map(|c| {
-                                    vec_res.push(ColumnValue::Amount(c));
-                                })
-                                .unwrap_or_else(|_: JournError| {
-                                    vec_res.push(ColumnValue::Undefined);
-                                });
-                        }
-                    }
-                    None => {
-                        return Err(err!("Binary operations are only supported for `Amount` type"));
-                    }
-                }
+    let mut results = Vec::new();
+    for mapping in left.map(&right) {
+        match mapping {
+            (Some(ColumnValue::Amount(a)), Some(ColumnValue::Amount(b))) => {
+                results.push(
+                    binary_op!(a, b)
+                        .map(|amount| ColumnValue::Amount(amount))
+                        .unwrap_or_else(|_: JournError| ColumnValue::Undefined),
+                );
             }
-            Ok(ColumnValue::List(vec_res))
+            _ => {
+                return Err(err!("Binary operations are only supported for `Amount` type"));
+            }
         }
-        (left, right) => Err(err!("Binary operations are only supported for `Amount` type")
-            .with_source(err!(
-                "Left operand: {}, Right operand: {}, Operation: {}",
-                left,
-                right,
-                op
-            ))),
+    }
+    if results.is_empty() {
+        Ok(ColumnValue::Undefined)
+    } else if results.len() == 1 {
+        Ok(results.into_iter().next().unwrap())
+    } else {
+        Ok(ColumnValue::List(results))
     }
 }
 

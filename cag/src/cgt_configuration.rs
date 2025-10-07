@@ -434,7 +434,7 @@ pub struct CagCommand {
 
 impl CagCommand {
     pub fn account_filter(&self) -> impl for<'h> Filter<Account<'h>> + '_ {
-        AccountFilter::new(&self.account_filter)
+        AccountFilter::new(self.account_filter.iter())
     }
 
     pub fn set_account_filter(&mut self, account_filter: Vec<String>) {
@@ -442,7 +442,7 @@ impl CagCommand {
     }
 
     pub fn unit_filter(&self) -> impl for<'h> Filter<Unit<'h>> + '_ {
-        UnitFilter::new(&self.unit_filter)
+        UnitFilter::new(self.unit_filter.iter())
     }
 
     pub fn set_unit_filter(&mut self, units: Vec<String>) {

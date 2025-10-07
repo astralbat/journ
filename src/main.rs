@@ -7,6 +7,7 @@
  */
 
 #![feature(cow_is_borrowed)]
+#![feature(bool_to_result)]
 
 mod bal;
 mod cag;

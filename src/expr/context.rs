@@ -12,6 +12,7 @@ use journ_core::posting::Posting;
 use smallvec::SmallVec;
 use smartstring::alias::String as SS;
 use std::ascii::AsciiExt;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 pub trait EvalContext<'h> {
@@ -27,16 +28,27 @@ pub trait EvalContext<'h> {
 }
 
 pub trait IdentifierContext<'h>: EvalContext<'h> {
-    fn eval_identifier(&self, identifier: &str) -> Option<ColumnValue<'h>>;
+    fn variables(&self) -> &HashMap<SS, ColumnValue<'h>>;
 
-    fn set_identifier(&mut self, identifier: &str, value: ColumnValue<'h>);
+    fn variables_mut(&mut self) -> &mut HashMap<SS, ColumnValue<'h>>;
+
+    fn eval_identifier(&self, identifier: &str) -> Option<ColumnValue<'h>> {
+        match self.variables().get(identifier.to_lowercase().as_str()) {
+            Some(v) => Some(v.clone()),
+            None => None,
+        }
+    }
+
+    fn set_identifier(&mut self, identifier: &str, value: ColumnValue<'h>) {
+        self.variables_mut().insert(identifier.to_lowercase().into(), value);
+    }
 }
 
 pub struct LateContext<'h> {
     journal: &'h Journal<'h>,
     aggregate_values: Vec<ColumnValue<'h>>,
     group_key: GroupKey<'h>,
-    variables: SmallVec<[(SS, ColumnValue<'h>); 1]>,
+    variables: HashMap<SS, ColumnValue<'h>>,
 }
 impl<'h> LateContext<'h> {
     pub fn new(
@@ -45,7 +57,7 @@ impl<'h> LateContext<'h> {
         aggregate_values: Vec<ColumnValue<'h>>,
     ) -> LateContext<'h> {
         let mut context =
-            LateContext { journal, aggregate_values, group_key, variables: SmallVec::new() };
+            LateContext { journal, aggregate_values, group_key, variables: HashMap::new() };
 
         // Make the --group-by aliases available as identifiers in the context. E.g. -o ALIAS
         let aliases_and_values =
@@ -74,33 +86,26 @@ impl<'h> EvalContext<'h> for LateContext<'h> {
     }
 }
 impl<'h> IdentifierContext<'h> for LateContext<'h> {
-    fn eval_identifier(&self, identifier: &str) -> Option<ColumnValue<'h>> {
-        self.variables.iter().find_map(|(s, v)| {
-            if s.eq_ignore_ascii_case(identifier) { Some(v.clone()) } else { None }
-        })
+    fn variables(&self) -> &HashMap<SS, ColumnValue<'h>> {
+        &self.variables
     }
 
-    fn set_identifier(&mut self, identifier: &str, _value: ColumnValue<'h>) {
-        if let Some((_, v)) =
-            self.variables.iter_mut().find(|(k, _)| k.eq_ignore_ascii_case(identifier))
-        {
-            *v = _value;
-        } else {
-            self.variables.push((identifier.into(), _value));
-        }
+    fn variables_mut(&mut self) -> &mut HashMap<SS, ColumnValue<'h>> {
+        &mut self.variables
     }
 }
 
 pub struct TotalContext<'h> {
     journal: &'h Journal<'h>,
     aggregate_values: Vec<ColumnValue<'h>>,
+    variables: HashMap<SS, ColumnValue<'h>>,
 }
 impl<'h> TotalContext<'h> {
     pub fn new(
         journal: &'h Journal<'h>,
         aggregate_values: Vec<ColumnValue<'h>>,
     ) -> TotalContext<'h> {
-        TotalContext { journal, aggregate_values }
+        TotalContext { journal, aggregate_values, variables: HashMap::new() }
     }
 }
 impl<'h> EvalContext<'h> for TotalContext<'h> {
@@ -113,11 +118,12 @@ impl<'h> EvalContext<'h> for TotalContext<'h> {
     }
 }
 impl<'h> IdentifierContext<'h> for TotalContext<'h> {
-    fn eval_identifier(&self, _identifier: &str) -> Option<ColumnValue<'h>> {
-        Some(ColumnValue::Undefined)
+    fn variables(&self) -> &HashMap<SS, ColumnValue<'h>> {
+        &self.variables
     }
-    fn set_identifier(&mut self, _identifier: &str, _value: ColumnValue<'h>) {
-        // No-op
+
+    fn variables_mut(&mut self) -> &mut HashMap<SS, ColumnValue<'h>> {
+        &mut self.variables
     }
 }
 
@@ -125,7 +131,7 @@ pub struct PostingContext<'h> {
     journal: &'h Journal<'h>,
     entry: &'h JournalEntry<'h>,
     posting: &'h Posting<'h>,
-    variables: SmallVec<[(SS, ColumnValue<'h>); 1]>,
+    variables: HashMap<SS, ColumnValue<'h>>,
 }
 impl<'h> PostingContext<'h> {
     pub fn new(
@@ -133,7 +139,7 @@ impl<'h> PostingContext<'h> {
         entry: &'h JournalEntry<'h>,
         posting: &'h Posting<'h>,
     ) -> PostingContext<'h> {
-        PostingContext { journal, entry, posting, variables: SmallVec::new() }
+        PostingContext { journal, entry, posting, variables: HashMap::new() }
     }
 
     pub fn entry(&self) -> &JournalEntry<'h> {
@@ -156,6 +162,14 @@ impl<'h> EvalContext<'h> for PostingContext<'h> {
 }
 
 impl<'h> IdentifierContext<'h> for PostingContext<'h> {
+    fn variables(&self) -> &HashMap<SS, ColumnValue<'h>> {
+        &self.variables
+    }
+
+    fn variables_mut(&mut self) -> &mut HashMap<SS, ColumnValue<'h>> {
+        &mut self.variables
+    }
+
     fn eval_identifier(&self, identifier: &str) -> Option<ColumnValue<'h>> {
         if identifier.eq_ignore_ascii_case("account") {
             Some(ColumnValue::Account(Arc::clone(self.posting.account())))
@@ -179,20 +193,10 @@ impl<'h> IdentifierContext<'h> for PostingContext<'h> {
                     .and_then(|m| m.value().map(ColumnValue::StringRef))
                     .unwrap_or(ColumnValue::Undefined),
             )
-        } else if let Some((_var, value)) =
-            self.variables.iter().find(|(k, _)| (*k).eq_ignore_ascii_case(identifier))
-        {
-            Some(value.clone())
+        } else if let (v) = self.variables().get(identifier.to_lowercase().as_str()) {
+            v.cloned()
         } else {
             None
-        }
-    }
-
-    fn set_identifier(&mut self, identifier: &str, value: ColumnValue<'h>) {
-        if let Some((_, v)) = self.variables.iter_mut().find(|(k, _)| k == identifier) {
-            *v = value;
-        } else {
-            self.variables.push((identifier.into(), value));
         }
     }
 }

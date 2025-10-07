@@ -357,8 +357,16 @@ impl<'h> Amount<'h> {
 
         let left: Box<dyn table2::Cell> = if !handler.code_before_amount.is_empty() {
             // Align right so that "-$" and "$" line up on the $.
-            let left = Box::new(AlignedCell::new(handler.code_before_amount, Alignment::Right))
-                as Box<dyn table2::Cell>;
+            let code_before_amount_alignment =
+                if handler.code_before_amount == "-" || handler.code_before_amount == "(" {
+                    Alignment::Left
+                } else {
+                    Alignment::Right
+                };
+            let left = Box::new(AlignedCell::new(
+                handler.code_before_amount,
+                code_before_amount_alignment,
+            )) as Box<dyn table2::Cell>;
             let right = Box::new(AlignedCell::new(handler.part_before_decimal, Alignment::Right))
                 as Box<dyn table2::Cell>;
             let mut cell = table2::BinaryCell::new(left, right);

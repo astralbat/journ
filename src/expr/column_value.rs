@@ -10,14 +10,17 @@ use journ_core::amount::Amount;
 use journ_core::amounts::Amounts;
 use journ_core::configuration::{AccountFilter, Filter};
 use journ_core::date_and_time::{JDate, JDateTime};
+use journ_core::err;
+use journ_core::error::JournResult;
 use journ_core::reporting::table::Cell;
 use journ_core::reporting::table2::{BLANK_CELL, CellRef, EllipsisCell, MultiLineCell};
+use journ_core::unit::Unit;
 use rust_decimal::Decimal;
 use smallvec::SmallVec;
 use smartstring::alias::String as SS;
 use std::iter::Sum;
 use std::sync::Arc;
-use std::{fmt, slice};
+use std::{fmt, iter, mem, slice};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Default, Hash)]
 pub enum ColumnValue<'h> {
@@ -25,6 +28,7 @@ pub enum ColumnValue<'h> {
     Undefined,
     Boolean(bool),
     Account(Arc<Account<'h>>),
+    Unit(&'h Unit<'h>),
     Description(&'h str),
     String(SS),
     StringRef(&'h str),
@@ -34,7 +38,7 @@ pub enum ColumnValue<'h> {
     List(Vec<ColumnValue<'h>>),
 }
 
-impl<'h, 'a> ColumnValue<'h> {
+impl<'h> ColumnValue<'h> {
     pub fn as_bool(&self) -> Option<bool> {
         if let ColumnValue::Boolean(b) = self { Some(*b) } else { None }
     }
@@ -42,6 +46,18 @@ impl<'h, 'a> ColumnValue<'h> {
     pub fn as_amount(&self) -> Option<Amount<'h>> {
         match self {
             ColumnValue::Amount(a) => Some(*a),
+            _ => None,
+        }
+    }
+
+    pub fn as_account(&self) -> Option<&Arc<Account<'h>>> {
+        if let ColumnValue::Account(a) = self { Some(a) } else { None }
+    }
+
+    pub fn as_unit(&self) -> Option<&'h Unit<'h>> {
+        match self {
+            ColumnValue::Unit(u) => Some(u),
+            ColumnValue::Amount(a) => Some(a.unit()),
             _ => None,
         }
     }
@@ -84,10 +100,7 @@ impl<'h, 'a> ColumnValue<'h> {
         }
     }*/
 
-    pub fn as_str<'s>(&'s self) -> Option<&'a str>
-    where
-        's: 'a,
-    {
+    pub fn as_str<'s>(&'s self) -> Option<&'s str> {
         match self {
             ColumnValue::StringRef(s) => Some(s),
             ColumnValue::String(s) => Some(s.as_str()),
@@ -147,9 +160,84 @@ impl<'h, 'a> ColumnValue<'h> {
     pub fn matches(&self, other: &ColumnValue<'h>) -> Option<bool> {
         match (self, other) {
             (ColumnValue::Account(a), ColumnValue::String(b)) => {
-                AccountFilter::new(slice::from_ref(b)).is_included(a).into()
+                AccountFilter::new(slice::from_ref(b).iter()).is_included(a).into()
             }
             _ => None,
+        }
+    }
+
+    /// Creates a flattened iterator over matching pairs of the same type for operations.
+    pub fn map<'a>(
+        &'a self,
+        other: &'a ColumnValue<'h>,
+    ) -> Box<dyn Iterator<Item = (Option<&'a ColumnValue<'h>>, Option<&'a ColumnValue<'h>>)> + 'a>
+    {
+        match (self, other) {
+            (ColumnValue::List(list_a), ColumnValue::List(list_b)) => {
+                let mut mapped = Vec::with_capacity(list_a.len());
+                for a in list_a.iter() {
+                    match list_b.iter().find(|b| a.map(b).all(|(x, y)| x.is_some() && y.is_some()))
+                    {
+                        // Found a, b pairing
+                        Some(b) => mapped.push((Some(a), Some(b))),
+                        // No match for a
+                        None => mapped.push((Some(a), None)),
+                    }
+                }
+                for b in list_b.iter() {
+                    match list_a.iter().find(|a| b.map(a).all(|(x, y)| x.is_some() && y.is_some()))
+                    {
+                        Some(_) => {}
+                        // No match for b
+                        None => mapped.push((None, Some(b))),
+                    }
+                }
+                Box::new(mapped.into_iter())
+            }
+            (a, ColumnValue::List(list_b)) => Box::new(list_b.iter().map(|b| a.map(b)).flatten()),
+            (ColumnValue::List(list_a), b) => Box::new(list_a.iter().map(|a| a.map(b)).flatten()),
+            (ColumnValue::Amount(a), ColumnValue::Amount(b)) => {
+                if a.unit() == b.unit() || a.unit().is_none() || b.unit().is_none() {
+                    Box::new(iter::once((Some(self), Some(other))))
+                } else {
+                    Box::new(iter::once((None, None)))
+                }
+            }
+            (a, b) if mem::discriminant(a) == mem::discriminant(b) => {
+                Box::new(iter::once((Some(a), Some(b))))
+            }
+            _ => Box::new(iter::once((None, None))),
+        }
+    }
+
+    pub fn into_cell_ref(self, show_zeros: bool) -> CellRef<'h> {
+        match self {
+            ColumnValue::Undefined => CellRef::Borrowed(&BLANK_CELL),
+            ColumnValue::Boolean(b) => CellRef::Owned(Box::new(b.to_string())),
+            ColumnValue::String(s) => CellRef::Owned(Box::new(s)),
+            ColumnValue::StringRef(s) => CellRef::Owned(Box::new(s)),
+            ColumnValue::Description(s) => {
+                CellRef::Owned(Box::new(EllipsisCell::new(CellRef::Owned(Box::new(s)))))
+            }
+            ColumnValue::Date(date) => CellRef::Owned(Box::new(date)),
+            ColumnValue::Datetime(dt) => CellRef::Owned(Box::new(dt)),
+            ColumnValue::Account(acc) => CellRef::Owned(Box::new(acc)),
+            ColumnValue::Unit(unit) => CellRef::Owned(Box::new(unit.to_string())),
+            ColumnValue::Amount(amount) => CellRef::Owned(amount.into_cell(amount.unit().format())),
+            ColumnValue::Amount { .. } => unreachable!(),
+            ColumnValue::List(mut values) => {
+                values.sort();
+
+                // Don't include zero amounts in the list
+                CellRef::Owned(Box::new(MultiLineCell::new(
+                    values
+                        .into_iter()
+                        .filter(|cv| {
+                            cv.as_amount().map(|a| !a.is_zero() || show_zeros).unwrap_or(true)
+                        })
+                        .map(|a| a.into_cell_ref(show_zeros)),
+                )))
+            }
         }
     }
 }
@@ -162,6 +250,7 @@ impl fmt::Display for ColumnValue<'_> {
             ColumnValue::String(s) => write!(f, "{}", s),
             ColumnValue::StringRef(s) | ColumnValue::Description(s) => write!(f, "{}", s),
             ColumnValue::Account(acc) => write!(f, "{}", acc),
+            ColumnValue::Unit(unit) => write!(f, "{}", unit),
             ColumnValue::Date(date) => write!(f, "{}", date),
             ColumnValue::Datetime(dt) => write!(f, "{}", dt),
             ColumnValue::Amount(amount) => write!(f, "{}", amount),
@@ -183,45 +272,12 @@ impl<'s, 'a> From<ColumnValue<'a>> for Cell<'a> {
             ColumnValue::Date(date) => Cell::from(date),
             ColumnValue::Datetime(dt) => Cell::from(dt),
             ColumnValue::Account(acc) => Cell::from(acc.to_string()),
+            ColumnValue::Unit(unit) => Cell::from(unit.to_string()),
             ColumnValue::Amount(amount) => Cell::from(amount),
             ColumnValue::List(values) => Cell::from(format!(
                 "[{}]",
                 values.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(", ")
             )),
-        }
-    }
-}
-
-impl<'s, 'a, 'h, 'val> From<ColumnValue<'h>> for CellRef<'h>
-where
-    'h: 's,
-    'a: 's,
-{
-    fn from(value: ColumnValue<'h>) -> Self {
-        match value {
-            ColumnValue::Undefined => CellRef::Borrowed(&BLANK_CELL),
-            ColumnValue::Boolean(b) => CellRef::Owned(Box::new(b.to_string())),
-            ColumnValue::String(s) => CellRef::Owned(Box::new(s)),
-            ColumnValue::StringRef(s) => CellRef::Owned(Box::new(s)),
-            ColumnValue::Description(s) => {
-                CellRef::Owned(Box::new(EllipsisCell::new(CellRef::Owned(Box::new(s)))))
-            }
-            ColumnValue::Date(date) => CellRef::Owned(Box::new(date)),
-            ColumnValue::Datetime(dt) => CellRef::Owned(Box::new(dt)),
-            ColumnValue::Account(acc) => CellRef::Owned(Box::new(acc)),
-            ColumnValue::Amount(amount) => CellRef::Owned(amount.into_cell(amount.unit().format())),
-            ColumnValue::Amount { .. } => unreachable!(),
-            ColumnValue::List(mut values) => {
-                values.sort();
-
-                // Don't include zero amounts in the list
-                CellRef::Owned(Box::new(MultiLineCell::new(
-                    values
-                        .into_iter()
-                        .filter(|cv| cv.as_amount().map(|a| !a.is_zero()).unwrap_or(true))
-                        .map(|a| a.into()),
-                )))
-            }
         }
     }
 }
@@ -253,5 +309,47 @@ impl Sum for ColumnValue<'_> {
             }
         }
         if let Some(t) = total { ColumnValue::Amount(t) } else { ColumnValue::Undefined }
+    }
+}
+
+impl<'a, 'h> IntoIterator for &'a ColumnValue<'h> {
+    type Item = &'a ColumnValue<'h>;
+    type IntoIter = ColumnValueIter<'a, 'h>;
+    fn into_iter(self) -> Self::IntoIter {
+        ColumnValueIter::new(&self)
+    }
+}
+
+impl<'h> IntoIterator for ColumnValue<'h> {
+    type Item = ColumnValue<'h>;
+    type IntoIter = std::vec::IntoIter<ColumnValue<'h>>;
+    fn into_iter(self) -> Self::IntoIter {
+        match self {
+            ColumnValue::List(v) => v.into_iter(),
+            other => vec![other].into_iter(),
+        }
+    }
+}
+
+pub struct ColumnValueIter<'a, 'h> {
+    values: &'a ColumnValue<'h>,
+    index: usize,
+}
+impl<'a, 'h> ColumnValueIter<'a, 'h> {
+    pub fn new(values: &'a ColumnValue<'h>) -> Self {
+        Self { values, index: 0 }
+    }
+}
+impl<'a, 'h> Iterator for ColumnValueIter<'a, 'h> {
+    type Item = &'a ColumnValue<'h>;
+    fn next(&mut self) -> Option<Self::Item> {
+        let list = self.values.as_list();
+        if self.index < list.len() {
+            let value = &list[self.index];
+            self.index += 1;
+            Some(value)
+        } else {
+            None
+        }
     }
 }

@@ -11,7 +11,7 @@ use crate::expr::{ColumnValue, Expr};
 use journ_core::amount::Amount;
 use journ_core::configuration::{AccountFilter, Filter};
 use journ_core::err;
-use journ_core::error::JournResult;
+use journ_core::error::{JournError, JournResult};
 use journ_core::journal_entry::EntryId;
 use smallvec::SmallVec;
 
@@ -38,7 +38,7 @@ impl<'h, 'a> AggState<'h> for CoSum<'h> {
         // Initialize the account filter on the first call to add()
         if self.account_filter.is_none() {
             let accounts = self.args.iter().map(|arg| arg.eval(context)?.into_string().ok_or(err!("cosum() requires arguments of type `String`, representing account patterns to match"))).collect::<Result<Vec<_>, _>>()?;
-            self.account_filter = Some(AccountFilter::new(&accounts));
+            self.account_filter = Some(AccountFilter::new(accounts.iter()));
         }
         let account_filter = self.account_filter.as_ref().unwrap();
 
@@ -57,6 +57,20 @@ impl<'h, 'a> AggState<'h> for CoSum<'h> {
             }
             None => Err(err!("Cosum() is not supported in this context")),
         }
+    }
+
+    fn merge(&mut self, other: &dyn AggState<'h>) -> JournResult<()> {
+        let b = other.finalize();
+
+        b.as_list().iter().try_fold(&mut self.totals, |mut acc, v| {
+            let amount =
+                v.as_amount().ok_or_else(|| err!("CoSum() can only sum `Amount` types"))?;
+            if !amount.is_nil() {
+                *acc += amount;
+            }
+            Ok::<_, JournError>(acc)
+        })?;
+        Ok(())
     }
 
     fn finalize(&self) -> ColumnValue<'h> {

@@ -167,14 +167,14 @@ pub struct CsvCommand {
     pub datetime_args: DateTimeArguments,
     pub file_filter: Vec<String>,
     pub account_filter: Vec<String>,
-    pub unit_filter: Vec<String>,
+    pub unit_filter: Vec<Vec<String>>,
     pub description_filter: Vec<String>,
     pub group_postings_by: Option<String>,
 }
 
 impl CsvCommand {
     pub fn account_filter(&self) -> impl for<'t> Filter<Account<'t>> + '_ {
-        AccountFilter::new(&self.account_filter)
+        AccountFilter::new(self.account_filter.iter())
     }
 
     pub fn set_account_filter(&mut self, accounts: Vec<String>) {
@@ -182,10 +182,10 @@ impl CsvCommand {
     }
 
     pub fn unit_filter(&self) -> impl for<'t> Filter<Unit<'t>> + '_ {
-        UnitFilter::new(&self.unit_filter)
+        UnitFilter::new(self.unit_filter.iter().flatten())
     }
 
-    pub fn set_unit_filter(&mut self, units: Vec<String>) {
+    pub fn set_unit_filter(&mut self, units: Vec<Vec<String>>) {
         self.unit_filter = units;
     }
 

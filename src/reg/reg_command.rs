@@ -6,8 +6,9 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::ExecCommand;
-use crate::expr::parser::parse_columns;
-use crate::expr::{ColumnValue, Expr};
+use crate::expr::IdentifierContext;
+use crate::expr::parser::{parse_columns, parse_plan};
+use crate::expr::{ColumnValue, Expr, GroupKey, GroupState, PostingContext};
 use journ_core::account::Account;
 use journ_core::arguments::{Arguments, Command};
 use journ_core::configuration::{AccountFilter, DescriptionFilter, FileFilter, Filter, UnitFilter};
@@ -21,6 +22,8 @@ use journ_core::reporting::balance::Balance;
 use journ_core::reporting::table2::{CellRef, StyledCell};
 use journ_core::reporting::term_style::{Style, Weight};
 use journ_core::unit::Unit;
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 
 #[derive(Default, Debug)]
 pub struct RegCommand {
@@ -33,7 +36,7 @@ pub struct RegCommand {
 
 impl RegCommand {
     pub fn account_filter(&self) -> impl for<'t> Filter<Account<'t>> + '_ {
-        AccountFilter::new(&self.account_filter)
+        AccountFilter::new(self.account_filter.iter())
     }
 
     pub fn set_account_filter(&mut self, accounts: Vec<String>) {
@@ -41,7 +44,7 @@ impl RegCommand {
     }
 
     pub fn unit_filter(&self) -> impl for<'t> Filter<Unit<'t>> + '_ {
-        UnitFilter::new(&self.unit_filter)
+        UnitFilter::new(self.unit_filter.iter())
     }
 
     pub fn set_unit_filter(&mut self, units: Vec<String>) {
@@ -67,6 +70,26 @@ impl RegCommand {
     pub fn set_column_spec(&mut self, spec: String) {
         self.column_spec = spec;
     }
+
+    pub fn filtered_postings<'h>(
+        &self,
+        journ: &Journal<'h>,
+    ) -> impl Iterator<Item = (&'h JournalEntry<'h>, &'h Posting<'h>)> {
+        let args = Arguments::get();
+        let description_filter = self.description_filter();
+        let file_filter = self.file_filter();
+        let account_filter = self.account_filter();
+        let unit_filter = self.unit_filter();
+        journ
+            .entry_range(args.begin_end_range())
+            .filter(move |e| description_filter.is_included(e.description()))
+            .filter(move |e| {
+                file_filter.is_included(journ.root().find_by_node_id(e.id().node_id()).unwrap())
+            })
+            .flat_map(|e| e.postings().map(move |p| (e, p)))
+            .filter(move |(_, p)| account_filter.is_included(p.account()))
+            .filter(move |(_, p)| unit_filter.is_included(p.unit()))
+    }
 }
 
 impl Command for RegCommand {}
@@ -78,7 +101,7 @@ impl ExecCommand for RegCommand {
         let config = journ.config();
 
         // Parse the column specification. We need a lower-case version for evaluation.
-        let (column_spec, agg_functions) = parse_columns(&cmd.column_spec)?;
+        let plan = parse_plan(&cmd.column_spec, None)?;
 
         // Get all the accounts to balance for.
         let description_filter = cmd.description_filter();
@@ -104,33 +127,36 @@ impl ExecCommand for RegCommand {
         table.set_color(table.color() && !args.no_color);
         // Heading Row
         let heading_style = Style::default().with_weight(Weight::Bold);
-        let headings = column_spec
+        let headings = plan
+            .column_spec()
             .iter()
             .map(|col| StyledCell::new(col.to_string(), heading_style))
             .collect::<Vec<_>>();
         table.set_heading_row(headings);
 
-        /*
         let mut balance = vec![];
-        for (entry, pst) in filtered_postings() {
-            let mut context = EvalContext::new(&journ, DataContext::Single(entry, pst));
+        for (entry, pst) in self.filtered_postings(&journ) {
+            let mut context = PostingContext::new(journ, entry, pst);
             balance += pst.amount();
-            context.add_variable("balance", ColumnValue::Amount(balance.balance(pst.unit())));
+            context.set_identifier("balance", ColumnValue::Amount(balance.balance(pst.unit())));
             let mut row: Vec<CellRef> = vec![];
-            for (i, col) in column_spec.iter().enumerate() {
+
+            for (i, col) in plan.column_spec().iter().enumerate() {
                 let value = col
                     .eval(&mut context)
                     .map_err(|e| err!("Unable to evaluate column: '{}'", col).with_source(e))?;
 
                 // Allow these columns to expand. Look better.
-                if let Expr::Identifier("description") | Expr::Identifier("account") = &col {
-                    table.expand_column(i);
+                if let Expr::Identifier(s) | Expr::Identifier(s) = &col {
+                    if s.eq_ignore_ascii_case("description") || s.eq_ignore_ascii_case("account") {
+                        table.expand_column(i);
+                    }
                 }
-
-                row.push(value.into());
+                row.push(value.into_cell_ref(false));
             }
             table.push_row(row);
-        }*/
+        }
+
         let mut output = String::new();
         table.print(&mut output).unwrap();
         print!("{output}");

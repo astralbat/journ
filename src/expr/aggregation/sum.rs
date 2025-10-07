@@ -10,7 +10,7 @@ use crate::expr::context::IdentifierContext;
 use crate::expr::{ColumnValue, Expr};
 use journ_core::amount::Amount;
 use journ_core::err;
-use journ_core::error::JournResult;
+use journ_core::error::{JournError, JournResult};
 use smallvec::SmallVec;
 
 #[derive(Debug, PartialEq)]
@@ -29,20 +29,35 @@ impl<'h> Sum<'h> {
 
 impl<'h> AggState<'h> for Sum<'h> {
     fn add(&mut self, context: &mut dyn IdentifierContext<'h>) -> JournResult<()> {
-        match self.expr.eval(context)? {
-            ColumnValue::Amount(amount) => {
-                self.totals += amount;
-            }
-            ColumnValue::List(list) => {
-                for v in list {
-                    if let ColumnValue::Amount(amount) = v {
-                        self.totals += amount;
-                    }
+        self.expr
+            .eval(context)?
+            .as_list()
+            .iter()
+            .try_fold(&mut self.totals, |mut acc, v| {
+                let amount =
+                    v.as_amount().ok_or_else(|| err!("Sum() can only sum `Amount` types"))?;
+                if !amount.is_nil() {
+                    *acc += amount;
                 }
-            }
-            _ => return Err(err!("Function 'sum' requires an `Amount` type argument")),
-        }
-        Ok(())
+                Ok::<_, JournError>(acc)
+            })
+            .map(|_| ())
+    }
+
+    fn merge(&mut self, other: &dyn AggState<'h>) -> JournResult<()> {
+        let b = other.finalize();
+
+        b.as_list()
+            .iter()
+            .try_fold(&mut self.totals, |mut acc, v| {
+                let amount =
+                    v.as_amount().ok_or_else(|| err!("Sum() can only sum `Amount` types"))?;
+                if !amount.is_nil() {
+                    *acc += amount;
+                }
+                Ok::<_, JournError>(acc)
+            })
+            .map(|_| ())
     }
 
     fn finalize(&self) -> ColumnValue<'h> {

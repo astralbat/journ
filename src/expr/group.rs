@@ -81,9 +81,26 @@ impl<'h> GroupState<'h> {
         Ok(GroupState { aggs })
     }
 
+    pub fn aggs(&self) -> &[Box<dyn AggState<'h> + 'h>] {
+        &self.aggs
+    }
+
     pub fn add(&mut self, context: &mut dyn IdentifierContext<'h>) -> JournResult<()> {
         for agg in &mut self.aggs {
             agg.add(context)?;
+        }
+        Ok(())
+    }
+
+    pub fn merge(&mut self, other: &GroupState<'h>) -> JournResult<()> {
+        if self.aggs.len() != other.aggs.len() {
+            return Err(journ_core::err!(
+                "Cannot merge GroupState with different number of aggregations"
+            ));
+        }
+        for (agg_self, agg_other) in self.aggs.iter_mut().zip(other.aggs.iter()) {
+            // Assuming each AggState implementation has a merge method
+            agg_self.merge(agg_other.as_ref())?;
         }
         Ok(())
     }

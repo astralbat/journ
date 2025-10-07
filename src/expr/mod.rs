@@ -15,6 +15,6 @@ pub mod parser;
 mod plan;
 
 pub use column_value::ColumnValue;
-pub use context::{LateContext, PostingContext, TotalContext};
+pub use context::{IdentifierContext, LateContext, PostingContext, TotalContext};
 pub use expr::*;
 pub use group::*;

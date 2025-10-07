@@ -425,11 +425,10 @@ pub fn parse_grouping(input: &str) -> JournResult<Vec<Expr>> {
     }
 }
 
-pub fn parse_plan<'h>(column_spec: &'h str, group_by: &'h str) -> JournResult<Plan<'h>> {
+pub fn parse_plan<'h>(column_spec: &'h str, group_by: Option<&'h str>) -> JournResult<Plan<'h>> {
     let (columns, agg_functions) = parse_columns(column_spec)?;
-    let group_by_expr =
-        if group_by.trim().is_empty() { Vec::new() } else { parse_grouping(group_by)? };
-    let plan = Plan::new(columns, group_by_expr, agg_functions);
+    let group_by_expr = group_by.map(parse_grouping).transpose()?;
+    let plan = Plan::new(columns, group_by_expr.unwrap_or_default(), agg_functions);
     plan.validate()?;
     Ok(plan)
 }

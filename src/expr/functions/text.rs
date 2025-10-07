@@ -29,7 +29,7 @@ pub fn text<'h, 'a, 's>(args: &mut [ColumnValue<'h>]) -> JournResult<ColumnValue
         ColumnValue::Amount(amount) => match args.len() {
             1 => Ok(ColumnValue::String(amount.format())),
             2 => {
-                let format_value = mem::take(&mut args[1]);
+                let format_value = &args[1];
                 let format = format_value.as_str().ok_or_else(|| {
                     err!("Function 'text(amount, format)' requires the format argument to be of type `String`")
                 })?;
@@ -78,6 +78,14 @@ pub fn text<'h, 'a, 's>(args: &mut [ColumnValue<'h>]) -> JournResult<ColumnValue
         ColumnValue::String(s) => Ok(ColumnValue::String(s)),
         ColumnValue::StringRef(s) => Ok(ColumnValue::StringRef(s)),
         ColumnValue::Boolean(b) => Ok(ColumnValue::StringRef(if b { "true" } else { "false" })),
+        ColumnValue::List(l) => Ok(ColumnValue::List(
+            l.into_iter()
+                .map(|v| {
+                    args[0] = v;
+                    text(args)
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        )),
         _ => Err(err!(
             "Function 'text' requires the first argument to be of type `Amount`, `Date`, `Datetime` or `String`: {}",
             value

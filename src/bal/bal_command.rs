@@ -26,8 +26,9 @@ use std::collections::{BTreeMap, HashMap};
 #[derive(Default, Debug)]
 pub struct BalCommand {
     file_filter: Vec<String>,
-    account_filter: Vec<String>,
-    unit_filter: Vec<String>,
+    /// Each inner Vec is a partition
+    account_filter: Vec<Vec<String>>,
+    unit_filter: Vec<Vec<String>>,
     description_filter: Vec<String>,
     write_csv: bool,
     no_header: bool,
@@ -39,18 +40,18 @@ pub struct BalCommand {
 
 impl BalCommand {
     pub fn account_filter<'h>(&self) -> impl Filter<Account<'h>> + Clone {
-        AccountFilter::new(&self.account_filter)
+        AccountFilter::new(self.account_filter.iter().flatten())
     }
 
-    pub fn set_account_filter(&mut self, accounts: Vec<String>) {
+    pub fn set_account_filter(&mut self, accounts: Vec<Vec<String>>) {
         self.account_filter = accounts;
     }
 
     pub fn unit_filter<'h>(&self) -> impl Filter<Unit<'h>> + Clone {
-        UnitFilter::new(&self.unit_filter)
+        UnitFilter::new(self.unit_filter.iter().flatten())
     }
 
-    pub fn set_unit_filter(&mut self, units: Vec<String>) {
+    pub fn set_unit_filter(&mut self, units: Vec<Vec<String>>) {
         self.unit_filter = units;
     }
 
@@ -171,7 +172,7 @@ impl ExecCommand for BalCommand {
         let args = Arguments::get();
 
         let config = journ.config();
-        let plan = parse_plan(self.column_spec(), self.group_by())?;
+        let plan = parse_plan(self.column_spec(), Some(self.group_by()))?;
 
         let mut table = journ_core::reporting::table2::Table::default();
         table.set_color(table.color() && !args.no_color);
@@ -207,55 +208,73 @@ impl ExecCommand for BalCommand {
         }
 
         // Finalize groups and add to table
-        let mut sorted_groups = groups.into_iter().collect::<BTreeMap<_, _>>();
-        for (key, group) in sorted_groups.iter() {
-            let mut context = LateContext::new(journ, key.clone(), group.finalize());
-            let mut row: Vec<CellRef> = vec![];
-            let mut found_non_zero = false;
-            for col in plan.column_spec().iter() {
-                // Get the value from the group key if possible, otherwise evaluate the expression
-                let value = key
-                    .get(col)
-                    .cloned()
-                    .ok_or_else(|| err!("Unable to get group key for column: '{}'", col))
-                    .or_else(|_| {
-                        col.eval(&mut context).map_err(|e| {
-                            err!("Unable to evaluate column: '{}'", col).with_source(e)
-                        })
-                    })?;
+        let partitions = FilterPartitions::new(self, groups)?;
+        let mut partition_count = 0;
+        let mut partition_peek = partitions.into_iter().peekable();
+        while let Some(partition) = partition_peek.next() {
+            let mut partition_rows = 0;
+            let mut partition_total = GroupState::new(&plan)?;
+            for (key, group) in partition {
+                let mut context = LateContext::new(journ, key.clone(), group.finalize());
+                let mut row: Vec<CellRef> = vec![];
+                let mut found_non_zero = false;
+                for col in plan.column_spec().iter() {
+                    // Get the value from the group key if possible, otherwise evaluate the expression
+                    let value = key
+                        .get(col)
+                        .cloned()
+                        .ok_or_else(|| err!("Unable to get group key for column: '{}'", col))
+                        .or_else(|_| {
+                            col.eval(&mut context).map_err(|e| {
+                                err!("Unable to evaluate column: '{}'", col).with_source(e)
+                            })
+                        })?;
 
-                match &value {
-                    ColumnValue::List(list) => {
-                        if list.iter().any(|a| a.as_amount().map(|a| !a.is_zero()).unwrap_or(false))
-                        {
-                            found_non_zero = true;
-                        }
-                    }
-                    ColumnValue::Amount(amount) => {
-                        if !amount.is_zero() {
-                            found_non_zero = true;
-                        }
-                    }
-                    _ => {}
+                    found_non_zero |= value
+                        .as_list()
+                        .iter()
+                        .any(|a| a.as_amount().map(|a| !a.is_zero()).unwrap_or(false));
+                    row.push(value.into_cell_ref(self.show_zeros));
                 }
-                row.push(value.into());
+                if found_non_zero || self.show_zeros {
+                    // Section divider
+                    if partition_count > 0 && partition_rows == 0 {
+                        table.push_separator_row('-', plan.column_spec().len());
+                    }
+                    table.push_row(row);
+                    partition_rows += 1;
+                }
+                partition_total.merge(&group)?;
             }
-            if found_non_zero || self.show_zeros {
-                table.push_row(row);
+            // Partition subtotal row
+            if !self.no_total && partition_rows > 1 {
+                let mut context = TotalContext::new(journ, partition_total.finalize());
+                let mut total_row: Vec<CellRef> = vec![];
+                for col in plan.column_spec().iter() {
+                    let value = col.eval(&mut context).unwrap_or(ColumnValue::StringRef(""));
+
+                    total_row.push(value.into_cell_ref(self.show_zeros));
+                }
+                table.push_separator_row('-', plan.column_spec().len());
+                table.push_row(total_row);
+            }
+            if partition_rows > 0 {
+                partition_count += 1;
             }
         }
 
         // Total row
-        if !self.no_total && table.rows()[1..].len() > 1 {
-            table.push_separator_row('-', plan.column_spec().len());
+        if !self.no_total && partition_count > 1 {
+            table.push_separator_row('=', plan.column_spec().len());
             let mut context = TotalContext::new(journ, total_group.finalize());
             let mut total_row: Vec<CellRef> = vec![];
             for col in plan.column_spec().iter() {
                 let value = col.eval(&mut context).unwrap_or(ColumnValue::StringRef(""));
 
-                total_row.push(value.into());
+                total_row.push(value.into_cell_ref(self.show_zeros));
             }
             table.push_row(total_row);
+            table.push_separator_row('=', plan.column_spec().len());
         }
 
         // Print the table
@@ -271,5 +290,94 @@ impl ExecCommand for BalCommand {
         config.price_databases().into_iter().for_each(|db| db.write_file().unwrap());
 
         Ok(())
+    }
+}
+
+/// A partitioning scheme for filters that have been specified multiple times.
+/// For example, if the user specifies:
+/// --account "Assets:Bank..,Assets:Savings.." --account "Assets:Property.." or
+/// --unit "USD" --unit "EUR"
+/// then we create and iterate over two partitions of the grouped data.
+struct FilterPartitions<'h> {
+    groups: HashMap<GroupKey<'h>, GroupState<'h>>,
+    account_filters: Vec<AccountFilter>,
+    unit_filters: Vec<UnitFilter>,
+}
+impl<'h> FilterPartitions<'h> {
+    pub fn new(
+        cmd: &BalCommand,
+        groups: HashMap<GroupKey<'h>, GroupState<'h>>,
+    ) -> JournResult<Self> {
+        // All filter partitions must have the same number of partitions, or be empty
+        let mut all_filters = vec![cmd.account_filter.clone(), cmd.unit_filter.clone()];
+        let max_len = all_filters.iter().map(Vec::len).max().unwrap_or(0);
+        all_filters.iter_mut().for_each(|f| {
+            if f.len() != max_len {
+                f.push(f.last().cloned().unwrap_or_default());
+            }
+        });
+
+        Ok(Self {
+            groups,
+            account_filters: cmd
+                .account_filter
+                .iter()
+                .rev()
+                .map(|accounts| AccountFilter::new(accounts.iter()))
+                .collect(),
+            unit_filters: cmd
+                .unit_filter
+                .iter()
+                .rev()
+                .map(|units| UnitFilter::new(units.iter()))
+                .collect(),
+        })
+    }
+}
+impl<'h> Iterator for FilterPartitions<'h> {
+    type Item = BTreeMap<GroupKey<'h>, GroupState<'h>>;
+    fn next(&mut self) -> Option<Self::Item> {
+        // If there are no more filters, we are done, though the group may not be empty.
+        if self.account_filters.is_empty() {
+            return None;
+        }
+        let account_filter = self.account_filters.pop().unwrap_or_default();
+        let unit_filter = self.unit_filters.pop().unwrap_or_default();
+
+        let mut partitioned_groups: BTreeMap<GroupKey<'h>, GroupState<'h>> = BTreeMap::new();
+        let mut new_groups = HashMap::new();
+        for (key, state) in self.groups.drain() {
+            let mut include = true;
+
+            // Account filter include
+            include &= key.values().iter().map(|v| &v.1).any(|v| {
+                v.as_list().into_iter().flatten().any(|cv| {
+                    cv.as_account().map(|a| account_filter.is_included(a)).unwrap_or(false)
+                })
+            });
+
+            // Unit filter include
+            let unit_in_key = key.values().iter().map(|v| &v.1).any(|v| {
+                v.as_list()
+                    .into_iter()
+                    .flatten()
+                    .any(|cv| cv.as_unit().map(|u| unit_filter.is_included(u)).unwrap_or(false))
+            });
+            let unit_in_state = state
+                .aggs()
+                .iter()
+                .flat_map(|agg| agg.finalize().into_iter())
+                .any(|cv| cv.as_unit().map(|u| unit_filter.is_included(u)).unwrap_or(false));
+            include &= unit_in_key || unit_in_state;
+
+            if include {
+                partitioned_groups.insert(key, state);
+            } else {
+                new_groups.insert(key, state);
+            }
+        }
+        self.groups = new_groups;
+
+        if partitioned_groups.is_empty() { self.next() } else { Some(partitioned_groups) }
     }
 }

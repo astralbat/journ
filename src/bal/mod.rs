@@ -15,35 +15,18 @@ use journ_core::journal::Journal;
 #[derive(clap::Args, Debug)]
 #[command(name = "bal", about = "Print balances of accounts")]
 pub struct BalArguments {
-    #[arg(
-        value_name = "ACCOUNT_FILTER",
-        help = "Filter accounts by pattern. E.g. Expenses..Food",
-        use_value_delimiter = true
-    )]
+    #[arg(value_name = "ACCOUNT_FILTER", help = "Filter accounts by pattern. E.g. Expenses..Food")]
     account_filter: Vec<String>,
-    #[arg(
-        short = 'u',
-        long = "unit",
-        value_name = "UNIT",
-        help = "Filter by unit expression",
-        use_value_delimiter = true
-    )]
+    #[arg(short = 'u', long = "unit", value_name = "UNIT", help = "Filter by unit expression")]
     unit_filter: Vec<String>,
     #[arg(
         short = 'd',
         long = "description",
         value_name = "DESCRIPTION",
-        help = "Filter by description",
-        use_value_delimiter = true
+        help = "Filter by description"
     )]
     description_filter: Vec<String>,
-    #[arg(
-        short = 'f',
-        long = "file",
-        value_name = "FILE",
-        help = "Filter by file",
-        use_value_delimiter = true
-    )]
+    #[arg(short = 'f', long = "file", value_name = "FILE", help = "Filter by file")]
     file_filter: Vec<String>,
     #[arg(long = "csv", help = "write the output in CSV format")]
     write_csv: bool,
@@ -76,8 +59,18 @@ impl IntoExecCommand for BalArguments {
     type Command = BalCommand;
     fn into_exec_cmd(self, _journ: &Journal) -> JournResult<Self::Command> {
         let mut bal_cmd = BalCommand::default();
-        bal_cmd.set_account_filter(self.account_filter);
-        bal_cmd.set_unit_filter(self.unit_filter);
+        bal_cmd.set_account_filter(
+            self.account_filter
+                .into_iter()
+                .map(|accounts| accounts.split(",").map(String::from).collect())
+                .collect(),
+        );
+        bal_cmd.set_unit_filter(
+            self.unit_filter
+                .into_iter()
+                .map(|units| units.split(",").map(String::from).collect())
+                .collect(),
+        );
         bal_cmd.set_description_filter(self.description_filter);
         bal_cmd.set_file_filter(self.file_filter);
         bal_cmd.set_write_csv(self.write_csv);
