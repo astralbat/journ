@@ -11,9 +11,7 @@
 
 mod bal;
 mod cag;
-mod csv;
 mod expr;
-mod grouping;
 mod print;
 mod reg;
 
@@ -24,7 +22,6 @@ extern crate core;
 
 use crate::bal::BalArguments;
 use crate::cag::CagArguments;
-use crate::csv::CsvArguments;
 use crate::print::PrintArguments;
 use crate::reg::RegArguments;
 use bumpalo_herd::Herd;
@@ -44,9 +41,10 @@ use journ_core::module::MODULES;
 use journ_core::parsing::text_block::TextBlock;
 use journ_core::python::environment::PythonEnvironment;
 use journ_core::{err, parsing};
+use num_format::{SystemLocale, ToFormattedString};
 use std::env;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::exit;
 use std::sync::LazyLock;
 use std::time::SystemTime;
@@ -109,28 +107,27 @@ enum CommandArguments {
     Print(PrintArguments),
     Bal(BalArguments),
     Reg(RegArguments),
-    Csv(CsvArguments),
     Cag(CagArguments),
 }
 
 impl CommandArguments {
-    pub fn exec<'h>(self, journ: &'h mut Journal<'h>) -> JournResult<()> {
-        let args = Arguments::get();
+    pub fn exec<'j, 'h: 'j>(
+        self,
+        journ: &'j mut Journal<'j>,
+        args: &'h Arguments,
+    ) -> JournResult<()> {
         match self {
             CommandArguments::Print(print_args) => {
-                args.set_cmd(print_args.into_exec_cmd(&journ)?).execute(journ)
+                args.set_cmd(print_args.into_exec_cmd(journ)?).execute(journ, args)
             }
             CommandArguments::Bal(bal_args) => {
-                args.set_cmd(bal_args.into_exec_cmd(&journ)?).execute(journ)
+                args.set_cmd(bal_args.into_exec_cmd(journ)?).execute(journ, args)
             }
             CommandArguments::Reg(reg_args) => {
-                args.set_cmd(reg_args.into_exec_cmd(&journ)?).execute(journ)
-            }
-            CommandArguments::Csv(csv_args) => {
-                args.set_cmd(csv_args.into_exec_cmd(&journ)?).execute(journ)
+                args.set_cmd(reg_args.into_exec_cmd(journ)?).execute(journ, args)
             }
             CommandArguments::Cag(cag_args) => {
-                args.set_cmd(cag_args.into_exec_cmd(&journ)?).execute(journ)
+                args.set_cmd(cag_args.into_exec_cmd(journ)?).execute(journ, args)
             }
         }
     }
@@ -144,12 +141,14 @@ pub trait IntoExecCommand {
 }
 
 pub trait ExecCommand: Command {
-    fn execute<'h>(&'h self, journ: &'h mut Journal<'h>) -> JournResult<()>;
+    fn execute<'j, 'h: 'j>(
+        &'h self,
+        journ: &'j mut Journal<'j>,
+        args: &'h Arguments,
+    ) -> JournResult<()>;
 }
 
 fn main() {
-    use num_format::{SystemLocale, ToFormattedString};
-
     // Safe because there are no other threads.
     unsafe {
         env::set_var("RUST_BACKTRACE", "full");
@@ -200,10 +199,6 @@ fn main() {
         main_args.datetime_args.time_format.unwrap_or(&DEFAULT_TIME_FORMAT);
     args.datetime_args.timezone = main_args.datetime_args.timezone.unwrap_or(Tz::UTC);
 
-    let now = SystemTime::now();
-    let herd = Herd::new();
-    let herd_allocator = herd.get().alloc(HerdAllocator::new(&herd));
-
     // The filename must be in utf-8.
     let file_path = PathBuf::from(main_args.file);
     // Set the process working directory to the file's directory.
@@ -241,12 +236,26 @@ fn main() {
     };
     args.set_begin(begin);
     args.set_end(end);
-
-    // Parse the ledger
     let args = Arguments::set(args);
+
+    let herd = Herd::new();
+    let herd_allocator = herd.get().alloc(HerdAllocator::new(&herd));
+    let mut journ = parse(&file_path, herd_allocator);
+    // Execute the command
+    if let Err(e) = main_args.command.exec(&mut journ, args) {
+        print_jerror(e);
+        exit(1)
+    }
+    //herd.reset();
+}
+
+/// Parse the ledger
+fn parse<'h>(file_path: &Path, herd_allocator: &'h HerdAllocator<'h>) -> Journal<'h> {
+    let now = SystemTime::now();
+    let args = Arguments::get();
     let file_name = herd_allocator.alloc(PathBuf::from(file_path.file_name().unwrap()));
     PythonEnvironment::startup();
-    let mut journ = match TextBlock::from_file(file_name.as_path(), herd_allocator, None)
+    match TextBlock::from_file(file_name.as_path(), herd_allocator, None)
         .and_then(|block| Journal::parse(args, file_name.as_path(), block, herd_allocator))
     {
         Ok(journ) => {
@@ -271,12 +280,6 @@ fn main() {
             print_jerror(err);
             exit(1)
         }
-    };
-
-    // Execute the command
-    if let Err(e) = main_args.command.exec(journ.allocator().alloc(journ)) {
-        print_jerror(e);
-        exit(1)
     }
 }
 

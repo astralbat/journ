@@ -134,9 +134,11 @@ impl IntoExecCommand for CagArguments {
 }
 
 impl ExecCommand for CagCommand {
-    fn execute<'h>(&self, journ: &'h mut Journal<'h>) -> JournResult<()> {
-        let args = Arguments::get();
-
+    fn execute<'j, 'h: 'j>(
+        &self,
+        journ: &'j mut Journal<'j>,
+        args: &'h Arguments,
+    ) -> JournResult<()> {
         let mut computer = CapitalGainsComputer::new(args);
         let result = computer.compute_gains(&journ);
 

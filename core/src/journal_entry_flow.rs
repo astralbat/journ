@@ -5,50 +5,120 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
-use crate::account::AccountType;
+use crate::account::{Account, AccountType};
 use crate::amount::Amount;
-use crate::journal_entry::JournalEntry;
 use crate::unit::Unit;
 use crate::valued_amount::ValuedAmount;
 use smallvec::SmallVec;
 use std::fmt;
 use std::fmt::Formatter;
-use std::iter::Sum;
-use std::ops::Add;
+use std::ops::{Add, AddAssign};
+use std::sync::Arc;
 
-pub struct Flows<'h>(Vec<Flow<'h>>);
-impl<'h> Flows<'h> {
-    pub(crate) fn create(je: &JournalEntry<'h>) -> Self {
-        let mut flows: Vec<Flow<'h>> = vec![];
-        for pst in je.postings() {
-            // Create a new flow for the posting without any pretext.
-            let mut va = pst.valued_amount().clone();
-            va.set_pretext("");
-            let new_flow = Flow::new(pst.account().account_type(), va);
-            match flows.iter_mut().find(|f| {
-                f.account_type() == pst.account().account_type() && f.unit() == pst.unit()
-            }) {
-                Some(flow) => *flow = (&*flow + new_flow).unwrap(),
-                None => flows.push(new_flow),
+pub type FlowVec<'h> = SmallVec<[Flow<'h>; 4]>;
+
+pub trait Flows<'h>: IntoIterator<Item = Flow<'h>> {
+    fn is_empty(&self) -> bool;
+
+    fn len(&self) -> usize;
+
+    fn as_slice(&self) -> &[Flow<'h>];
+
+    fn as_mut_slice(&mut self) -> &mut [Flow<'h>];
+
+    fn remove(&mut self, index: usize) -> Flow<'h>;
+
+    fn retain<F>(&mut self, f: F)
+    where
+        F: FnMut(&mut Flow<'h>) -> bool;
+
+    fn truncate(&mut self, n: usize);
+
+    /// Sums all flows
+    ///
+    /// # Panics
+    /// If the flows are not homogenous
+    fn sum(&self) -> Option<Flow<'h>> {
+        let mut iter = self.as_slice().iter();
+        let first = iter.next().cloned();
+        iter.fold(first, |acc, b| acc.map(|a| &a + b))
+    }
+
+    /// Gets all flows which are debits
+    ///
+    /// # Panics
+    /// If the flows are not homogenous
+    fn debits(&self) -> SmallVec<[Flow<'h>; 4]> {
+        self.as_slice().iter().filter(|f| f.is_debit()).cloned().collect()
+    }
+
+    /// Gets all flows which are credits
+    ///
+    /// # Panics
+    /// If the flows are not homogenous
+    fn credits(&self) -> SmallVec<[Flow<'h>; 4]> {
+        self.as_slice().iter().filter(|f| f.is_credit()).cloned().collect()
+    }
+
+    /// Takes as much of the specified `amount` as possible from the flows, splitting the returned value
+    /// in to those flows which have been taken, and those remaining.
+    ///
+    /// The `amount` should be positive to match debits and negative to match credits.
+    fn take_amount(&self, amount: Amount<'h>) -> (FlowVec<'h>, FlowVec<'h>) {
+        let mut taken = FlowVec::new();
+        let mut remainder = FlowVec::new();
+        let mut amount_remaining = amount;
+        let is_debit = amount >= 0;
+
+        for flow in self.as_slice().iter() {
+            if flow.is_debit() == is_debit && amount_remaining != 0 {
+                // Take the whole flow
+                if (flow.is_debit() && flow.amount() <= amount_remaining)
+                    || (flow.is_credit() && flow.amount() >= amount_remaining)
+                {
+                    amount_remaining -= flow.amount();
+                    taken.push(flow.clone());
+                // Take part of the flow
+                } else {
+                    let (f, rem) = flow.split(amount_remaining);
+                    taken.push(f);
+                    remainder.push(rem);
+                }
+            // Don't take the flow
+            } else {
+                remainder.push(flow.clone());
             }
         }
-        // A flow of net 0 isn't a flow.
-        flows.retain(|f| f.net_amount.amount() != 0);
-        Flows(flows)
+        (taken, remainder)
     }
 
-    pub fn assets(&self) -> impl Iterator<Item = &Flow<'h>> {
-        self.0.iter().filter(|f| f.account_type == AccountType::Asset)
+    fn assets<'a>(&'a self) -> impl Iterator<Item = &'a Flow<'h>>
+    where
+        'h: 'a,
+    {
+        self.as_slice().iter().filter(|f| f.account_type() == Some(AccountType::Asset))
     }
 
-    pub fn equity(&self) -> impl Iterator<Item = &Flow<'h>> {
-        self.0.iter().filter(|f| f.account_type == AccountType::Equity)
+    fn equity<'a>(&'a self) -> impl Iterator<Item = &'a Flow<'h>>
+    where
+        'h: 'a,
+    {
+        self.as_slice().iter().filter(|f| f.account_type() == Some(AccountType::Equity))
+    }
+
+    /// Gets whether the number of units is one.
+    fn is_homogenous(&self) -> bool {
+        let unit = self.as_slice().first().map(|f| f.unit());
+        self.as_slice().iter().skip(1).all(|f| Some(f.unit()) == unit)
     }
 
     /// Gets all unique primary units in the flows.
-    pub fn units(&self) -> impl Iterator<Item = &'h Unit<'h>> + '_ {
+    fn units<'a>(&'a self) -> impl Iterator<Item = &'h Unit<'h>> + 'a
+    where
+        'h: 'a,
+    {
         let mut units: SmallVec<[&'h Unit<'h>; 4]> = SmallVec::new();
-        for unit in self.0.iter().map(|f| f.unit()) {
+        for unit in self.as_slice().iter().map(|f| f.unit()) {
             if !units.contains(&unit) {
                 units.push(unit);
             }
@@ -56,36 +126,21 @@ impl<'h> Flows<'h> {
         units.into_iter()
     }
 
-    /// Gets an iterator of the net equity flow in each unit.
-    /// The net equity is the sum of all equity, asset and liability flows in the same unit.
-    ///
-    /// The net equity transfer can thus be considered an acquisition or a disposal, depending on
-    /// whether the net equity flow is positive or negative.
-    pub fn net_equity(&self) -> impl Iterator<Item = Flow<'h>> + '_ {
-        self.units().filter_map(move |unit| {
-            let mut accum = Flow::new(AccountType::Equity, ValuedAmount::nil());
-            for flow in self.0.iter().filter(|f| f.unit() == unit) {
-                match flow.account_type {
-                    AccountType::Equity | AccountType::Asset | AccountType::Liability => {
-                        accum.net_amount = (&accum.net_amount + &flow.net_amount).unwrap();
-                    }
-                    _ => {}
-                }
-            }
-            if !accum.net_amount.is_zero() { Some(accum) } else { None }
-        })
-    }
-
     /// Gets Asset flows, searching for any equity flows in the same unit and adding the amounts.
     /// Otherwise, returning the original asset flow.
     /// Should the added amounts equal 0, they cancel each other out and are omitted. E.g. An asset
     /// transfer from equity (opening balance entry).
-    pub fn assets_plus_equity(&self) -> impl Iterator<Item = Option<ValuedAmount<'h>>> + '_ {
+    fn assets_plus_equity<'a>(&'a self) -> impl Iterator<Item = Option<ValuedAmount<'h>>> + 'a
+    where
+        'h: 'a,
+    {
         self.assets()
             .map(move |af| {
-                self.0
+                self.as_slice()
                     .iter()
-                    .find(|ef| ef.account_type == AccountType::Equity && ef.unit() == af.unit())
+                    .find(|ef| {
+                        ef.account_type() == Some(AccountType::Equity) && ef.unit() == af.unit()
+                    })
                     .map(|ef| &af.net_amount + &ef.net_amount)
                     .unwrap_or(Some(af.net_amount.clone()))
             })
@@ -95,115 +150,141 @@ impl<'h> Flows<'h> {
             })
     }
 
-    pub fn income(&self) -> impl Iterator<Item = &Flow<'h>> {
-        self.0.iter().filter(|f| f.account_type == AccountType::Income)
+    fn income<'a>(&'a self) -> impl Iterator<Item = &'a Flow<'h>>
+    where
+        'h: 'a,
+    {
+        self.as_slice().iter().filter(|f| f.account_type() == Some(AccountType::Income))
     }
 
-    pub fn income_in_unit(&self, unit: &Unit<'h>) -> Option<&Flow<'h>> {
-        self.0.iter().find(|f| f.unit() == unit && f.account_type == AccountType::Income)
+    fn income_in_unit(&self, unit: &Unit<'h>) -> Option<&Flow<'h>> {
+        self.as_slice()
+            .iter()
+            .find(|f| f.unit() == unit && f.account_type() == Some(AccountType::Income))
+    }
+
+    /// Reduce the collection by summing together flows sharing the same account type
+    fn reduce_down_by_account_type(&mut self)
+    where
+        Self: Sized,
+    {
+        reduce_down(self, |a, b| a.account_type() == b.account_type());
     }
 }
 
-/*
-pub trait JournalEntryFlows {
-    fn create(je: &JournalEntry) -> Vec<Flow> {
-        let mut flows: Vec<Flow> = vec![];
-        for pst in je.postings() {
-            let new_flow = Flow::new(pst.account().account_type(), pst.valued_amount().clone());
-            match flows.iter_mut().find(|f| f.account_type() == pst.account().account_type() && f.unit() == pst.unit())
+/// Reduce the flows by summing them together where:
+/// * The two flows share the same unit (as is required by `add`).
+/// * The two flows passed to `reduce_fn` evaluate to `true`.
+fn reduce_down<'h, F, Func>(flows: &mut F, reduce_fn: Func)
+where
+    Func: Fn(&Flow, &Flow) -> bool,
+    F: Flows<'h>,
+{
+    let mut_slice = flows.as_mut_slice();
+    let mut new_len = mut_slice.len();
+    let mut i = 0;
+    while i < new_len {
+        let mut j = i + 1;
+        while j < new_len {
+            if mut_slice[i].unit() == mut_slice[j].unit() && reduce_fn(&mut_slice[i], &mut_slice[j])
             {
-                Some(flow) => *flow += new_flow,
-                None => flows.push(new_flow),
+                mut_slice[i] = &mut_slice[i] + &mut_slice[j];
+                new_len -= 1;
+                mut_slice.swap(j, new_len);
+            } else {
+                j += 1;
             }
         }
-        // A flow of net 0 isn't a flow.
-        flows.retain(|f| f.net_amount.amount() != 0);
-        flows
+        i += 1;
     }
-
-    /// The total of all flows in the specified unit.
-    fn total(&self, curr: &'static Unit) -> Flow;
-
-    /// Gets the flow of net income. This is simply all Income + Expenses.
-    fn net_income(&self, curr: &'static Unit) -> Flow;
-
-    fn assets<P>(&self) -> iter::Filter<Iter<'_, Flow>, P>;
-
-    fn asset_in_currency(&self, curr: &'static Unit) -> Option<&Flow>;
-
-    fn income(&self) -> Vec<&Flow>;
-
-    fn income_in_currency(&self, curr: &'static Unit) -> Option<&Flow>;
-
-    fn asset_acquisitions(&self) -> Vec<&Flow>;
-
-    fn asset_disposals(&self) -> Vec<&Flow>;
+    flows.truncate(new_len);
 }
 
-impl JournalEntryFlows for Vec<Flow> {
-    fn total(&self, curr: &'static Unit) -> Flow {
-        let mut accum = Flow::new(
-            AccountType::None,
-            ValuedAmount::new(AmountExpr::new(curr.with_quantity(0), "", None::<&'static str>)),
-        );
-        for flow in self.iter().filter(|f| f.unit() == curr) {
-            accum += flow.clone();
-        }
-        accum
+impl<'h> Flows<'h> for Vec<Flow<'h>> {
+    fn is_empty(&self) -> bool {
+        self.is_empty()
     }
 
-    /// Gets the flow of net income. This is simply all Income + Expenses.
-    fn net_income(&self, curr: &'static Unit) -> Flow {
-        let mut accum = Flow::new(
-            AccountType::Income,
-            ValuedAmount::new(AmountExpr::new(curr.with_quantity(0), "", None::<&'static str>)),
-        );
-        for flow in self.iter().filter(|f| f.unit() == curr) {
-            if flow.account_type == AccountType::Expense || flow.account_type == AccountType::Income {
-                accum += flow.clone();
-            }
-        }
-        accum
+    fn len(&self) -> usize {
+        self.len()
     }
 
-    fn assets<P>(&self) -> iter::Filter<Iter<'_, Flow>, P> {
-        self.iter().filter(|f: &Flow| f.account_type == AccountType::Asset)
+    fn as_slice(&self) -> &[Flow<'h>] {
+        self.as_slice()
     }
 
-    fn asset_in_currency(&self, curr: &'static Unit) -> Option<&Flow> {
-        self.iter().find(|f| f.unit() == curr && f.account_type == AccountType::Asset)
+    fn as_mut_slice(&mut self) -> &mut [Flow<'h>] {
+        self.as_mut_slice()
     }
 
-    fn income(&self) -> Vec<&Flow> {
-        self.iter().filter(|f| f.account_type == AccountType::Income).collect()
+    fn remove(&mut self, index: usize) -> Flow<'h> {
+        self.remove(index)
     }
 
-    fn income_in_currency(&self, curr: &'static Unit) -> Option<&Flow> {
-        self.iter().find(|f| f.unit() == curr && f.account_type == AccountType::Income)
+    fn retain<F>(&mut self, f: F)
+    where
+        F: FnMut(&mut Flow<'h>) -> bool,
+    {
+        self.retain_mut(f)
     }
 
-    fn asset_acquisitions(&self) -> Vec<&Flow> {
-        self.iter().filter(|f| f.account_type == AccountType::Asset).filter(|f| f.net_amount.amount() > 0).collect()
+    fn truncate(&mut self, n: usize) {
+        self.truncate(n);
+    }
+}
+
+impl<'h> Flows<'h> for SmallVec<[Flow<'h>; 4]> {
+    fn is_empty(&self) -> bool {
+        self.is_empty()
     }
 
-    fn asset_disposals(&self) -> Vec<&Flow> {
-        self.iter().filter(|f| f.account_type == AccountType::Asset).filter(|f| f.net_amount.amount() < 0).collect()
+    fn len(&self) -> usize {
+        self.len()
     }
-}*/
 
+    fn as_slice(&self) -> &[Flow<'h>] {
+        self.as_slice()
+    }
+    fn as_mut_slice(&mut self) -> &mut [Flow<'h>] {
+        self.as_mut_slice()
+    }
+
+    fn remove(&mut self, index: usize) -> Flow<'h> {
+        self.remove(index)
+    }
+
+    fn retain<F>(&mut self, f: F)
+    where
+        F: FnMut(&mut Flow<'h>) -> bool,
+    {
+        self.retain(f)
+    }
+
+    fn truncate(&mut self, n: usize) {
+        self.truncate(n);
+    }
+}
+
+/// A flow is similar to a posting, and indeed, a posting is a kind of flow. However, flows can be
+/// added together if they share the same account type.
 #[derive(Debug, Clone)]
 pub struct Flow<'h> {
-    account_type: AccountType,
+    /// The posting account if derived from a posting, or the common parent for summed flows, if one exists.
+    account_root: Option<Arc<Account<'h>>>,
     net_amount: ValuedAmount<'h>,
 }
 
 impl<'h> Flow<'h> {
-    pub fn new(account_type: AccountType, net_amount: ValuedAmount<'h>) -> Self {
-        Self { account_type, net_amount }
+    pub fn new(account: Option<Arc<Account<'h>>>, net_amount: ValuedAmount<'h>) -> Self {
+        Self { account_root: account, net_amount }
     }
 
-    pub fn account_type(&self) -> AccountType {
-        self.account_type
+    pub fn account_root(&self) -> Option<&Account<'h>> {
+        self.account_root.as_deref()
+    }
+
+    pub fn account_type(&self) -> Option<AccountType> {
+        self.account_root.as_ref()?.account_type()
     }
 
     pub fn unit(&self) -> &'h Unit<'h> {
@@ -231,56 +312,85 @@ impl<'h> Flow<'h> {
     pub fn amount_in(&self, in_curr: &'h Unit<'h>) -> Option<Amount<'h>> {
         self.net_amount.value_in(in_curr)
     }
+
+    pub fn is_debit(&self) -> bool {
+        self.net_amount.amount() > 0
+    }
+
+    pub fn is_credit(&self) -> bool {
+        self.net_amount.amount() < 0
+    }
+
+    /// Splits the flow in two at the given threshold `amount`.
+    ///
+    /// # Panics
+    /// If the amount is considered out of bounds of the flow.
+    pub fn split(&self, amount: Amount<'h>) -> (Self, Self) {
+        assert!(
+            (self.is_debit() && amount >= 0 && amount <= self.amount())
+                || (self.is_credit() && amount <= 0 && amount >= self.amount()),
+            "Split amount is out of bounds"
+        );
+
+        let (left_amount, right_amount) = self.net_amount.clone().split(amount.quantity());
+
+        (
+            Flow::new(self.account_root.clone(), left_amount),
+            Flow::new(self.account_root.clone(), right_amount),
+        )
+    }
 }
 
-impl<'h> Add<Flow<'h>> for &Flow<'h> {
-    type Output = Option<Flow<'h>>;
+impl<'h> Add<&Flow<'h>> for &Flow<'h> {
+    type Output = Flow<'h>;
 
-    fn add(self, rhs: Flow<'h>) -> Self::Output {
-        if self.account_type != rhs.account_type {
-            return None;
+    fn add(self, rhs: &Flow<'h>) -> Self::Output {
+        if self.unit() != rhs.unit() {
+            panic!("Cannot add flows with different units: {:?} + {:?}", self, rhs);
         }
-        let combined = &self.net_amount + &rhs.net_amount;
-        //if combined.is_zero() {
-        //    None
-        //} else {
-        combined.map(|combined| Flow { net_amount: combined, account_type: self.account_type })
-        //}
-    }
-}
-
-impl<'h> Sum<Flow<'h>> for Option<Flow<'h>> {
-    fn sum<I: Iterator<Item = Flow<'h>>>(iter: I) -> Self {
-        let mut accum = None;
-        for flow in iter {
-            match accum {
-                Some(ref mut a) => accum = &*a + flow,
-                None => accum = Some(flow),
-            }
+        let combined =
+            (&self.net_amount + &rhs.net_amount).expect("Both sides have the same primary unit");
+        Flow {
+            net_amount: combined,
+            account_root: self
+                .account_root
+                .as_ref()
+                .and_then(|ar| {
+                    rhs.account_root.as_ref().and_then(|rhs_ar| Account::common_parent(ar, rhs_ar))
+                })
+                .cloned(),
         }
-        accum
     }
 }
 
-/*
-impl AddAssign<Flow> for Flow {
-    fn add_assign(&mut self, rhs: Flow) {
-        assert_eq!(self.account_type, rhs.account_type);
-
-        self.net_amount += &rhs.net_amount;
+impl<'h> AddAssign<&Flow<'h>> for Flow<'h> {
+    fn add_assign(&mut self, rhs: &Flow<'h>) {
+        *self = &*self + rhs;
     }
-}*/
+}
 
-/*
-impl SubAssign<Flow> for Flow {
-    fn sub_assign(&mut self, mut rhs: Flow) {
-        rhs.negate();
-        *self += rhs
+impl<'h> PartialEq for Flow<'h> {
+    fn eq(&self, other: &Self) -> bool {
+        self.net_amount == other.net_amount
     }
-}*/
+}
+
+impl<'h> Eq for Flow<'h> {}
+
+impl<'h> PartialOrd for Flow<'h> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<'h> Ord for Flow<'h> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.net_amount.cmp(&other.net_amount)
+    }
+}
 
 impl fmt::Display for Flow<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?} {}", self.account_type, self.net_amount)
+        write!(f, "{:?} {}", self.account_root, self.net_amount)
     }
 }

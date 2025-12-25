@@ -6,7 +6,7 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::expr::aggregation::AggState;
-use crate::expr::context::{EvalContext, IdentifierContext};
+use crate::expr::context::IdentifierContext;
 use crate::expr::{ColumnValue, Expr};
 use journ_core::amount::Amount;
 use journ_core::err;

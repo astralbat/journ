@@ -8,29 +8,32 @@
 pub mod amount;
 pub mod directive;
 pub mod entry;
+pub mod input;
 pub mod parser;
 pub mod reader;
 pub mod text_block;
-pub mod text_input;
+mod unit_directive;
 pub mod util;
 
 use crate::configuration::Configuration;
-use crate::error::JournError;
 use crate::error::parsing::IParseError;
+use crate::error::{JournError, JournResult};
+use crate::parsing::input::TextBlockInput;
 use crate::parsing::parser::JournalParseNode;
-use nom::Err as NomErr;
+use crate::parsing::text_block::TextBlock;
+use nom::{Err as NomErr, Finish, IResult};
 use nom_locate::LocatedSpan;
 use std::cell::RefCell;
 use std::fmt;
 use std::ops::DerefMut;
+use std::rc::Rc;
 
 /// A note on lifetimes:
 /// * `'h` is the lifetime of the heap allocator.
 /// * `'p` is the lifetime of the parse node.
 /// * `'s` is the lifetime of the thread scope.
 
-pub type StringInput<'h, 'p, 's> =
-    LocatedSpan<&'h str, &'p RefCell<dyn DerefMutAndDebug<'h, 's, Configuration<'h>> + 's>>;
+pub type StringInput<'h, 'p, 's> = LocatedSpan<&'h str, Rc<RefCell<Configuration<'h>>>>;
 pub type TextFileInput<'h, 's, 'e, 'p> = LocatedSpan<&'h str, &'p JournalParseNode<'h, 's, 'e>>;
 
 //pub type IParseResult<'h, I, T> =
@@ -41,66 +44,172 @@ pub type JParseResult<I, O> = Result<(I, O), NomErr<JournError>>;
 /// A trait whose implementors provide both `DerefMut` and `Debug` implementations.
 pub trait DerefMutAndDebug<'h, 's, T>: DerefMut<Target = T> + fmt::Debug + 's {}
 
+fn str_parse<'h, I, O, E, F>(
+    str: I,
+    config: Configuration<'h>,
+    mut func: F,
+) -> JournResult<(I, (O, Configuration<'h>))>
+where
+    E: Into<JournError>,
+    F: FnMut(
+        LocatedSpan<I, RefCell<Configuration<'h>>>,
+    ) -> IResult<LocatedSpan<I, RefCell<Configuration<'h>>>, O, E>,
+{
+    let wrapped_config = RefCell::new(config);
+    let input = LocatedSpan::new_extra(str, wrapped_config);
+    let (rem, out) = func(input).finish().map_err(Into::into)?;
+    let (fragment, extra) = rem.into_fragment_and_extra();
+    Ok((fragment, (out, extra.into_inner())))
+}
+
+fn block_parse<'h, O, E, F>(
+    block: &'h TextBlock<'h>,
+    config: Configuration<'h>,
+    mut func: F,
+) -> JournResult<(&'h str, (O, Configuration<'h>))>
+where
+    E: Into<JournError>,
+    F: FnMut(
+        TextBlockInput<'h, RefCell<Configuration<'h>>>,
+    ) -> IResult<TextBlockInput<'h, RefCell<Configuration<'h>>>, O, E>,
+{
+    let allocator = config.allocator();
+    let wrapped_config = RefCell::new(config);
+    // Should always be safe.
+    let input = unsafe {
+        LocatedSpan::new_from_raw_offset(
+            block.location_offset(),
+            block.line(),
+            block.text(),
+            wrapped_config,
+        )
+    };
+    let block_input = TextBlockInput::new(input, block, allocator);
+
+    let (rem, out) = func(block_input).finish().map_err(Into::into)?;
+    let (fragment, extra) = rem.inner.into_fragment_and_extra();
+    Ok((fragment, (out, extra.into_inner())))
+}
+
+/*
+fn str_parse<'h, O, E, F>(
+    str: &'h str,
+    config: Arc<Configuration<'h>>,
+    mut func: F,
+) -> JournResult<(&'h str, (O, Arc<Configuration<'h>>))>
+where
+    E: Into<JournError>,
+    F: FnMut(
+        LocatedSpan<&'h str, RefCell<Arc<Configuration<'h>>>>,
+    ) -> IResult<LocatedSpan<&'h str, RefCell<Arc<Configuration<'h>>>>, O, E>,
+{
+    let wrapped_config = RefCell::new(config);
+    let input = LocatedSpan::new_extra(str, wrapped_config);
+    let (rem, out) = func(input).finish().map_err(Into::into)?;
+    let (fragment, extra) = rem.into_fragment_and_extra();
+    Ok((fragment, (out, extra.into_inner())))
+}*/
+
 /// Parses a string with the supplied function and a configuration.
 /// A configuration is required unless testing.
 #[macro_export]
 macro_rules! parse {
     ($str:expr, $func:expr, $config:expr) => {{
-        use nom::Finish;
-        use $crate::error::JournError;
-        use $crate::parsing::StringInput;
-        use $crate::parsing::text_input::TextInput;
-
-        let wrapped_config = std::cell::RefCell::new($config);
-        let input = StringInput::new_extra($str, &wrapped_config);
+        use $crate::parsing::OwnedOrMutConfigParseHelper;
+        $config.handle_str($str, $func)
+        /*
+        let cfg = $config;
+        let wrapped_config = std::cell::RefCell::new(cfg);
+        let input = nom_locate::LocatedSpan::new_extra($str, wrapped_config);
         let res: Result<(&str, _), JournError> =
             $func(input).finish().map(|(rem, out)| (rem.text(), out)).map_err(Into::into);
-        // Return the config as well so it can be used for further parsing.
-        (res, wrapped_config.into_inner())
+        res*/
     }};
     ($str:expr, $func:expr) => {{
         use $crate::config;
-        let mut config = config!();
-        parse!($str, $func, &mut config).0
+        let config = config!();
+        parse!($str, $func, config)
     }};
 }
 
+/// `$config` should be a `Arc<Configuration>` type that may get modified as a result of the parser's actions.
 #[macro_export]
 macro_rules! parse_block {
     ($block:expr, $func:expr, $config:expr) => {{
-        use nom::Finish;
-        use $crate::error::JournError;
-        use $crate::parsing::StringInput;
-        use $crate::parsing::text_input::TextInput;
-
-        let wrapped_config = std::cell::RefCell::new($config);
-        let block = $block;
-        // Should always be safe.
-        let input = unsafe {
-            StringInput::new_from_raw_offset(
-                block.location_offset(),
-                block.line(),
-                block.text(),
-                &wrapped_config,
-            )
-        };
-        //let block = $crate::parsing::text_block::TextBlock::from($str);
-        let block_input = $crate::parsing::text_input::TextBlockInput::new(
-            input,
-            &block,
-            wrapped_config.borrow().allocator(),
-        );
-
-        let res: Result<(&str, _), JournError> =
-            $func(block_input).finish().map(|(rem, out)| (rem.text(), out)).map_err(Into::into);
-        // Return the config as well so it can be used for further parsing.
-        (res, wrapped_config.into_inner())
+        use $crate::parsing::OwnedOrMutConfigParseHelper;
+        $config.handle_block($block, $func)
     }};
     ($str:expr, $func:expr) => {{
         use $crate::config;
         let mut config = config!();
-        parse_block!($str, $func, &mut config).0
+        parse_block!($str, $func, config)
     }};
+}
+
+pub trait OwnedOrMutConfigParseHelper<'h> {
+    fn handle_str<F, O, E>(self, str: &'h str, func: F) -> JournResult<(&'h str, O)>
+    where
+        F: FnMut(
+            LocatedSpan<&'h str, RefCell<Configuration<'h>>>,
+        ) -> IResult<LocatedSpan<&'h str, RefCell<Configuration<'h>>>, O, E>,
+        E: Into<JournError>;
+    fn handle_block<F, O, E>(self, block: &'h TextBlock<'h>, func: F) -> JournResult<(&'h str, O)>
+    where
+        F: FnMut(
+            TextBlockInput<'h, RefCell<Configuration<'h>>>,
+        ) -> IResult<TextBlockInput<'h, RefCell<Configuration<'h>>>, O, E>,
+        E: Into<JournError>;
+}
+impl<'h> OwnedOrMutConfigParseHelper<'h> for Configuration<'h> {
+    fn handle_str<F, O, E>(self, str: &'h str, func: F) -> JournResult<(&'h str, O)>
+    where
+        F: FnMut(
+            LocatedSpan<&'h str, RefCell<Configuration<'h>>>,
+        ) -> IResult<LocatedSpan<&'h str, RefCell<Configuration<'h>>>, O, E>,
+        E: Into<JournError>,
+    {
+        let (rem, (out, _config)) = str_parse(str, self, func)?;
+        Ok((rem, out))
+    }
+
+    fn handle_block<F, O, E>(self, block: &'h TextBlock<'h>, func: F) -> JournResult<(&'h str, O)>
+    where
+        F: FnMut(
+            TextBlockInput<'h, RefCell<Configuration<'h>>>,
+        ) -> IResult<TextBlockInput<'h, RefCell<Configuration<'h>>>, O, E>,
+        E: Into<JournError>,
+    {
+        let (rem, (out, _config)) = block_parse(block, self, func)?;
+        Ok((rem, out))
+    }
+}
+
+impl<'h> OwnedOrMutConfigParseHelper<'h> for &mut Configuration<'h> {
+    fn handle_str<F, O, E>(self, str: &'h str, func: F) -> JournResult<(&'h str, O)>
+    where
+        F: FnMut(
+            LocatedSpan<&'h str, RefCell<Configuration<'h>>>,
+        ) -> IResult<LocatedSpan<&'h str, RefCell<Configuration<'h>>>, O, E>,
+        E: Into<JournError>,
+    {
+        let config = self.clone();
+        let (rem, (out, config)) = str_parse(str, config, func)?;
+        *self = config;
+        Ok((rem, out))
+    }
+
+    fn handle_block<F, O, E>(self, block: &'h TextBlock<'h>, func: F) -> JournResult<(&'h str, O)>
+    where
+        F: FnMut(
+            TextBlockInput<'h, RefCell<Configuration<'h>>>,
+        ) -> IResult<TextBlockInput<'h, RefCell<Configuration<'h>>>, O, E>,
+        E: Into<JournError>,
+    {
+        let config = self.clone();
+        let (rem, (out, config)) = block_parse(block, config, func)?;
+        *self = config;
+        Ok((rem, out))
+    }
 }
 
 /// Matches a parser and applied the handler.

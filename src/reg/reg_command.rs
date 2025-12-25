@@ -7,8 +7,8 @@
  */
 use crate::ExecCommand;
 use crate::expr::IdentifierContext;
-use crate::expr::parser::{parse_columns, parse_plan};
-use crate::expr::{ColumnValue, Expr, GroupKey, GroupState, PostingContext};
+use crate::expr::parser::parse_plan;
+use crate::expr::{ColumnValue, Expr, PostingContext};
 use journ_core::account::Account;
 use journ_core::arguments::{Arguments, Command};
 use journ_core::configuration::{AccountFilter, DescriptionFilter, FileFilter, Filter, UnitFilter};
@@ -22,8 +22,6 @@ use journ_core::reporting::balance::Balance;
 use journ_core::reporting::table2::{CellRef, StyledCell};
 use journ_core::reporting::term_style::{Style, Weight};
 use journ_core::unit::Unit;
-use std::collections::HashMap;
-use std::collections::hash_map::Entry;
 
 #[derive(Default, Debug)]
 pub struct RegCommand {
@@ -95,33 +93,16 @@ impl RegCommand {
 impl Command for RegCommand {}
 
 impl ExecCommand for RegCommand {
-    fn execute<'h>(&self, journ: &'h mut Journal<'h>) -> JournResult<()> {
-        let args = Arguments::get();
+    fn execute<'j, 'h: 'j>(
+        &self,
+        journ: &'j mut Journal<'j>,
+        args: &'h Arguments,
+    ) -> JournResult<()> {
         let cmd: &RegCommand = args.cast_cmd().unwrap();
         let config = journ.config();
 
         // Parse the column specification. We need a lower-case version for evaluation.
         let plan = parse_plan(&cmd.column_spec, None)?;
-
-        // Get all the accounts to balance for.
-        let description_filter = cmd.description_filter();
-        let file_filter = cmd.file_filter();
-        let account_filter = cmd.account_filter();
-        let unit_filter = cmd.unit_filter();
-        let filtered_postings = Box::new(|| {
-            Box::new(
-                journ
-                    .entry_range(args.begin_end_range())
-                    .filter(|e| description_filter.is_included(e.description()))
-                    .filter(|e| {
-                        file_filter
-                            .is_included(journ.root().find_by_node_id(e.id().node_id()).unwrap())
-                    })
-                    .flat_map(|e| e.postings().map(move |p| (e, p)))
-                    .filter(|(_, p)| account_filter.is_included(p.account()))
-                    .filter(|(_, p)| unit_filter.is_included(p.unit())),
-            ) as Box<dyn Iterator<Item = (&'h JournalEntry, &'h Posting<'h>)>>
-        });
 
         let mut table = journ_core::reporting::table2::Table::default();
         table.set_color(table.color() && !args.no_color);
@@ -147,7 +128,7 @@ impl ExecCommand for RegCommand {
                     .map_err(|e| err!("Unable to evaluate column: '{}'", col).with_source(e))?;
 
                 // Allow these columns to expand. Look better.
-                if let Expr::Identifier(s) | Expr::Identifier(s) = &col {
+                if let Expr::Identifier(s) = &col {
                     if s.eq_ignore_ascii_case("description") || s.eq_ignore_ascii_case("account") {
                         table.expand_column(i);
                     }

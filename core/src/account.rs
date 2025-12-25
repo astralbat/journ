@@ -11,6 +11,8 @@ use crate::reporting::table2::{
     Cell, CellWidth, ColumnWidth, PolicyWrappingCell, StyledCell, WrapEase, WrapPolicy,
 };
 use crate::reporting::term_style::{Colour, Style};
+use crate::unit::Unit;
+use smallvec::{SmallVec, smallvec};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::{cmp, fmt};
@@ -22,17 +24,17 @@ pub enum AccountType {
     Income,
     Expense,
     Equity,
-    /// All other accounts
-    None,
 }
 
-#[derive(Debug, Eq)]
+#[derive(Debug, Clone, Eq)]
 pub struct Account<'h> {
     /// The full name of the account, including any parents
     name: String,
     /// The parent account will never be virtual
     parent: Option<Arc<Account<'h>>>,
     metadata: Vec<Metadata<'h>>,
+    /// Unit definitions for parsed primary amounts on this account
+    units: Vec<&'h Unit<'h>>,
 }
 
 impl<'h> Account<'h> {
@@ -40,8 +42,22 @@ impl<'h> Account<'h> {
         name: String,
         parent: Option<Arc<Account<'h>>>,
         metadata: Vec<Metadata<'h>>,
+        units: Vec<&'h Unit<'h>>,
     ) -> Account<'h> {
-        Account { name, parent, metadata }
+        Account { name, parent, metadata, units }
+    }
+
+    pub fn units(&self) -> &Vec<&'h Unit<'h>> {
+        &self.units
+    }
+
+    pub fn push_unit(&mut self, unit: &'h Unit<'h>) {
+        self.units.push(unit);
+    }
+
+    /// Finds a unit by its alias.
+    pub fn unit(&self, alias: &str) -> Option<&'h Unit<'h>> {
+        self.units.iter().copied().find(|u| u.aliases().any(|a| a == alias))
     }
 
     /// Gets the parent name of the account specified.
@@ -84,19 +100,19 @@ impl<'h> Account<'h> {
         self.parent.as_ref()
     }
 
-    pub fn account_type(&self) -> AccountType {
+    pub fn account_type(&self) -> Option<AccountType> {
         if self.is_asset() {
-            AccountType::Asset
+            Some(AccountType::Asset)
         } else if self.is_liability() {
-            AccountType::Liability
+            Some(AccountType::Liability)
         } else if self.is_income() {
-            AccountType::Income
+            Some(AccountType::Income)
         } else if self.is_expense() {
-            AccountType::Expense
+            Some(AccountType::Expense)
         } else if self.is_equity() {
-            AccountType::Equity
+            Some(AccountType::Equity)
         } else {
-            AccountType::None
+            None
         }
     }
 
@@ -145,28 +161,76 @@ impl<'h> Account<'h> {
         self.name.starts_with('[') && self.name.ends_with(']')
     }
 
-    pub fn metadata(&self) -> &Vec<Metadata<'h>> {
+    pub fn lazy_metadata(&self) -> &Vec<Metadata<'h>> {
         &self.metadata
     }
 
-    /// Gets whether this account or a parent has the specified metadata key.
-    pub fn has_tag(&self, tag: &'static str) -> bool {
-        if let Some(parent) = &self.parent {
-            if parent.has_tag(tag) {
-                return true;
-            }
-        }
-        self.metadata.iter().any(|m| m.key() == tag)
+    pub fn metadata(&self) -> impl Iterator<Item = &Metadata<'h>> {
+        self.metadata.iter() //.map(|m| m.get_or_init())
     }
 
-    /// Gets the most specific tag that this account or a parent has from a set of `tags`.
-    pub fn get_best_tag(&self, tags: &[&'static str]) -> Option<&'static str> {
-        for tag in tags {
-            if self.metadata.iter().any(|m| m.key() == *tag) {
-                return Some(tag);
+    /// Gets whether this account or a parent has the specified metadata key.
+    pub fn has_metadata_key<K: AsRef<str>>(&self, key: &K) -> bool {
+        if let Some(parent) = &self.parent
+            && parent.has_metadata_key(key)
+        {
+            return true;
+        }
+        self.metadata.iter().any(|m| m.key() == key.as_ref())
+    }
+
+    /// Gets the metadata for a _single_ key from a set of possible `keys`. First searches this account for
+    /// all `keys` before searching the parent account in the same way recursively.
+    pub fn metadata_by_keys<K>(&self, keys: &[&K]) -> SmallVec<[&Metadata<'h>; 4]>
+    where
+        K: AsRef<str>,
+    {
+        for key in keys {
+            let md_key = key.as_ref();
+            if self.metadata.iter().filter(|m| m.key() == md_key).count() > 0 {
+                return self
+                    .metadata
+                    .iter()
+                    .filter(|m| m.key() == md_key)
+                    //.map(|m| m.get_or_init())
+                    .collect();
             }
         }
-        if let Some(parent) = &self.parent { parent.get_best_tag(tags) } else { None }
+        if let Some(parent) = &self.parent {
+            return parent.metadata_by_keys(keys);
+        }
+        smallvec![]
+    }
+
+    /// Searches for all metadata for this account matching the specified `key`, and if not found,
+    /// proceeding to search the parent.
+    pub fn metadata_by_key(&self, key: &str) -> SmallVec<[&Metadata<'h>; 4]> {
+        if self.metadata.iter().filter(|m| m.key() == key).count() > 0 {
+            return self
+                .metadata
+                .iter()
+                .filter(|m| m.key() == key)
+                //.map(|m| m.get_or_init())
+                .collect();
+        }
+        if let Some(parent) = &self.parent {
+            return parent.metadata_by_key(key);
+        }
+        smallvec![]
+    }
+
+    /// Gets the longest account that `self` and `other` share.
+    pub fn common_parent<'a>(
+        left: &'a Arc<Account<'h>>,
+        right: &'a Arc<Account<'h>>,
+    ) -> Option<&'a Arc<Account<'h>>> {
+        if left.name == right.name {
+            Some(left)
+        } else if left.name.len() > right.name.len() {
+            left.parent.as_ref().and_then(|parent| Account::common_parent(parent, right))
+        } else {
+            right.parent.as_ref().and_then(|parent| Account::common_parent(parent, left))
+        }
     }
 }
 
@@ -206,7 +270,7 @@ where
 {
     fn from(s: S) -> Account<'t> {
         let parent = Account::parent_str(s.as_ref()).map(|s| Arc::new(Account::from(s)));
-        Account::new(s.as_ref().to_string(), parent, vec![])
+        Account::new(s.as_ref().to_string(), parent, vec![], vec![])
     }
 }
 

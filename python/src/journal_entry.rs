@@ -12,8 +12,6 @@ use journ_core::journal::Journal as CoreJournal;
 use journ_core::journal_entry::EntryObject;
 use journ_core::journal_entry::JournalEntry as CoreJournalEntry;
 use journ_core::journal_node::NodeId;
-use journ_core::metadata::Metadata;
-use journ_core::parsing::text_block::TextBlock;
 use journ_core::python::conversion::DateTimeWrapper;
 use journ_core::valued_amount::ValuedAmount;
 use journ_core::{err, parse, parsing};
@@ -60,10 +58,7 @@ impl JournalEntry {
 
     fn postings(&self) -> PyLedgerResult<Vec<Posting>> {
         let entry = self.entry.lock().unwrap();
-        Ok(entry
-            .postings()
-            .map(|pst| Posting::new(Arc::clone(&self.journal), Arc::clone(&self.entry), pst.id()))
-            .collect())
+        Ok(entry.postings().map(|pst| Posting::new(Arc::clone(&self.entry), pst.id())).collect())
     }
 
     fn append_posting(&self, account: &str, amount: Option<&str>) -> PyLedgerResult<Posting> {
@@ -75,7 +70,6 @@ impl JournalEntry {
                 let alloc_amount = crate::bindings_pyo3::ALLOCATOR.alloc(amount.to_string());
                 Some(
                     parse!(alloc_amount, parsing::amount::amount, &mut config)
-                        .0
                         .map(|r| r.1)
                         .map_err(|e| err!(e; "append_posting()"))?,
                 )
@@ -98,20 +92,16 @@ impl JournalEntry {
             None,
         );
         let posting_id = entry.append_posting(pst).id();
-        Ok(Posting::new(Arc::clone(&self.journal), Arc::clone(&self.entry), posting_id))
+        Ok(Posting::new(Arc::clone(&self.entry), posting_id))
     }
 
+    /*
     fn append_metadata(&self, key: &str, value: &str) -> PyLedgerResult<()> {
         let mut entry = self.entry.lock().unwrap();
-        let block_str = crate::bindings_pyo3::ALLOCATOR.alloc(if entry.objects().is_empty() {
-            format!("  +{}  {}", key, value)
-        } else {
-            format!("\n  +{}  {}", key, value)
-        });
-        let block = crate::bindings_pyo3::ALLOCATOR.alloc(TextBlock::from(block_str.as_str()));
-        entry.append_object(EntryObject::Metadata(Metadata::from(&*block)));
+        let config = entry.config().clone();
+        entry.append_object(EntryObject::Metadata(Metadata::new(config, key, Some(value))));
         Ok(())
-    }
+    }*/
 
     fn append_comment(&self, comment: &str) -> PyLedgerResult<()> {
         let mut entry = self.entry.lock().unwrap();

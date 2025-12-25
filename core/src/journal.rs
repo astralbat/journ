@@ -6,36 +6,30 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::alloc::HerdAllocator;
-use crate::arguments::{Arguments, CsvCommand};
+use crate::arguments::Arguments;
 use crate::configuration::Configuration;
-use crate::configuration::Filter;
 use crate::directive::DirectiveKind;
 use crate::err;
 use crate::error::{BlockContext, BlockContextError, JournErrors, JournResult};
-use crate::journal_entry::{EntryId, JournalEntry};
+use crate::journal_entry::{EntryDateId, EntryId, JournalEntry};
 use crate::journal_node::{JournalNode, JournalNodeKind, NodeId};
+use crate::parsing::input::TextBlockInput;
 use crate::parsing::parser::JournalParseNode;
 use crate::parsing::text_block::TextBlock;
-use crate::parsing::text_input::TextBlockInput;
-use crate::posting::Posting;
-use crate::postings_aggregation::{AggregatedPosting, PostingsAggregation};
 use crate::python::mod_ledger::PythonLedgerModule;
-use crate::reporting::balance::{AccountBalances, Balance};
-use crate::unit::NumberFormat;
+use crate::reporting::balance::AccountBalances;
 use chrono::DateTime;
 use chrono_tz::Tz;
 use nom_locate::LocatedSpan;
 use normalize_path::NormalizePath;
 use std::collections::BTreeMap;
-use std::io::Write;
 use std::ops::RangeBounds;
 use std::path::Path;
-use std::{io, thread};
+use std::thread;
 
 pub struct Journal<'h> {
     root: &'h JournalNode<'h>,
-    entries:
-        BTreeMap<u64, (Option<&'h TextBlock<'h>>, &'h JournalEntry<'h>), &'h HerdAllocator<'h>>,
+    entries: BTreeMap<EntryDateId<'h>, (Option<&'h TextBlock<'h>>, &'h JournalEntry<'h>)>,
     combined_config: &'h Configuration<'h>,
 }
 
@@ -86,14 +80,13 @@ impl<'h> Journal<'h> {
         // The price databases are set here rather than during parsing to ensure a deterministic order
         // without a race condition.
         let mut entries: BTreeMap<
-            u64,
+            EntryDateId<'h>,
             (Option<&'h TextBlock<'h>>, &'h JournalEntry<'h>),
-            &'h HerdAllocator<'h>,
-        > = BTreeMap::new_in(allocator);
+        > = BTreeMap::new();
         for dir in root.all_directives_iter() {
             match dir.kind() {
                 DirectiveKind::Entry(e) => {
-                    entries.insert(e.date_id(), (dir.parsed(), e));
+                    entries.insert(EntryDateId::from(*e), (dir.parsed(), e));
                 }
                 DirectiveKind::Unit(unit) => {
                     if let Some(db) = unit.prices() {
@@ -175,11 +168,11 @@ impl<'h> Journal<'h> {
     pub fn entry_range<'a, R>(
         &'a self,
         range: R,
-    ) -> impl DoubleEndedIterator<Item = &'h JournalEntry<'h>> + 'a
+    ) -> impl DoubleEndedIterator<Item = &'h JournalEntry<'h>> + Clone + 'a
     where
         R: RangeBounds<DateTime<Tz>>,
     {
-        let range = EntryId::id_range(range);
+        let range = EntryDateId::date_range(range);
         self.entries.range(range).map(|e| e.1.1)
     }
 
@@ -210,7 +203,7 @@ impl<'h> Journal<'h> {
         self.node(entry_id.node_id()).entry(entry_id)
     }
 
-    pub fn entry_by_date_id(&self, date_id: u64) -> Option<&'h JournalEntry<'h>> {
+    pub fn entry_by_date_id(&self, date_id: EntryDateId<'h>) -> Option<&'h JournalEntry<'h>> {
         self.entries.get(&date_id).map(|e| e.1)
     }
 
@@ -252,7 +245,7 @@ impl<'h> Journal<'h> {
     ) -> JournResult<Vec<&'h JournalEntry<'h>>> {
         for entry in entries.iter_mut() {
             entry.check().map_err(|e| {
-                err!(e; BlockContextError::new(BlockContext::from(&TextBlock::from(entry.to_string().as_str())), "Entry check failed".to_string()))
+                err!(e; BlockContextError::new(BlockContext::from(&TextBlock::from(entry.to_string().as_str())), "Entry check failed"))
             })?;
         }
 
@@ -263,7 +256,7 @@ impl<'h> Journal<'h> {
             let (old_entry, new_entry) =
                 self.node(entry.id().node_id()).replace_entry(entry, allocator);
             // Make sure the old one is removed in case the date id has changed.
-            self.entries.remove(&old_entry.date_id());
+            self.entries.remove(&EntryDateId::from(old_entry));
             new_entry_parts.push(new_entry);
         }
 
@@ -274,8 +267,8 @@ impl<'h> Journal<'h> {
     /// Adds entries to the `entries` map and checks the balance assertions. If the balance assertions
     /// check fails, all entries are removed to restore the state as it was before the call.
     fn add_entries(&mut self, entries: &[&'h JournalEntry<'h>]) -> JournResult<()> {
-        for entry in entries.iter() {
-            self.entries.insert(entry.date_id(), (None, entry));
+        for entry in entries.into_iter().copied() {
+            self.entries.insert(entry.into(), (None, entry));
         }
 
         // Perform this check after the entry has been inserted into the file. If the result is erroneous,
@@ -283,9 +276,8 @@ impl<'h> Journal<'h> {
         let r = self.check_balance_assertions();
 
         if let Err(e) = r {
-            for entry in entries.iter() {
-                let date_id = entry.date_id();
-                self.entries.remove(&date_id);
+            for entry in entries.into_iter().copied() {
+                self.entries.remove(&entry.into());
             }
             Err(e)
         } else {
@@ -320,67 +312,5 @@ impl<'h> Journal<'h> {
         self.nodes_recursive().into_iter().find(|f| {
             f.canonical_filename().map(|f| f.ends_with(search.normalize())).unwrap_or(false)
         })
-    }
-
-    pub fn csv(&mut self, args: &'static Arguments) -> JournResult<()> {
-        let cmd: &CsvCommand = args.cast_cmd().unwrap();
-        let mut bals = vec![];
-        let mut pa = PostingsAggregation::new(cmd.group_postings_by());
-        let mut out = io::stdout();
-
-        writeln!(
-            io::stdout(),
-            "\"DateTime From\",\"DateTime To\",\"Description\",\"Account\",\"Currency\",\"Amount\",\"Balance\""
-        )
-            .map_err(|e| err!(e; "IO Error"))?;
-
-        let desc_filter = cmd.description_filter();
-        let unit_filter = cmd.unit_filter();
-        let file_filter = cmd.file_filter();
-        for entry in self.entry_range(args.begin_end_range()) {
-            if !desc_filter.is_included(entry.description()) {
-                continue;
-            }
-            if !file_filter.is_included(self.root.find_by_node_id(entry.id().node_id()).unwrap()) {
-                continue;
-            }
-            let iter: Box<dyn Iterator<Item = &Posting<'h>>> = if Arguments::get().real_postings() {
-                Box::new(entry.real_postings())
-            } else {
-                Box::new(entry.postings())
-            };
-            for pst in iter {
-                if !cmd.account_filter().is_included(pst.account()) {
-                    continue;
-                }
-                if !unit_filter.is_included(pst.unit()) {
-                    continue;
-                }
-                bals += pst.amount();
-
-                let ap =
-                    AggregatedPosting::from_entry_and_posting(entry, pst, bals.balance(pst.unit()));
-                pa += ap;
-            }
-        }
-        for ap in pa.postings().iter() {
-            //let dt_range = ap.datetime().utc_range();
-            writeln!(
-                out,
-                "\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\"",
-                ap.datetime().convert_datetime_range(&cmd.datetime_args),
-                //dt_range.start.date().format(cmd.datetime_args.date_format.format_str()),
-                //dt_range.start.time().format(cmd.datetime_args.time_format.format_str()),
-                //dt_range.end.date().format(cmd.datetime_args.date_format.format_str()),
-                //dt_range.end.time().format(cmd.datetime_args.time_format.format_str()),
-                ap.descriptions().join("; "),
-                ap.account(),
-                ap.amount().unit(),
-                NumberFormat::to_non_scientific(&mut ap.amount().quantity().to_string()),
-                NumberFormat::to_non_scientific(&mut ap.balance().quantity().to_string())
-            )
-            .map_err(|e| err!(e; "IO Error"))?;
-        }
-        Ok(())
     }
 }

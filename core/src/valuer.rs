@@ -10,7 +10,7 @@ use crate::configuration::Configuration;
 use crate::date_and_time::JDateTime;
 use crate::error::{JournError, JournResult};
 use crate::journal_entry::JournalEntry;
-use crate::parsing;
+use crate::metadata::Metadata;
 use crate::price::Price;
 use crate::price_db::PriceDatabase;
 use crate::python::conversion::{DateTimeWrapper, DeferredArg};
@@ -18,45 +18,155 @@ use crate::python::environment::PythonEnvironment;
 use crate::python::lambda::Lambda;
 use crate::python::mod_ledger::PyPrice;
 use crate::unit::Unit;
-use crate::valued_amount::Valuation;
 use crate::{err, parse};
+use crate::{parsing, valued_amount};
 use itertools::Itertools;
 use nalgebra::{DMatrix, DVector};
 use pyo3::{PyObject, Python};
 use rust_decimal::Decimal;
-use rust_decimal::prelude::One;
 use smallvec::{SmallVec, smallvec};
+use smartstring::alias::String as SS;
 use std::borrow::Cow;
 use std::collections::{HashSet, VecDeque};
 use std::convert::{Infallible, TryFrom};
-use std::iter;
-use std::ops::{ControlFlow, FromResidual, Range, Try};
+use std::ops::{ControlFlow, Deref, FromResidual, Range, Try};
 use std::sync::Arc;
+use std::{fmt, iter};
+
+#[derive(Debug)]
+pub struct Valuation<'h> {
+    /// The valuation
+    amount: Amount<'h>,
+    /// The sources of the valuation
+    sources: SmallVec<[SS; 2]>,
+}
+impl<'h> Valuation<'h> {
+    pub fn new(amount: Amount<'h>) -> Self {
+        Self { amount, sources: smallvec![] }
+    }
+
+    pub fn value(&self) -> Amount<'h> {
+        self.amount
+    }
+
+    pub fn rounded(&mut self) {
+        self.amount = self.amount.rounded();
+    }
+
+    pub fn with_value(&self, amount: Amount<'h>) -> Self {
+        Self { amount, sources: self.sources.clone() }
+    }
+
+    pub fn clear_sources(&mut self) {
+        self.sources.clear();
+    }
+
+    pub fn sources(&self) -> &[SS] {
+        &self.sources
+    }
+
+    pub fn into_sources(self) -> SmallVec<[SS; 2]> {
+        self.sources
+    }
+
+    pub fn add_source<S: Into<SS>>(&mut self, source: S) {
+        self.sources.push(source.into());
+    }
+}
+impl<'h> Deref for Valuation<'h> {
+    type Target = Amount<'h>;
+    fn deref(&self) -> &Self::Target {
+        &self.amount
+    }
+}
+
+#[derive(Debug)]
+pub enum ValuationError {
+    /// Price could not be found with this valuer at this time with reason provided.
+    Undetermined(JournError),
+    /// An error occurred during evaluation of the valuer
+    EvalFailure(JournError),
+}
+impl std::error::Error for ValuationError {}
+impl fmt::Display for ValuationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ValuationError::Undetermined(reason) => write!(f, "{}", reason),
+            ValuationError::EvalFailure(e) => write!(f, "{}", e),
+        }
+    }
+}
+impl From<ValuationError> for JournError {
+    fn from(e: ValuationError) -> Self {
+        match e {
+            ValuationError::Undetermined(reason) => err!("{}", reason),
+            ValuationError::EvalFailure(e) => e,
+        }
+    }
+}
+
+pub type ValuationResult<'h> = Result<Valuation<'h>, ValuationError>;
+
+pub struct OrValuer<'h, V1, V2>
+where
+    V1: Valuer<'h>,
+    V2: Valuer<'h>,
+{
+    first: V1,
+    second: V2,
+    _marker: std::marker::PhantomData<&'h ()>,
+}
+impl<'h, V1, V2> OrValuer<'h, V1, V2>
+where
+    V1: Valuer<'h>,
+    V2: Valuer<'h>,
+{
+    pub fn new(first: V1, second: V2) -> Self {
+        Self { first, second, _marker: std::marker::PhantomData }
+    }
+}
+impl<'h, V1, V2> Valuer<'h> for OrValuer<'h, V1, V2>
+where
+    V1: Valuer<'h>,
+    V2: Valuer<'h>,
+{
+    fn value(&mut self, quote_unit: &'h Unit<'h>, amount: Amount<'h>) -> ValuationResult<'h> {
+        match self.first.value(quote_unit, amount) {
+            Ok(v) => Ok(v),
+            Err(ValuationError::Undetermined(_)) => self.second.value(quote_unit, amount),
+            Err(e) => Err(e),
+        }
+    }
+}
 
 /// A trait for valuing amounts in different units.
 pub trait Valuer<'h> {
     /// Values the specified `amount` in the `quote_unit`.
     ///
-    /// Returns `Ok(Some(valued_amount))` if the value could be determined, `Ok(None)` if the value could not be determined,
-    /// and `Err(e)` if an error occurred while determining the value.
+    /// Returns `Ok(Valuation)` if the operation succeeded, with the inner `Amount` being `Some` if the valuation lookup was successful,
+    /// and `None` if the value could not be determined.
+    /// An `Err(e)` is returned if a non-system error occurred while determining the value (user error).
     ///
     /// Returned values should never be rounded. It is the responsibility of the caller to round the value if necessary.
     ///
-    /// It is allowed for the function to return an `Amount` in a unit other than the `quote_unit`, but implementors should
+    /// It is allowed for the function to return a `Valuation` in a unit other than the `quote_unit`, but implementors should
     /// note this behaviour up front.
-    fn value(
-        &mut self,
-        amount: Amount<'h>,
-        quote_unit: &'h Unit<'h>,
-    ) -> JournResult<Option<Amount<'h>>>;
+    fn value(&mut self, quote_unit: &'h Unit<'h>, amount: Amount<'h>) -> ValuationResult<'h>;
+
+    fn or(self, other: impl Valuer<'h>) -> OrValuer<'h, Self, impl Valuer<'h>>
+    where
+        Self: Sized,
+    {
+        OrValuer::new(self, other)
+    }
 }
 
 impl<'h, F> Valuer<'h> for F
 where
-    F: FnMut(Amount<'h>, &'h Unit<'h>) -> JournResult<Option<Amount<'h>>>,
+    F: FnMut(&'h Unit<'h>, Amount<'h>) -> ValuationResult<'h>,
 {
-    fn value(&mut self, amount: Amount<'h>, unit: &'h Unit<'h>) -> JournResult<Option<Amount<'h>>> {
-        self(amount, unit)
+    fn value(&mut self, unit: &'h Unit<'h>, amount: Amount<'h>) -> ValuationResult<'h> {
+        self(unit, amount)
     }
 }
 
@@ -79,31 +189,42 @@ impl<'h, 'e> From<&'e JournalEntry<'h>> for EntryValuer<'h, 'e> {
 }
 
 impl<'h> Valuer<'h> for EntryValuer<'h, '_> {
-    fn value(
-        &mut self,
-        amount: Amount<'h>,
-        quote_unit: &'h Unit<'h>,
-    ) -> JournResult<Option<Amount<'h>>> {
-        // Look for a direct unit valuation
+    fn value(&mut self, quote_unit: &'h Unit<'h>, amount: Amount<'h>) -> ValuationResult<'h> {
+        let mut valuation = None;
+        // Look for a direct unit valuation. These take precedence over total valuations.
         for pst in self.entry.postings() {
             if pst.unit() == amount.unit()
-                && let Ok(Some(amount)) =
-                    pst.valued_amount().unit_valuer().value(amount, quote_unit)
+                && let Ok(val) = pst.valued_amount().unit_valuer().value(quote_unit, amount)
             {
-                return Ok(Some(amount));
+                valuation = Some(val);
+                break;
             }
         }
         // Next, look for a total valuation
         for pst in self.entry.postings() {
-            let base_amount = pst.valued_amount().value_in(amount.unit());
-            let quote_amount = pst.valued_amount().value_in(quote_unit);
-            if let (Some(base_amount), Some(quote_amount)) = (base_amount, quote_amount) {
-                return Ok(Some(
-                    quote_amount.abs() / base_amount.abs().quantity() * amount.quantity(),
-                ));
+            if let Ok(val) = pst.valued_amount().total_valuer().value(quote_unit, amount) {
+                valuation = Some(val);
+                break;
             }
         }
-        Ok(None)
+        match valuation {
+            Some(mut valuation) => {
+                // Set the sources based in +valueSource metadata if possible, clearing the "@@ Entry"
+                self.entry
+                    .metadata()
+                    .filter(|m| m.key() == "valueSource")
+                    .filter_map(Metadata::value)
+                    .enumerate()
+                    .for_each(|(i, v)| {
+                        if i == 0 {
+                            valuation.clear_sources();
+                        }
+                        valuation.add_source(v)
+                    });
+                Ok(valuation)
+            }
+            None => Err(ValuationError::Undetermined(err!("No @ or @@ value found"))),
+        }
     }
 }
 
@@ -149,9 +270,6 @@ impl<'h> LinearSystemValuer<'h> {
     }
 
     pub fn add_value(&mut self, value: (Amount<'h>, Amount<'h>)) {
-        assert!(value.0.is_positive(), "Amount must be positive");
-        assert!(value.1.is_positive(), "Value must be positive");
-
         self.ensure_has_unit(value.0.unit());
         self.ensure_has_unit(value.1.unit());
 
@@ -214,16 +332,7 @@ impl<'h> From<&JournalEntry<'h>> for LinearSystemValuer<'h> {
         let total_valuations = move || {
             entry.balanced_postings().flat_map(move |p| {
                 p.valuations().filter_map(move |v| {
-                    match v {
-                        Valuation::Total(m, _) => {
-                            // Zero valuations create a contradiction for the base unit whose solution we
-                            // have set to 1.0.
-                            if m.is_zero() { None } else { Some((p.amount().abs(), m.abs())) }
-                        }
-                        Valuation::Unit(price) => {
-                            Some((p.unit().with_quantity(Decimal::one()), price.abs()))
-                        }
-                    }
+                    if v.is_zero() { None } else { Some((p.amount(), v.value())) }
                 })
             })
         };
@@ -235,14 +344,10 @@ impl<'h> From<&JournalEntry<'h>> for LinearSystemValuer<'h> {
 }
 
 impl<'h> Valuer<'h> for LinearSystemValuer<'h> {
-    fn value(
-        &mut self,
-        amount: Amount<'h>,
-        quote_unit: &'h Unit<'h>,
-    ) -> JournResult<Option<Amount<'h>>> {
+    fn value(&mut self, quote_unit: &'h Unit<'h>, amount: Amount<'h>) -> ValuationResult<'h> {
         // If the base unit is not in the system, we cannot value it.
         if self.units.iter().all(|u| *u != amount.unit()) {
-            return Ok(None);
+            return Err(ValuationError::Undetermined(err!("Not derivable")));
         }
 
         // Ensure the quote unit is part of the system
@@ -307,13 +412,13 @@ impl<'h> Valuer<'h> for LinearSystemValuer<'h> {
                 span_matrix = augmented_matrix;
             } else if col_index == 1 {
                 // If the quote column is not linearly independent, we can't solve the system.
-                return Ok(None);
+                return Err(ValuationError::Undetermined(err!("Not derivable")));
             }
         }
 
         // We don't have our base/quote units included.
         if span_matrix.ncols() < 2 {
-            return Ok(None);
+            return Err(ValuationError::Undetermined(err!("Not derivable")));
         }
 
         trace!("A = {}", span_matrix);
@@ -330,15 +435,16 @@ impl<'h> Valuer<'h> for LinearSystemValuer<'h> {
         // A rate of approximately zero means there is no solution. The power should not be set too high - as high as experience allows.
         //let zero_check = (rate * 10.0f64.powf(9.0)).round();
         if rate > tol {
-            return Ok(Some(
-                (quote_unit.with_quantity(Decimal::try_from(1.0 / rate).unwrap_or_else(|e| {
+            let mut valuation = Valuation::new(
+                quote_unit.with_quantity(Decimal::try_from(1.0 / rate).unwrap_or_else(|e| {
                     panic!("Unable to convert {}, to Decimal: {}", 1.0 / rate, e)
-                })) * amount.quantity())
-                .abs(),
-            ));
+                })) * amount.quantity(),
+            );
+            valuation.add_source("Entry (Derived)");
+            return Ok(valuation);
         }
 
-        Ok(None)
+        Err(ValuationError::Undetermined(err!("Not derivable")))
     }
 }
 
@@ -364,7 +470,7 @@ impl<'h, 'p, 'l> LambdaValuer<'h, 'p, 'l> {
         quote_unit: &'h Unit<'h>,
         datetime: JDateTime<'h>,
         result: PyObject,
-    ) -> JournResult<Vec<Arc<Price<'h>>>> {
+    ) -> Result<Vec<Arc<Price<'h>>>, ValuationError> {
         Python::with_gil(|py| {
             if let Ok(list) = result.extract::<Vec<_>>(py) {
                 let mut main_list = vec![];
@@ -379,23 +485,23 @@ impl<'h, 'p, 'l> LambdaValuer<'h, 'p, 'l> {
                 // quote_unit as the unit.
                 let amount_str = config.allocator().alloc(s).as_str();
                 let price = match parse!(amount_str, parsing::amount::amount, config) {
-                    (Ok((_, amount)), _config) => amount,
-                    (Err(_), config) => {
-                        let dec = parse!(amount_str, parsing::amount::parsed_decimal, config).0?.1;
+                    Ok((_, amount)) => amount,
+                    Err(_) => {
+                        let dec = parse!(amount_str, parsing::amount::parsed_decimal, config)
+                            .map_err(ValuationError::EvalFailure)?
+                            .1;
                         quote_unit.with_quantity(dec)
                     }
                 };
                 Ok(vec![Arc::new(Price::new(datetime, base_unit, price, None))])
             } else if let Ok(py_price) = result.extract::<PyPrice>(py) {
-                Ok(vec![Arc::new(
-                    py_price
-                        .as_price(py, config)
-                        .map_err(|e| err!(e; "Unable to convert PyPrice"))?,
-                )])
+                Ok(vec![Arc::new(py_price.as_price(py, config).map_err(|e| {
+                    ValuationError::EvalFailure(err!(e; "Unable to convert PyPrice"))
+                })?)])
             } else if let Ok(None) = result.extract::<Option<String>>(py) {
-                Err(err!("No price found for: '{}' -> '{}'", base_unit, quote_unit))
+                Err(ValuationError::Undetermined(err!("None returned")))
             } else {
-                Err(err!("Unexpected python result: {}", result))
+                Err(ValuationError::EvalFailure(err!("Unexpected python result: {}", result)))
             }
         })
     }
@@ -405,11 +511,7 @@ impl<'h, 'p, 'l> Valuer<'h> for LambdaValuer<'h, 'p, 'l> {
     /// Values the specified `amount` in the `quote_unit` by running the python lambda function.
     /// The result of the function is converted to an amount which may not be in the same `quote_unit` as requested.
     /// The function could be run multiple times in this case to value via another unit.
-    fn value(
-        &mut self,
-        amount: Amount<'h>,
-        quote_unit: &'h Unit<'h>,
-    ) -> JournResult<Option<Amount<'h>>> {
+    fn value(&mut self, quote_unit: &'h Unit<'h>, amount: Amount<'h>) -> ValuationResult<'h> {
         let py_datetime = match PythonEnvironment::eval::<DateTimeWrapper>(
             &format!(
                 "datetime.strptime(\"{}\", \"%Y-%m-%dT%H:%M:%S%z\")",
@@ -423,13 +525,38 @@ impl<'h, 'p, 'l> Valuer<'h> for LambdaValuer<'h, 'p, 'l> {
         };
 
         let args: Vec<Box<dyn DeferredArg>> = vec![
-            Box::new(amount.unit().to_string()),
             Box::new(quote_unit.to_string()),
+            Box::new(amount.unit().to_string()),
             Box::new(py_datetime),
         ];
 
-        let result =
-            self.lambda.eval(args, self.config.version().node_id().journal_incarnation())?;
+        let no_price_found_err = || {
+            err!(
+                "No price found from: '{}'",
+                self.lambda.expression_with_args(vec![
+                    quote_unit.to_string(),
+                    amount.unit().to_string(),
+                    py_datetime.0.format("%FT%T%z").to_string()
+                ]),
+            )
+        };
+
+        let result = self
+            .lambda
+            .eval(args, self.config.version().node_id().journal_incarnation())
+            .map_err(|e| {
+                ValuationError::EvalFailure(
+                    err!(
+                        "Eval failure with: {}",
+                        self.lambda.expression_with_args(vec![
+                            quote_unit.to_string(),
+                            amount.unit().to_string(),
+                            py_datetime.0.format("%FT%T%z").to_string()
+                        ])
+                    )
+                    .with_source(e),
+                )
+            })?;
         let mut prices = match LambdaValuer::extract_price_from_python_result(
             &mut self.config,
             amount.unit(),
@@ -438,16 +565,21 @@ impl<'h, 'p, 'l> Valuer<'h> for LambdaValuer<'h, 'p, 'l> {
             result,
         ) {
             Ok(r) => r,
-            Err(e) => {
-                return Err(
+            Err(ValuationError::EvalFailure(e)) => {
+                return Err(ValuationError::EvalFailure(
                     err!(err!(e; "Cannot determine price from expression: '{}'", self.lambda.expression()); "No price found for '{}' -> '{}'", amount.unit(), quote_unit),
-                );
+                ));
+            }
+            Err(ValuationError::Undetermined(_e)) => {
+                return Err(ValuationError::Undetermined(no_price_found_err()));
             }
         };
         let got_inverse = prices.first().map(|p| p.base_unit() == quote_unit).unwrap_or(false);
         match prices.len() {
             // No results, no valuation possible.
-            0 => Ok(None),
+            0 => Err(ValuationError::Undetermined(err!(
+                no_price_found_err().with_source(err!("No results returned"))
+            ))),
             1 => {
                 self.price_db.put(prices[0].clone());
                 debug!(
@@ -460,9 +592,11 @@ impl<'h, 'p, 'l> Valuer<'h> for LambdaValuer<'h, 'p, 'l> {
                 // need to correct that here.
                 let price =
                     if got_inverse { Arc::new(prices[0].inverse()) } else { prices.pop().unwrap() };
-                Ok(Some(
+                let mut valuation = Valuation::new(
                     price.quote_unit().with_quantity(amount.quantity() * price.price().quantity()),
-                ))
+                );
+                price.sources().for_each(|s| valuation.add_source(s));
+                Ok(valuation)
             }
             // More than one result provided. We put all prices in to the price database and initialise
             // a new price database with just the results provided, returning the price that's deemed closest.
@@ -488,11 +622,13 @@ impl<'h, 'p, 'l> Valuer<'h> for LambdaValuer<'h, 'p, 'l> {
                             price.base_unit(),
                             price.price()
                         );
-                        Ok(Some(
+                        let mut valuation = Valuation::new(
                             price
                                 .quote_unit()
                                 .with_quantity(amount.quantity() * price.price().quantity()),
-                        ))
+                        );
+                        price.sources().for_each(|s| valuation.add_source(s));
+                        Ok(valuation)
                     }
                     None => unreachable!("There's at least one price in the result database"),
                 }
@@ -539,27 +675,37 @@ impl<'h, 'e> From<&'e JournalEntry<'h>> for SystemValuer<'h, 'e> {
     }
 }
 impl<'h> Valuer<'h> for SystemValuer<'h, '_> {
-    fn value(
-        &mut self,
-        amount: Amount<'h>,
-        quote_unit: &'h Unit<'h>,
-    ) -> JournResult<Option<Amount<'h>>> {
+    fn value(&mut self, quote_unit: &'h Unit<'h>, amount: Amount<'h>) -> ValuationResult<'h> {
         // We don't need to value anything
         if amount.unit() == quote_unit {
-            return Ok(Some(amount));
+            return Ok(Valuation::new(amount));
         }
 
         // Try the entry valuer first.
-        if let Some(entry_valuer) = &mut self.entry_valuer
-            && let Some(val) = entry_valuer.value(amount, quote_unit)?
-        {
-            info!("{} Valued via entry: {} = {:?}", self.datetime, amount, val);
-            return Ok(Some(val));
+        match self.entry_valuer.as_mut().map(|ev| ev.value(quote_unit, amount)) {
+            Some(Ok(entry_valuation)) => {
+                info!("{} Valued via entry: {} = {:?}", self.datetime, amount, entry_valuation);
+                return Ok(entry_valuation);
+            }
+            Some(Err(ValuationError::EvalFailure(e))) => {
+                return Err(ValuationError::EvalFailure(err!(e; "Entry valuer failed")));
+            }
+            _ => {}
         }
+
         // Next, the linear system valuer.
-        if let Some(value) = self.linear_system_valuer.value(amount, quote_unit)? {
-            info!("{} Valued via derivation: {} = {:?}", self.datetime, amount, value);
-            return Ok(Some(value));
+        match self.linear_system_valuer.value(quote_unit, amount) {
+            Ok(linear_valuation) => {
+                info!(
+                    "{} Valued via derivation: {} = {:?}",
+                    self.datetime, amount, linear_valuation
+                );
+                return Ok(linear_valuation);
+            }
+            Err(ValuationError::EvalFailure(e)) => {
+                return Err(ValuationError::EvalFailure(err!(e; "Linear system valuer failed")));
+            }
+            _ => {}
         }
 
         // Finally, enter a loop where we try first, in terms of alternative base units first if we have any.
@@ -588,51 +734,66 @@ impl<'h> Valuer<'h> for SystemValuer<'h, '_> {
                                 self.datetime,
                                 expr,
                             );
-                            match lambda_valuer.value(unit_to_value.with_quantity(1), quote_unit)? {
-                                Some(val)
+                            match lambda_valuer.value(quote_unit, unit_to_value.with_quantity(1)) {
+                                Ok(val)
                                     if unit_to_value == base_unit && val.unit() == quote_unit =>
                                 {
-                                    let value = val * amount.quantity();
+                                    let value = *val * amount.quantity();
                                     info!(
                                         "{} Valued via lookup: {} = {:?}",
                                         self.datetime, amount, value
                                     );
-                                    break Ok(Some(value));
+                                    break Ok(val.with_value(value));
                                 }
-                                None if unit_to_value == base_unit => break Ok(None),
                                 // Received a valuation not in our base unit. Add this to the system and try to solve
                                 // it for the actual base unit.
-                                Some(val) => {
+                                Ok(val) => {
                                     self.linear_system_valuer
-                                        .add_value((unit_to_value.with_quantity(1), val));
-                                    if let Some(val) =
-                                        self.linear_system_valuer.value(amount, quote_unit)?
-                                    {
-                                        info!(
-                                            "{} Valued via derivation: {} = {:?}",
-                                            self.datetime, amount, val
-                                        );
-                                        break Ok(Some(val));
-                                    }
-                                    // When the python function returns a value in a different unit, it also indicates a request
-                                    // for indirection. We'll try to value that unit in the quote unit.
-                                    // We need to note the units we've previously tried so we don't get stuck in a loop.
-                                    if val.unit() != quote_unit
-                                        && !self.tried_base_units.contains(&val.unit())
-                                    {
-                                        self.alternative_base_units.push_front(val.unit());
+                                        .add_value((unit_to_value.with_quantity(1), *val));
+
+                                    match self.linear_system_valuer.value(quote_unit, amount) {
+                                        Ok(val) => {
+                                            info!(
+                                                "{} Valued via derivation: {} = {:?}",
+                                                self.datetime, amount, *val
+                                            );
+                                            break Ok(val);
+                                        }
+                                        _ => {
+                                            // When the python function returns a value in a different unit, it also indicates a request
+                                            // for indirection. We'll try to value that unit in the quote unit.
+                                            // We need to note the units we've previously tried so we don't get stuck in a loop.
+                                            if val.unit() != quote_unit
+                                                && !self.tried_base_units.contains(&val.unit())
+                                            {
+                                                self.alternative_base_units.push_front(val.unit());
+                                            }
+                                        }
                                     }
                                 }
-                                None => {}
+                                Err(ValuationError::Undetermined(reason))
+                                    if unit_to_value == base_unit =>
+                                {
+                                    break Err(ValuationError::Undetermined(reason));
+                                }
+                                Err(ValuationError::EvalFailure(e)) => {
+                                    break Err(ValuationError::EvalFailure(e));
+                                }
+                                _ => {}
                             }
                         }
                         None if unit_to_value == base_unit => {
-                            break Err(err!("No price expression found for unit: {}", base_unit));
+                            break Err(ValuationError::Undetermined(err!(
+                                "No price expression found for unit: {}",
+                                base_unit
+                            )));
                         }
                         None => continue,
                     }
                 }
-                None => break Err(err!("Unable to value: {}", amount)),
+                None => {
+                    break Err(ValuationError::Undetermined(err!("Unable to value: {}", amount)));
+                }
             }
         }?;
         Ok(value)
@@ -687,7 +848,11 @@ impl<'h, O> FromResidual<Result<Infallible, JournError>> for ValueResult<'h, O> 
 
 /// Executes a function that may return a `ValuationNeeded` result during its processing.
 /// This will cause the valuation to be performed on the entry before retrying.
-pub fn exec_optimistic<'h, F, O>(entry: &mut Cow<JournalEntry<'h>>, f: F) -> JournResult<O>
+pub fn exec_optimistic<'h, F, O>(
+    entry: &mut Cow<JournalEntry<'h>>,
+    round_valuations: bool,
+    f: F,
+) -> JournResult<O>
 where
     F: Fn(&JournalEntry<'h>) -> ValueResult<'h, O>,
 {
@@ -696,27 +861,31 @@ where
             ValueResult::Ok(o) => return Ok(o),
             ValueResult::Err(e) => return Err(e),
             ValueResult::ValuationNeeded(base, quote) => {
-                match SystemValuer::from(entry.as_ref()).value(base.with_quantity(1), quote)? {
-                    Some(price) => {
+                match SystemValuer::from(entry.as_ref()).value(quote, base.with_quantity(1)) {
+                    Ok(val) => {
+                        let price = val.amount;
                         let entry = entry.to_mut();
-                        for pst in entry.postings_mut() {
+                        for pst in entry.postings_mut().filter(|pst| pst.unit() != val.unit()) {
                             if let Some(amount) = pst.amount_in(base) {
                                 // When the amount is small, use unit valuations for increased accuracy. This matters when using the LinearSystemValuer.
                                 // We round in case the entry gets written out later.
-                                let val = if amount.abs() < 1 {
-                                    Valuation::new_unit(price.rounded())
+                                let val = if round_valuations && amount.abs() < 1 {
+                                    valued_amount::PostingValuation::new_unit(price.rounded())
                                 } else {
-                                    Valuation::new_total(
-                                        (price * amount.quantity().abs()).rounded(),
-                                        false,
-                                    )
+                                    let mut total = val.amount * amount.quantity();
+                                    if round_valuations {
+                                        total = total.rounded();
+                                    }
+                                    valued_amount::PostingValuation::new_total(total, false)
                                 };
                                 pst.set_valuation(val);
                             }
                         }
                     }
-                    None => {
-                        return Err(err!("Unable to value {} in {} on entry", base, quote));
+                    Err(e) => {
+                        return Err(
+                            err!("Unable to value {} in {} on entry", base, quote).with_source(e)
+                        );
                     }
                 }
             }

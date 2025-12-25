@@ -89,6 +89,7 @@ pub trait ColumnsVec {
 
     fn shrink_text(&mut self) -> bool;
 
+    #[allow(dead_code)]
     fn fit_to_min_width(&mut self, width: usize);
 
     fn expand_to_width(&mut self, width: usize);

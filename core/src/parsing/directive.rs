@@ -13,28 +13,23 @@ use crate::error::{JournErrors, JournResult};
 use crate::journal_node::JournalNodeKind;
 use crate::module::MODULES;
 use crate::parsing::amount::unit;
-use crate::parsing::text_block::TextBlock;
-use crate::parsing::text_input::{
+use crate::parsing::input::{
     BlockInput, ConfigInput, LocatedInput, NodeInput, TextBlockInput, TextInput,
 };
-use crate::parsing::util::{
-    double_quoted, line_value, multiline_value_string, param_value, repeat0, rest_line1,
-    separated_field, word,
-};
+use crate::parsing::text_block::TextBlock;
+use crate::parsing::unit_directive::{unit_definition_body, unit_directive_body, units_directive};
+use crate::parsing::util::{double_quoted, line_value, param_value, rest_line1, word};
 use crate::parsing::{IParseResult, entry};
 use crate::parsing::{JParseResult, util};
 use crate::price::Price;
-use crate::price_db::PriceDatabase;
-use crate::python::lambda::Lambda;
-use crate::python::mod_ledger::PythonLedgerModule;
-use crate::unit::{RoundingStrategy, Unit, Units};
+use crate::unit::Unit;
 use crate::{err, match_block, match_blocks, parsing};
 use chrono_tz::Tz;
 use nom::branch::alt;
 use nom::character::complete::{space0, space1};
-use nom::combinator::{consumed, map, map_parser, map_res, opt, rest};
+use nom::combinator::{consumed, map, map_res, opt, rest};
 use nom::sequence::{pair, preceded};
-use nom::{Err as NomErr, Finish, Parser};
+use nom::{Err as NomErr, Finish};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -45,26 +40,35 @@ pub const E_UNKNOWN_PARAMETER: &str = "Unknown parameter";
 pub const E_VALUE: &str = "Value expected";
 
 pub const E_ACCOUNT_NAME: &str = "Account name expected";
-pub const E_METADATA: &str = "Metadata expected";
+pub const E_METADATA_OR_UNIT: &str = "Metadata or unit expected";
 
-fn account_directive<'h, I>(input: I) -> JParseResult<I, Directive<'h>>
+fn account_directive<'h, 's, 'e, 'p, I>(input: I) -> JParseResult<I, Directive<'h>>
 where
-    I: TextInput<'h> + ConfigInput<'h> + BlockInput<'h> + LocatedInput<'h>,
+    I: TextInput<'h>
+        + ConfigInput<'h>
+        + BlockInput<'h>
+        + LocatedInput<'h>
+        + NodeInput<'h, 's, 'e, 'p>,
+    'h: 'e,
+    'e: 's,
+    's: 'p,
 {
     let (input, full_name) =
         promote(E_ACCOUNT_NAME, preceded(space0, alt((double_quoted, word))))(input)?;
     let mut metadata = vec![];
+    let mut units = vec![];
 
     let rem = match_blocks!(input.clone(),
+        param_value("unit") => |input| Ok(units.push(unit_definition_body(input)?.1)),
         entry::metadata => |m| Ok(metadata.push(m)),
         util::comment => |_| Ok(()),
-        rest => |i: I| Err(NomErr::Error(err!(i.into_err(E_METADATA))))
+        rest => |i: I| Err(NomErr::Error(err!(i.into_err(E_METADATA_OR_UNIT))))
     )?
     .0;
     let mut config_mut = input.config_mut();
     let parent =
         Account::parent_str(full_name.text()).map(|s| config_mut.get_or_create_account(&s));
-    let acc = Arc::new(Account::new(full_name.text().to_string(), parent, metadata));
+    let acc = Arc::new(Account::new(full_name.text().to_string(), parent, metadata, units));
     let merged = config_mut.merge_account(acc);
     Ok((rem, Directive::new(Some(input.block()), DirectiveKind::Account(merged))))
 }
@@ -77,7 +81,8 @@ where
 {
     let (rem, df) = DateFormat::parse_format(input.clone())?;
     let mut config = input.config_mut();
-    config.set_date_format(input.allocator().alloc(df));
+    let allocator = config.allocator();
+    config.set_date_format(allocator.alloc(df));
     Ok((rem, Directive::new(Some(input.block()), DirectiveKind::DateFormat(config.date_format()))))
 }
 
@@ -87,7 +92,8 @@ where
 {
     let (rem, tf) = TimeFormat::parse_format(input.clone())?;
     let mut config = input.config_mut();
-    config.set_time_format(input.allocator().alloc(tf));
+    let allocator = config.allocator();
+    config.set_time_format(allocator.alloc(tf));
     Ok((rem, Directive::new(Some(input.block()), DirectiveKind::TimeFormat(config.time_format()))))
 }
 
@@ -102,171 +108,6 @@ where
         .map_err(|_| NomErr::Failure(input.clone().into_err(E_BAD_TIMEZONE)))?;
     input.config_mut().set_time_zone(tz);
     Ok((rem, Directive::new(Some(input.block()), DirectiveKind::TimeZone(tz))))
-}
-
-fn read_unit<'h, 's, 'e, 'p, 'a, I>(
-    unit_code: &'h str,
-    all_codes: &'a [&'h str],
-    primary: Option<&'h Unit<'h>>,
-) -> impl FnMut(I) -> JParseResult<I, &'h Unit<'h>> + 'a
-where
-    I: TextInput<'h>
-        + ConfigInput<'h>
-        + NodeInput<'h, 's, 'e, 'p>
-        + BlockInput<'h>
-        + LocatedInput<'h>,
-    'h: 'e,
-    'e: 's,
-    's: 'p,
-{
-    move |input: I| {
-        let node = input.parse_node();
-        let mut unit = Unit::new(unit_code);
-        unit.set_aliases(all_codes.iter().copied().map(|c| c.into()).collect());
-        let mut metadata = vec![];
-        let rem = match_blocks!(input.clone(),
-                param_value("name") => |input: I| {
-                    let name = promote("Invalid unit name", line_value)(input)?.1;
-                    unit.set_name(Some(name.text().into()));
-                    Ok(())
-                },
-                param_value("format") => |input| {
-                    let format = promote("Invalid unit format", map_parser(line_value, parsing::amount::unit_format(true)))(input)?.1;
-                    unit.set_format(format);
-                    Ok(())
-                },
-                param_value("rounding") => |input: I| {
-                    let rounding = promote("Rounding mode must be one of: 'up', 'down', 'halfup', 'halfdown' or 'halfeven'", map_res(line_value, |v: I| RoundingStrategy::from_str(v.text())))(input)?.1;
-                    unit.set_rounding_strategy(rounding);
-                    Ok(())
-                },
-                param_value("ranking") => |input: I| {
-                    let ranking = promote("Ranking must be an integer >= 0", line_value)(input)?.1;
-                    unit.set_conversion_ranking(Some(
-                        usize::from_str(ranking.text())
-                            .map_err(|e| NomErr::Error(ranking.into_err(E_INVALID_UNIT_RANKING).with_source(e)))?,
-                    ));
-                    Ok(())
-                },
-                param_value("value") => |input: I| {
-                    let lambda_expr = promote(E_INVALID_VALUE_EXPRESSION, map_res(multiline_value_string, |i| Lambda::from_str(&i)))(input)?.1;
-                    unit.set_conversion_expression(Some(lambda_expr));
-                    Ok(())
-                },
-                param_value("prices") => |input| {
-                    let (_, (block, path)) = stream(input)?;
-
-                        // Don't parse the price database multiple times.
-                        match primary {
-                            Some(primary) => {
-                                if let Some(pd) = primary.prices() {
-                                    unit.set_prices(Some(Arc::clone(pd)));
-                                }
-                            }
-                            None => {
-                                let pd = Arc::new(PriceDatabase::new(node.branch_kind(block, path, JournalNodeKind::Prices)));
-                                unit.set_prices(Some(pd));
-                            }
-                        }
-                    Ok(())
-                },
-                util::comment => |_| Ok(()),
-                entry::metadata => |m| Ok(metadata.push(m)),
-                rest => |input: I| Err(NomErr::Error(input.into_err(E_UNKNOWN_UNIT_KEY)))
-            )?.0;
-        unit.set_metadata(metadata);
-        Ok((rem, input.config_mut().merge_unit(&unit, input.parse_node().allocator())))
-    }
-}
-
-pub const E_INVALID_ROUNDING_STRATEGY: &str = "Unit rounding strategy expected";
-pub const E_INVALID_UNIT_RANKING: &str = "Unit ranking must be a positive integer";
-pub const E_INVALID_VALUE_EXPRESSION: &str = "Unit value expression must be a valid lambda";
-pub const E_UNKNOWN_UNIT_KEY: &str = "Unknown unit configuration parameter";
-pub const E_NAME_EXPECTED: &str = "Unit name expected";
-
-fn unit_directive<'h, 's, 'e, 'p, I>(input: I) -> JParseResult<I, Directive<'h>>
-where
-    I: TextInput<'h>
-        + ConfigInput<'h>
-        + NodeInput<'h, 's, 'e, 'p>
-        + BlockInput<'h>
-        + LocatedInput<'h>,
-    'h: 'e,
-    'e: 's,
-    's: 'p,
-{
-    // Read the unit codes
-    let mut all_codes = vec![];
-    let unit_code = || map(separated_field(','), |s: I| s.text());
-    // Read the first unit code
-    let (input, primary_code) = promote("Unit code expected", unit_code())(input)?;
-    all_codes.push(primary_code);
-    // Read aliases
-    let input = repeat0(unit_code().and_then(|code: &'h str| {
-        all_codes.push(code);
-        Ok(("", ()))
-    }))(input.clone())
-    .unwrap()
-    .0;
-    // Parse the primary unit
-    let (rem, primary) = read_unit(primary_code, &all_codes, None)(input.clone())?;
-    //let mut units = Vec::with_capacity(1);
-    //units.push(primary);
-
-    /*
-    // Parse any additional alias units
-    for code in all_codes.iter().filter(|c| **c != primary_code) {
-        let r = read_unit(code, &all_codes, Some(primary))(input.clone())?;
-        rem = r.0;
-        units.push(r.1);
-    }*/
-
-    Ok((rem, Directive::new(Some(input.block()), DirectiveKind::Unit(primary))))
-}
-
-fn units_directive<'h, 's, 'e, 'p, I>(input: I) -> JParseResult<I, Directive<'h>>
-where
-    I: TextInput<'h>
-        + NodeInput<'h, 's, 'e, 'p>
-        + BlockInput<'h>
-        + ConfigInput<'h>
-        + LocatedInput<'h>,
-    'h: 'e,
-    'e: 's,
-    's: 'p,
-{
-    let node = input.parse_node();
-    let mut units = Units::default();
-    let mut def_unit = Unit::none();
-    let mut metadata = vec![];
-
-    let rem = match_blocks!(input.clone(),
-        param_value("rounding") => |input| {
-            let rounding = promote("Rounding mode must be one of: 'up', 'down', 'halfup', 'halfdown' or 'halfeven'", map_res(line_value, |v: I| RoundingStrategy::from_str(v.text())))(input)?.1;
-            def_unit.set_rounding_strategy(rounding);
-            Ok(())
-        },
-        param_value("value") => |input| {
-            let lambda_expr = promote(E_INVALID_VALUE_EXPRESSION, map_res(multiline_value_string, |i| Lambda::from_str(&i)))(input)?.1;
-            def_unit.set_conversion_expression(Some(lambda_expr));
-            Ok(())
-        },
-        param_value("prices") => |input: I| {
-            let (_, (block, path)) = stream(input)?;
-            let pd = Arc::new(PriceDatabase::new(node.branch_kind(block, path, JournalNodeKind::Prices)));
-            PythonLedgerModule::set_default_price_database(&pd, node.node().id().journal_incarnation());
-            def_unit.set_prices(Some(pd));
-            Ok(())
-        },
-        util::comment => |_| Ok(()),
-        entry::metadata => |m| Ok(metadata.push(m))
-    )?.0;
-    def_unit.set_metadata(metadata);
-    let def_unit = input.config_mut().merge_default_unit(&def_unit, input.parse_node().allocator());
-    units.set_default_unit(Some(def_unit));
-
-    Ok((rem, Directive::new(Some(input.block()), DirectiveKind::Units(units))))
 }
 
 fn python_directive<'h, 's, 'e, 'p, I>(input: I) -> JParseResult<I, Directive<'h>>
@@ -401,7 +242,7 @@ where
 /// Reads the input as a new stream. This will attempt to interpret the input as a valid file path,
 /// and follow this as a new file stream. If unsuccessful, it will be assumed to be a continuation
 /// of the input.
-fn stream<'h, 's, 'e, 'p, I>(input: I) -> JParseResult<I, (I, Option<&'h Path>)>
+pub(super) fn stream<'h, 's, 'e, 'p, I>(input: I) -> JParseResult<I, (I, Option<&'h Path>)>
 where
     I: TextInput<'h> + LocatedInput<'h> + BlockInput<'h> + NodeInput<'h, 's, 'e, 'p>,
     'h: 'e,
@@ -541,7 +382,7 @@ where
         },
         util::comment => |c: I| push_directive(Directive::new(Some(c.block()), DirectiveKind::Comment(c.text())), false),
         param_value("account") => |input| push_directive(account_directive(input)?.1, false),
-        param_value("unit") => |input| push_directive(unit_directive(input)?.1, false),
+        param_value("unit") => |input| push_directive(unit_directive_body(input)?.1, false),
         param_value("branch") => |input| {
             push_directive(branch(JournalNodeKind::Entry)(input)?.1, true)
         },

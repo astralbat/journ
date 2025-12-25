@@ -1,0 +1,4 @@
+[toolchain]
+# Latest nightly as of 09/12/25 changed alloc which upset bumpalo a bit.
+# Once we have bumpalo > 3.19.0, we can push this out again.
+channel = "nightly-2025-11-01"

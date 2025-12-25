@@ -177,12 +177,12 @@ impl<'h> CapitalGains<'h> {
             for (_unit, balance) in pool_balances.iter() {
                 let mut vals = vec![];
                 for val in balance.valuations() {
-                    if let Ok(Some(val)) = valuer.value(balance.amount(), val.unit()) {
+                    if let Ok(val) = valuer.value(val.unit(), balance.amount()).as_deref() {
                         vals.push(val.rounded());
                     }
                 }
                 let curr_vals =
-                    ValuedAmount::from_valuations(vals.into_iter(), self.config.allocator());
+                    ValuedAmount::from_amounts(vals.into_iter(), self.config.allocator());
 
                 let unrealised = (&curr_vals - balance.valued_amount()).unwrap();
 

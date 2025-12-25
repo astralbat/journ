@@ -33,7 +33,7 @@ impl<'h> AggState<'h> for Sum<'h> {
             .eval(context)?
             .as_list()
             .iter()
-            .try_fold(&mut self.totals, |mut acc, v| {
+            .try_fold(&mut self.totals, |acc, v| {
                 let amount =
                     v.as_amount().ok_or_else(|| err!("Sum() can only sum `Amount` types"))?;
                 if !amount.is_nil() {
@@ -49,7 +49,7 @@ impl<'h> AggState<'h> for Sum<'h> {
 
         b.as_list()
             .iter()
-            .try_fold(&mut self.totals, |mut acc, v| {
+            .try_fold(&mut self.totals, |acc, v| {
                 let amount =
                     v.as_amount().ok_or_else(|| err!("Sum() can only sum `Amount` types"))?;
                 if !amount.is_nil() {

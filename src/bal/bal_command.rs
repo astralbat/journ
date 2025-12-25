@@ -55,10 +55,6 @@ impl BalCommand {
         self.unit_filter = units;
     }
 
-    pub fn write_csv(&self) -> bool {
-        self.write_csv
-    }
-
     pub fn set_write_csv(&mut self, write_csv: bool) {
         self.write_csv = write_csv;
     }
@@ -107,34 +103,6 @@ impl BalCommand {
         self.group_by = group_by;
     }
 
-    pub fn filtered_entries<'h, 'a, A>(
-        &'a self,
-        journ: &'a Journal<'h>,
-        account_filter: A,
-    ) -> impl Fn() -> Box<dyn Iterator<Item = &'h JournalEntry<'h>> + 'a> + 'a
-    where
-        A: Filter<Account<'h>> + Clone + 'a,
-    {
-        let args = Arguments::get();
-        move || {
-            let description_filter = self.description_filter();
-            let file_filter = self.file_filter();
-            let unit_filter = self.unit_filter();
-            let account_filter = account_filter.clone();
-            Box::new(
-                journ
-                    .entry_range(args.begin_end_range())
-                    .filter(move |e| description_filter.is_included(e.description()))
-                    .filter(move |e| {
-                        file_filter
-                            .is_included(journ.root().find_by_node_id(e.id().node_id()).unwrap())
-                    })
-                    .filter(move |e| e.postings().any(|p| account_filter.is_included(p.account())))
-                    .filter(move |e| e.postings().any(|p| unit_filter.is_included(p.unit()))),
-            )
-        }
-    }
-
     pub fn filtered_postings<'h, 'j, 'a>(
         &'a self,
         journ: &'j Journal<'h>,
@@ -168,9 +136,11 @@ impl BalCommand {
 impl Command for BalCommand {}
 
 impl ExecCommand for BalCommand {
-    fn execute<'h>(&'h self, journ: &'h mut Journal<'h>) -> JournResult<()> {
-        let args = Arguments::get();
-
+    fn execute<'j, 'h: 'j>(
+        &'h self,
+        journ: &'j mut Journal<'j>,
+        args: &Arguments,
+    ) -> JournResult<()> {
         let config = journ.config();
         let plan = parse_plan(self.column_spec(), Some(self.group_by()))?;
 
@@ -190,14 +160,18 @@ impl ExecCommand for BalCommand {
         // Aggregate postings into groups
         let mut groups: HashMap<GroupKey, GroupState> = HashMap::new();
         let mut total_group = GroupState::new(&plan)?;
-        for (entry, pst) in self.filtered_postings(&journ)() {
+        for (entry, pst) in self.filtered_postings(journ)() {
             let mut context = PostingContext::new(journ, entry, pst);
 
             let key = GroupKey::new(
                 plan.group_by()
                     .iter()
-                    .map(|e| e.eval(&mut context).map(|v| (e.clone(), v)))
-                    .collect::<JournResult<Vec<(_)>>>()?,
+                    .map(|e| {
+                        e.eval(&mut context)
+                            .map_err(|e| err!(e; "Unable to create key from posting context"))
+                            .map(|v| (e.clone(), v))
+                    })
+                    .collect::<JournResult<Vec<_>>>()?,
             );
             let group = match groups.entry(key) {
                 Entry::Occupied(e) => e.into_mut(),

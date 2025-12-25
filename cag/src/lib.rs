@@ -12,6 +12,7 @@
 pub mod adjustment;
 //pub mod capital_gains;
 mod capital_gains;
+mod cg_flows;
 pub mod cgt_configuration;
 pub mod cgt_journal_entry;
 pub mod computer;

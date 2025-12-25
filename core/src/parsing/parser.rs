@@ -10,8 +10,8 @@ use crate::configuration::Configuration;
 use crate::error::{BlockContextError, JournErrors, JournResult};
 use crate::journal_node::{JournalNode, JournalNodeKind, NodeId};
 use crate::journal_node_segment::JournalNodeSegment;
+use crate::parsing::input::{BlockInput, LocatedInput, TextBlockInput, TextInput};
 use crate::parsing::text_block::TextBlock;
-use crate::parsing::text_input::{BlockInput, LocatedInput, TextBlockInput, TextInput};
 use crate::parsing::util::interim_space;
 use crate::python::environment::PythonEnvironment;
 use crate::{err, parsing};
@@ -229,7 +229,7 @@ where
         match Self::create_child_node(self, input.clone(), path, kind) {
             Err(file) => file,
             Ok(child) => {
-                let child_config = self.configuration.borrow().branch();
+                let child_config = self.configuration.borrow().branch(self.node.id());
 
                 let inner_node = child;
                 let allocator = self.allocator();
@@ -269,7 +269,7 @@ where
     /// in depth-first fashion.
     /// Return the segment that the child node branches to.
     fn branch_to_new_segment(&self, child: &'h JournalNode<'h>) -> &'h JournalNodeSegment<'h> {
-        let branched_config = self.configuration.borrow().branch();
+        let branched_config = self.configuration.borrow().branch(self.node.id());
         // Set self.configuration to be a branched version, ready for parsing a new segment.
         // The old configuration can then be set on the current segment in the process of finalising it.
         let old_config = self.configuration.replace(branched_config);

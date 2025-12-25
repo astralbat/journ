@@ -6,15 +6,15 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::expr::column_value::ColumnValue;
-use crate::expr::context::{EvalContext, IdentifierContext};
-use crate::expr::functions::{concat, date, datevalue, max, min, neg, num, round, text, value};
-use crate::expr::parser::{AggKind, BinOp, CompareOp, LogicalOp};
+use crate::expr::context::IdentifierContext;
+use crate::expr::functions::{
+    concat, cond, date, datevalue, max, min, neg, num, round, text, value,
+};
+use crate::expr::parser::{BinOp, CompareOp, LogicalOp};
 use journ_core::amount::Amount;
 use journ_core::err;
 use journ_core::error::{JournError, JournResult};
-use journ_core::ext::VecLike;
 use rust_decimal::Decimal;
-use smallvec::SmallVec;
 use smartstring::alias::String as SS;
 use std::fmt;
 
@@ -23,8 +23,8 @@ pub enum Expr<'h> {
     ScalarFunction { name: SS, args: Vec<Expr<'h>> },
     AggFunction(&'h str, Vec<Expr<'h>>, usize), // Index into separate list of unique aggregate functions
     BinaryOp { left: Box<Expr<'h>>, op: BinOp, right: Box<Expr<'h>> },
-    CompareExpr { left: Box<Expr<'h>>, op: CompareOp, right: Box<Expr<'h>> },
-    LogicalOpExpr { left: Box<Expr<'h>>, op: LogicalOp, right: Box<Expr<'h>> },
+    Compare { left: Box<Expr<'h>>, op: CompareOp, right: Box<Expr<'h>> },
+    LogicalOp { left: Box<Expr<'h>>, op: LogicalOp, right: Box<Expr<'h>> },
     Parenthesized(Box<Expr<'h>>),
     Literal(&'h str),
     Identifier(SS),
@@ -36,13 +36,7 @@ impl<'h> Expr<'h> {
     pub fn eval(&self, context: &mut dyn IdentifierContext<'h>) -> JournResult<ColumnValue<'h>> {
         use Expr::*;
         match self {
-            ScalarFunction { name, args } => {
-                let values = args
-                    .into_iter()
-                    .map(|a| a.eval(context))
-                    .collect::<Result<SmallVec<[ColumnValue; 4]>, _>>()?;
-                eval_scalar_function(name, values, context)
-            }
+            ScalarFunction { name, args } => eval_scalar_function(name, args, context),
             AggFunction(_, _, index) => context
                 .eval_aggregate(*index)
                 .ok_or_else(|| err!("Unable to evaluate aggregate function: {}", index)),
@@ -52,12 +46,12 @@ impl<'h> Expr<'h> {
                 eval_binary_op(left_value, right_value, *op)
             }
             Parenthesized(inner) => inner.eval(context),
-            CompareExpr { left, op, right } => {
+            Compare { left, op, right } => {
                 let left_value = left.eval(context)?;
                 let right_value = right.eval(context)?;
                 eval_compare_op(left_value, right_value, *op)
             }
-            LogicalOpExpr { left, op, right } => {
+            LogicalOp { left, op, right } => {
                 let left_value = left.eval(context)?;
                 let right_value = right.eval(context)?;
                 eval_logical_op(left_value, right_value, *op)
@@ -80,7 +74,7 @@ impl<'h> Expr<'h> {
         ExprIter { stack: vec![self] }
     }
 
-    pub fn children(&self) -> impl Iterator<Item = &Expr> {
+    pub fn children(&self) -> impl Iterator<Item = &Expr<'h>> + '_ {
         self.iter().skip(1)
     }
 
@@ -123,16 +117,16 @@ impl fmt::Display for Expr<'_> {
                 write!(f, "({} {} {})", left, op, right)
             }
             Parenthesized(inner) => write!(f, "({})", inner),
-            CompareExpr { left, op, right } => {
+            Compare { left, op, right } => {
                 write!(f, "({} {} {})", left, op, right)
             }
-            LogicalOpExpr { left, op, right } => {
+            LogicalOp { left, op, right } => {
                 write!(f, "({} {} {})", left, op, right)
             }
             Literal(lit) => write!(f, "\"{}\"", lit),
             Identifier(name) => write!(f, "{}", name),
             Number(num) => write!(f, "{}", num),
-            Aliased(inner, alias) => write!(f, "{}", alias),
+            Aliased(_inner, alias) => write!(f, "{}", alias),
         }
     }
 }
@@ -151,12 +145,12 @@ impl PartialEq for Expr<'_> {
                 BinaryOp { left: left_b, op: op_b, right: right_b },
             ) => op_a == op_b && left_a == left_b && right_a == right_b,
             (
-                CompareExpr { left: left_a, op: op_a, right: right_a },
-                CompareExpr { left: left_b, op: op_b, right: right_b },
+                Compare { left: left_a, op: op_a, right: right_a },
+                Compare { left: left_b, op: op_b, right: right_b },
             ) => op_a == op_b && left_a == left_b && right_a == right_b,
             (
-                LogicalOpExpr { left: left_a, op: op_a, right: right_a },
-                LogicalOpExpr { left: left_b, op: op_b, right: right_b },
+                LogicalOp { left: left_a, op: op_a, right: right_a },
+                LogicalOp { left: left_b, op: op_b, right: right_b },
             ) => op_a == op_b && left_a == left_b && right_a == right_b,
             (Parenthesized(inner_a), Parenthesized(inner_b)) => inner_a == inner_b,
             (Literal(lit_a), Literal(lit_b)) => lit_a == lit_b,
@@ -189,11 +183,11 @@ impl<'h, 'a> Iterator for ExprIter<'h, 'a> {
                     self.stack.push(right);
                     self.stack.push(left);
                 }
-                CompareExpr { left, right, .. } => {
+                Compare { left, right, .. } => {
                     self.stack.push(right);
                     self.stack.push(left);
                 }
-                LogicalOpExpr { left, right, .. } => {
+                LogicalOp { left, right, .. } => {
                     self.stack.push(right);
                     self.stack.push(left);
                 }
@@ -212,31 +206,33 @@ impl<'h, 'a> Iterator for ExprIter<'h, 'a> {
     }
 }
 
-fn eval_scalar_function<'h, 'a, V: VecLike<ColumnValue<'h>>>(
+fn eval_scalar_function<'h, 'a>(
     name: &'a str,
-    mut args: V,
-    context: &dyn IdentifierContext<'h>,
+    args: &[Expr<'h>],
+    context: &mut dyn IdentifierContext<'h>,
 ) -> JournResult<ColumnValue<'h>> {
     if name.eq_ignore_ascii_case("value") {
-        value(args.as_mut_slice(), context)
+        value(args, context)
     } else if name.eq_ignore_ascii_case("-") {
-        neg(args.as_mut_slice())
+        neg(args, context)
     } else if name.eq_ignore_ascii_case("round") {
-        round(args.as_mut_slice())
+        round(args, context)
     } else if name.eq_ignore_ascii_case("num") {
-        num(args.as_mut_slice())
+        num(args, context)
     } else if name.eq_ignore_ascii_case("max") {
-        max(args.as_mut_slice())
+        max(args, context)
     } else if name.eq_ignore_ascii_case("min") {
-        min(args.as_mut_slice())
+        min(args, context)
     } else if name.eq_ignore_ascii_case("concat") {
-        concat(args.as_mut_slice())
+        concat(args, context)
     } else if name.eq_ignore_ascii_case("text") {
-        text(args.as_mut_slice())
+        text(&args, context)
     } else if name.eq_ignore_ascii_case("date") {
-        date(args.as_mut_slice())
+        date(args, context)
     } else if name.eq_ignore_ascii_case("datevalue") {
-        datevalue(args.as_mut_slice())
+        datevalue(args, context)
+    } else if name.eq_ignore_ascii_case("if") {
+        cond(args, context)
     } else {
         Err(err!("Unknown function: '{}'", name))
     }
@@ -248,7 +244,7 @@ fn eval_binary_op<'h, 'a>(
     op: BinOp,
 ) -> JournResult<ColumnValue<'h>> {
     macro_rules! binary_op {
-        ($a:expr, $b:expr) => {{
+        ($a:expr, $b:expr, $op:ident) => {{
             match op {
                 BinOp::Add => Ok($a + $b),
                 BinOp::Sub => Ok($a - $b),
@@ -276,7 +272,7 @@ fn eval_binary_op<'h, 'a>(
         match mapping {
             (Some(ColumnValue::Amount(a)), Some(ColumnValue::Amount(b))) => {
                 results.push(
-                    binary_op!(a, b)
+                    binary_op!(a, b, op)
                         .map(|amount| ColumnValue::Amount(amount))
                         .unwrap_or_else(|_: JournError| ColumnValue::Undefined),
                 );

@@ -11,13 +11,13 @@ use crate::error::JournResult;
 use crate::error::parsing::{IErrorMsg, IParseError};
 use crate::ext::StrExt;
 use crate::parsing::IParseResult;
-use crate::parsing::text_input::{BlockInput, LocatedInput, TextInput};
+use crate::parsing::input::{BlockInput, LocatedInput, TextBlockInput, TextInput};
 use crate::parsing::util::{
     blank_lines0, comment, indented, recognize_rtrim, repeat0, rest_line0, rest_line1,
 };
 use nom::character::complete::{multispace0, space0};
-use nom::combinator::rest;
-use nom::sequence::{pair, preceded};
+use nom::combinator::{recognize, rest};
+use nom::sequence::{pair, preceded, tuple};
 use nom::{Err as NomErr, Parser};
 use nom_locate::LocatedSpan;
 use std::borrow::Cow;
@@ -322,6 +322,24 @@ impl<'h> TextBlock<'h> {
     pub fn is_comment(&self) -> bool {
         comment(self.skip_leading_blank_lines().0).is_ok()
     }
+
+    /// Gets the block as a kind of input, ready for parsing.
+    pub fn as_input(&'h self, allocator: &'h HerdAllocator<'h>) -> TextBlockInput<'h, ()> {
+        // SAFETY: Safe since the block offset will always be a valid offset in the
+        // node's original text that this block's &str slice points to.
+        unsafe {
+            TextBlockInput::new(
+                LocatedSpan::new_from_raw_offset(
+                    self.location().unwrap().offset(),
+                    self.location().unwrap().line(),
+                    self.text(),
+                    (),
+                ),
+                self,
+                allocator,
+            )
+        }
+    }
 }
 
 impl<'h> fmt::Display for TextBlock<'h> {
@@ -356,6 +374,15 @@ impl PartialEq for TextBlock<'_> {
 
 impl Eq for TextBlock<'_> {}
 
+/// Parser that reads the optional whitespace at the beginning of a block.
+/// This may consist of blank lines and leading space.
+pub fn block_leading_whitespace<'h, I>(input: I) -> IParseResult<'h, I, I>
+where
+    I: TextInput<'h>,
+{
+    recognize(tuple((blank_lines0, space0)))(input)
+}
+
 /// Parser for reading a block within a parent block, the `BlockInput`.
 /// A valid block will be returned if the stream has at least one non-multispace character.
 pub fn block<'h, I>(input: I) -> IParseResult<'h, I, I>
@@ -363,11 +390,9 @@ where
     I: TextInput<'h> + LocatedInput<'h> + BlockInput<'h>,
 {
     let orig_input = input.clone();
-    let rem = blank_lines0(input).expect("Infallible").0;
 
-    // Read the preceding whitespace of the block's first content line. This will tell us its
-    // indent.
-    let rem = space0::<_, ()>(rem).unwrap().0;
+    let rem = block_leading_whitespace(input).expect("Infallible").0;
+    // This tells us the block's indent.
     let min_indent = rem.column() as u16;
 
     // A block is at least till the end of the line.

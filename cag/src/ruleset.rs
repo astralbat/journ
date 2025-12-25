@@ -6,11 +6,11 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::cgt_configuration::DEFAULT_POOL;
-use journ_core::error::parsing::{tag_err, IParseError};
-use journ_core::parsing::text_block::block;
-use journ_core::parsing::text_input::{BlockInput, LocatedInput, TextInput};
-use journ_core::parsing::util::{blank_line0, separated_field, word};
+use journ_core::error::parsing::{IParseError, tag_err};
 use journ_core::parsing::IParseResult;
+use journ_core::parsing::input::{BlockInput, LocatedInput, TextInput};
+use journ_core::parsing::text_block::block;
+use journ_core::parsing::util::{blank_line0, separated_field, word};
 use nom::branch::alt;
 use nom::bytes::complete::tag_no_case;
 use nom::character::complete::{digit1, space0};

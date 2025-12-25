@@ -6,23 +6,28 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::expr::column_value::ColumnValue;
-use crate::expr::context::EvalContext;
-use journ_core::error::JournResult;
+use crate::expr::{Expr, IdentifierContext};
+use journ_core::error::{JournError, JournResult};
 use smartstring::alias::String as SS;
-use std::mem;
 
-pub fn concat<'h, 'a, 's>(mut args: &mut [ColumnValue<'h>]) -> JournResult<ColumnValue<'h>> {
+pub fn concat<'h>(
+    args: &[Expr<'h>],
+    context: &mut dyn IdentifierContext<'h>,
+) -> JournResult<ColumnValue<'h>> {
     let mut result = SS::new();
 
     for i in 0..args.len() {
-        match mem::take(&mut args[i]) {
+        match args[i].eval(context)? {
+            // If there are two or more lists in arguments, combine them combinatorically.
             ColumnValue::List(l) => {
                 return Ok(ColumnValue::List(
                     l.into_iter()
                         .flatten()
                         .map(|v| {
-                            args[i] = v;
-                            concat(&mut Vec::from_iter(args.iter().cloned()))
+                            let mut res = SS::new();
+                            res.push_str(&v.to_string());
+                            res.push_str(concat(&args[i + 1..], context)?.to_string().as_str());
+                            Ok::<_, JournError>(ColumnValue::String(res))
                         })
                         .collect::<Result<Vec<_>, _>>()?,
                 ));

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023. Mark Barrett
+ * Copyright (c) 2023-2025. Mark Barrett
  * This file is part of Journ.
  * Journ is free software: you can redistribute it and/or modify it under the terms of the GNU Affero General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
@@ -11,90 +11,21 @@ use std::ptr::NonNull;
 use thread_local::ThreadLocal;
 
 /// This should only be used for testing. Unfortunately, there's no way to do conditional compilation
-/// for doctests until https://github.com/rust-lang/rust/issues/67295 is resolved.
+/// for doc tests until https://github.com/rust-lang/rust/issues/67295 is resolved.
 pub static HERD: std::sync::LazyLock<Herd> = std::sync::LazyLock::new(Default::default);
-
-/*
-pub trait Allocator<'h> {
-    fn alloc<T>(&self, obj: T) -> &'h mut T;
-    fn herd(&self) -> &'h Herd;
-}
-
-/// The allocator implements `Send` but not `Sync` due to `Member` not being `Sync`.
-pub struct ThreadAllocator<'h> {
-    herd: &'h Herd,
-    member: OnceCell<Member<'h>>,
-}
-impl<'h> ThreadAllocator<'h> {
-    pub fn new(herd: &'h Herd) -> Self {
-        Self { herd, member: OnceCell::new() }
-    }
-
-    pub fn herd(&self) -> &'h Herd {
-        self.herd
-    }
-
-    pub fn as_bump(&self) -> &Bump {
-        let member = self.member.get_or_init(|| self.herd.get());
-        member.as_bump()
-    }
-
-    pub fn alloc<T>(&self, obj: T) -> &'h mut T {
-        let member = self.member.get_or_init(|| self.herd.get());
-        member.alloc(obj)
-    }
-}
-
-impl<'h, A> Allocator<'h> for &A
-where
-    A: Allocator<'h>,
-{
-    fn alloc<T>(&self, obj: T) -> &'h mut T {
-        (*self).alloc(obj)
-    }
-    fn herd(&self) -> &'h Herd {
-        (*self).herd()
-    }
-}
-
-impl<'h> Allocator<'h> for ThreadAllocator<'h> {
-    fn alloc<T>(&self, obj: T) -> &'h mut T {
-        ThreadAllocator::alloc(self, obj)
-    }
-    fn herd(&self) -> &'h Herd {
-        ThreadAllocator::herd(self)
-    }
-}
-
-/*
-impl<'h, 'a> Allocator<'h> for &'a ThreadAllocator<'h> {
-    fn alloc<T>(&self, obj: T) -> &'h mut T {
-        ThreadAllocator::alloc(self, obj)
-    }
-    fn herd(&self) -> &'h Herd {
-        ThreadAllocator::herd(self)
-    }
-}*/
-
-impl Clone for ThreadAllocator<'_> {
-    fn clone(&self) -> Self {
-        Self { herd: self.herd, member: OnceCell::new() }
-    }
-}*/
 
 /// An allocator for `Herd` that implements the `std::alloc::Allocator` trait.
 #[derive(Debug)]
 pub struct HerdAllocator<'h> {
+    /// This must live on the outside so we can use its lifetime.
+    /// This can't be static because then we won't be able to get a mut ref to it to reset it.
+    /// It also can't be in a Mutex since the &'h Herd reference is required to exist within each member.
     herd: &'h Herd,
     member: ThreadLocal<Member<'h>>,
 }
 impl<'h> HerdAllocator<'h> {
     pub fn new(herd: &'h Herd) -> Self {
         Self { herd, member: ThreadLocal::new() }
-    }
-
-    pub fn member(&self) -> &Member<'h> {
-        self.member.get_or(|| self.herd.get())
     }
 
     pub fn alloc<T>(&self, obj: T) -> &'h mut T {

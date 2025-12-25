@@ -10,13 +10,10 @@ use journ_core::amount::Amount;
 use journ_core::amounts::Amounts;
 use journ_core::configuration::{AccountFilter, Filter};
 use journ_core::date_and_time::{JDate, JDateTime};
-use journ_core::err;
-use journ_core::error::JournResult;
 use journ_core::reporting::table::Cell;
 use journ_core::reporting::table2::{BLANK_CELL, CellRef, EllipsisCell, MultiLineCell};
 use journ_core::unit::Unit;
 use rust_decimal::Decimal;
-use smallvec::SmallVec;
 use smartstring::alias::String as SS;
 use std::iter::Sum;
 use std::sync::Arc;
@@ -91,6 +88,13 @@ impl<'h> ColumnValue<'h> {
         }
     }
 
+    pub fn into_list(self) -> Vec<ColumnValue<'h>> {
+        match self {
+            ColumnValue::List(v) => v,
+            other => vec![other],
+        }
+    }
+
     /*
     pub fn as_amounts(&self) -> Option<&[Amount<'h>]> {
         match self {
@@ -100,7 +104,7 @@ impl<'h> ColumnValue<'h> {
         }
     }*/
 
-    pub fn as_str<'s>(&'s self) -> Option<&'s str> {
+    pub fn as_str(&self) -> Option<&str> {
         match self {
             ColumnValue::StringRef(s) => Some(s),
             ColumnValue::String(s) => Some(s.as_str()),
@@ -146,11 +150,10 @@ impl<'h> ColumnValue<'h> {
                 if let (ColumnValue::List(a), ColumnValue::List(b)) = (self, other) {
                     // Everything in the two lists must compare the same way
                     let mut combined = a.iter().zip(b);
-                    if let Some(res) = combined.next().and_then(|(a, b)| a.cmp(b)) {
-                        if combined.all(|(a, b)| a.cmp(&b) == Some(res)) { Some(res) } else { None }
-                    } else {
-                        None
-                    }
+                    combined
+                        .next()
+                        .and_then(|(a, b)| a.cmp(b))
+                        .filter(|&res| combined.all(|(a, b)| a.cmp(b) == Some(res)))
                 } else {
                     None
                 }
@@ -194,8 +197,8 @@ impl<'h> ColumnValue<'h> {
                 }
                 Box::new(mapped.into_iter())
             }
-            (a, ColumnValue::List(list_b)) => Box::new(list_b.iter().map(|b| a.map(b)).flatten()),
-            (ColumnValue::List(list_a), b) => Box::new(list_a.iter().map(|a| a.map(b)).flatten()),
+            (a, ColumnValue::List(list_b)) => Box::new(list_b.iter().flat_map(|b| a.map(b))),
+            (ColumnValue::List(list_a), b) => Box::new(list_a.iter().flat_map(|a| a.map(b))),
             (ColumnValue::Amount(a), ColumnValue::Amount(b)) => {
                 if a.unit() == b.unit() || a.unit().is_none() || b.unit().is_none() {
                     Box::new(iter::once((Some(self), Some(other))))
@@ -224,7 +227,6 @@ impl<'h> ColumnValue<'h> {
             ColumnValue::Account(acc) => CellRef::Owned(Box::new(acc)),
             ColumnValue::Unit(unit) => CellRef::Owned(Box::new(unit.to_string())),
             ColumnValue::Amount(amount) => CellRef::Owned(amount.into_cell(amount.unit().format())),
-            ColumnValue::Amount { .. } => unreachable!(),
             ColumnValue::List(mut values) => {
                 values.sort();
 
@@ -261,7 +263,7 @@ impl fmt::Display for ColumnValue<'_> {
     }
 }
 
-impl<'s, 'a> From<ColumnValue<'a>> for Cell<'a> {
+impl<'a> From<ColumnValue<'a>> for Cell<'a> {
     fn from(value: ColumnValue<'a>) -> Self {
         match value {
             ColumnValue::Undefined => Cell::from("UNDEFINED"),
@@ -291,7 +293,7 @@ impl<'h, A: Amounts<'h>> From<A> for ColumnValue<'h> {
             return ColumnValue::Amount(amounts.as_slice()[0]);
         }
         let vec: Vec<ColumnValue> =
-            amounts.as_slice().into_iter().map(|a| ColumnValue::Amount(*a)).collect();
+            amounts.as_slice().iter().map(|a| ColumnValue::Amount(*a)).collect();
         ColumnValue::List(vec)
     }
 }
@@ -316,7 +318,7 @@ impl<'a, 'h> IntoIterator for &'a ColumnValue<'h> {
     type Item = &'a ColumnValue<'h>;
     type IntoIter = ColumnValueIter<'a, 'h>;
     fn into_iter(self) -> Self::IntoIter {
-        ColumnValueIter::new(&self)
+        ColumnValueIter::new(self)
     }
 }
 
@@ -328,6 +330,13 @@ impl<'h> IntoIterator for ColumnValue<'h> {
             ColumnValue::List(v) => v.into_iter(),
             other => vec![other].into_iter(),
         }
+    }
+}
+
+impl<'h, V: Into<ColumnValue<'h>>> FromIterator<V> for ColumnValue<'h> {
+    fn from_iter<T: IntoIterator<Item = V>>(iter: T) -> Self {
+        let vec: Vec<ColumnValue> = iter.into_iter().map(|v| v.into()).collect();
+        if vec.len() == 1 { vec.into_iter().next().unwrap() } else { ColumnValue::List(vec) }
     }
 }
 

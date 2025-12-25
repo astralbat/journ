@@ -13,14 +13,14 @@ use crate::journal_entry::{EntryObject, JournalEntry};
 use crate::match_blocks;
 use crate::metadata::Metadata;
 use crate::parsing::amount::amount_expr;
+use crate::parsing::input::{BlockInput, ConfigInput, LocatedInput, NodeInput, TextInput};
 use crate::parsing::text_block::block_remainder1;
-use crate::parsing::text_input::{BlockInput, ConfigInput, LocatedInput, NodeInput, TextInput};
 use crate::parsing::util::{
     blank_lines0, comment, recognize_rtrim, spaced_word, until_line_ending0,
 };
 use crate::parsing::{IParseResult, JParseResult};
 use crate::posting::Posting;
-use crate::valued_amount::{Valuation, ValuedAmount};
+use crate::valued_amount::{PostingValuation, ValuedAmount};
 use chrono_tz::Tz;
 use nom::branch::alt;
 use nom::bytes::complete::tag;
@@ -131,36 +131,44 @@ where
 {
     let total_val = map(
         pair(recognize(tuple((space0::<I, _>, tag("@@"), space0))), amount_expr),
-        |(pretext, expr)| Valuation::Total(expr.with_pretext(pretext.text()), false),
+        |(pretext, expr)| PostingValuation::new_total(expr.with_pretext(pretext.text()), false),
     );
     let unit_val = map(
         pair(recognize(tuple((space0::<I, _>, tag("@"), space0))), amount_expr),
-        |(pretext, expr)| Valuation::Unit(expr.with_pretext(pretext.text())),
+        |(pretext, expr)| PostingValuation::new_unit(expr.with_pretext(pretext.text())),
     );
 
     let allocator = input.config().allocator();
     let (rem, expr) = amount_expr(input)?;
     let va = || Ok(ValuedAmount::new_in(expr.clone(), allocator));
-    let (rem, res) = fold_many0(consumed(alt((total_val, unit_val))), va, |va, (input, val)| {
-        let mut acc = va?;
+    let (rem, res) =
+        fold_many0(consumed(alt((total_val, unit_val))), va, |va, (input, mut val)| {
+            let mut acc = va?;
 
-        if !val.value().is_positive() {
-            return Err(NomErr::Error(IParseError::new(
-                "Valuations should always be positive",
-                input,
-            )));
-        }
+            if !val.value().is_positive() {
+                return Err(NomErr::Error(IParseError::new(
+                    "Valuations should always be positive",
+                    input,
+                )));
+            }
 
-        if acc.unit() == val.unit() {
-            return Err(NomErr::Error(IParseError::new(
-                "Valuation unit must be different from the amount unit",
-                input,
-            )));
-        }
+            if acc.unit() == val.unit() {
+                return Err(NomErr::Error(IParseError::new(
+                    "Valuation unit must be different from the amount unit",
+                    input,
+                )));
+            }
 
-        acc.set_valuation(val);
-        Ok(acc)
-    })(rem.clone())?;
+            // Set the sign of the total valuation to match the primary amount.
+            // This is the internal representation for total valuations.
+            if val.is_total() && expr.is_negative() {
+                let negated = -val.value();
+                val = PostingValuation::new_total(val.into_expr().with_amount(negated), false)
+            }
+
+            acc.set_valuation(val);
+            Ok(acc)
+        })(rem.clone())?;
     Ok((rem, res?))
 }
 
@@ -181,8 +189,18 @@ where
     let mut comment_str = None;
     let mut balance_assertion_expr = None;
 
+    // Read the account
     let (input, (account_leading_space, account)) = account(input)?;
-    let (mut input, valued_amount) = opt(valued_amount)(input)?;
+
+    // Read an optional valued amount
+    let (mut input, mut valued_amount) = opt(valued_amount)(input)?;
+
+    // Replace the `valued_amount` primary unit if specified on the account (overrides global config)
+    if let Some(valued_amount) = &mut valued_amount
+        && let Some(unit) = account.unit(valued_amount.unit().code())
+    {
+        valued_amount.set_amount(unit.with_quantity(valued_amount.amount().quantity()));
+    }
 
     // Try read comment
     if valued_amount.is_none() {
@@ -211,7 +229,7 @@ where
 
 /// Parses metadata.
 /// Metadata valued may be quoted, for example, to preserve leading spaces. The quotes can be escaped by doubling them.
-pub(crate) fn metadata<'h, I: TextInput<'h> + BlockInput<'h>>(
+pub(crate) fn metadata<'h, I: TextInput<'h> + BlockInput<'h> + ConfigInput<'h>>(
     input: I,
 ) -> IParseResult<'h, I, Metadata<'h>> {
     let (input, (_pretext, _key_value)) = tuple((
@@ -222,7 +240,7 @@ pub(crate) fn metadata<'h, I: TextInput<'h> + BlockInput<'h>>(
     let mut md = Metadata::new(pretext.text(), key.text(), value.map(|s| s.text().trim_end()));
     md.set_raw_block(input.block());
      */
-    let md = Metadata::from(input.block());
+    let md = Metadata::lazy(input.config().clone(), input.block());
     Ok((input, md))
 }
 

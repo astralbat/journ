@@ -37,8 +37,8 @@ pub enum RoundingStrategy {
     HalfUp,
     HalfDown,
     HalfEven,
-    AlwaysUp,
-    AlwaysDown,
+    AwayFromZero,
+    ToZero,
 }
 
 impl From<RoundingStrategy> for rust_decimal::RoundingStrategy {
@@ -47,8 +47,8 @@ impl From<RoundingStrategy> for rust_decimal::RoundingStrategy {
             RoundingStrategy::HalfUp => rust_decimal::RoundingStrategy::MidpointAwayFromZero,
             RoundingStrategy::HalfDown => rust_decimal::RoundingStrategy::MidpointTowardZero,
             RoundingStrategy::HalfEven => rust_decimal::RoundingStrategy::MidpointNearestEven,
-            RoundingStrategy::AlwaysUp => rust_decimal::RoundingStrategy::AwayFromZero,
-            RoundingStrategy::AlwaysDown => rust_decimal::RoundingStrategy::ToZero,
+            RoundingStrategy::AwayFromZero => rust_decimal::RoundingStrategy::AwayFromZero,
+            RoundingStrategy::ToZero => rust_decimal::RoundingStrategy::ToZero,
         }
     }
 }
@@ -61,8 +61,8 @@ impl FromStr for RoundingStrategy {
             "halfup" => Ok(RoundingStrategy::HalfUp),
             "halfdown" => Ok(RoundingStrategy::HalfDown),
             "halfeven" => Ok(RoundingStrategy::HalfEven),
-            "up" => Ok(RoundingStrategy::AlwaysUp),
-            "down" => Ok(RoundingStrategy::AlwaysDown),
+            "awayfromzero" => Ok(RoundingStrategy::AwayFromZero),
+            "tozero" => Ok(RoundingStrategy::ToZero),
             other => Err(err!("Cannot parse rounding strategy: {}", other.to_string())),
         }
     }
@@ -74,12 +74,19 @@ impl fmt::Display for RoundingStrategy {
             RoundingStrategy::HalfUp => write!(f, "halfup"),
             RoundingStrategy::HalfDown => write!(f, "halfdown"),
             RoundingStrategy::HalfEven => write!(f, "halfeven"),
-            RoundingStrategy::AlwaysUp => write!(f, "up"),
-            RoundingStrategy::AlwaysDown => write!(f, "down"),
+            RoundingStrategy::AwayFromZero => write!(f, "up"),
+            RoundingStrategy::ToZero => write!(f, "down"),
         }
     }
 }
 
+/// Units describe a `Quantity` which together form an `Amount`. E.g. '$','€' etc.
+///
+/// # Thread Safety
+/// Units are aliased when created, typically with the `'h` lifetime. This usage means
+/// that many parser threads may see the same unit in multiple `Configurations`. Because of this,
+/// `&'h Unit<'h>` is required to be `Send`, but an aliased type `&T` can only be `Send` if it is also `Sync`.
+/// Therefore, we require this type to be both `Send` and `Sync`.
 #[derive(Clone)]
 pub struct Unit<'h> {
     code: String,
@@ -384,12 +391,10 @@ pub enum NumberFormatPart {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NumberFormat {
-    negative_style: NegativeStyle,
+    negative_style: Option<NegativeStyle>,
     parts: Vec<NumberFormatPart>,
     thousands_separator: u8,
     decimal_separator: u8,
-    //min_scale: Option<u8>,
-    //max_scale: Option<u8>,
 }
 
 thread_local!(static NUMBER_BUF: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new())));
@@ -431,11 +436,11 @@ impl NumberFormat {
         }
     }
 
-    pub fn negative_style(&self) -> NegativeStyle {
+    pub fn negative_style(&self) -> Option<NegativeStyle> {
         self.negative_style
     }
 
-    pub fn set_negative_style(&mut self, negative_style: NegativeStyle) {
+    pub fn set_negative_style(&mut self, negative_style: Option<NegativeStyle>) {
         self.negative_style = negative_style
     }
 
@@ -448,11 +453,13 @@ impl NumberFormat {
             decimal_separator = b',';
         }
 
-        // Assume negative sign (e.g. -10.0) rather than brackets (e.g. (10.0)).
-        let mut negative_format = NegativeStyle::NegativeSign;
-        if s.starts_with('(') && s.ends_with(')') {
-            negative_format = NegativeStyle::Brackets;
-        }
+        let negative_style = if s.starts_with('-') {
+            Some(NegativeStyle::NegativeSign)
+        } else if s.starts_with('(') && s.ends_with(')') {
+            Some(NegativeStyle::Brackets)
+        } else {
+            None
+        };
 
         // If this is non-definitive, it means that we are not parsing a format specification, but the first occurrence of an amount.
         // Therefore, we can't assert too much information from this amount, except that if it has trailing zeros in the fraction part, we can
@@ -463,7 +470,11 @@ impl NumberFormat {
         for (pos, c) in s.char_indices() {
             match c {
                 // The default for non-definitive specs is to write for example, 0.5 rather than .5.
-                d if d.is_ascii_digit() && !definitive && decimal_sep_pos == Some(pos + 1) => {
+                d if d.is_ascii_digit()
+                    && !definitive
+                    && (decimal_sep_pos == Some(pos + 1)
+                        || (!found_decimal_sep && pos + 1 == s.len())) =>
+                {
                     Some(NumberFormatPart::Zero)
                 }
                 d if d.is_ascii_digit() && !definitive && !found_decimal_sep => {
@@ -486,15 +497,15 @@ impl NumberFormat {
             .for_each(|f| parts.push(*f));
         }
 
-        NumberFormat {
-            negative_style: negative_format,
-            thousands_separator,
-            decimal_separator,
-            parts,
-        }
+        NumberFormat { negative_style, thousands_separator, decimal_separator, parts }
     }
 
-    pub fn write(&self, mut quantity: Quantity, writer: &mut impl fmt::Write) -> fmt::Result {
+    pub fn write(
+        &self,
+        mut quantity: Quantity,
+        full_precision: bool,
+        writer: &mut impl fmt::Write,
+    ) -> fmt::Result {
         quantity = quantity.normalize();
 
         let scale = quantity.scale();
@@ -520,11 +531,12 @@ impl NumberFormat {
         }
 
         // Write negative opening bracket if needed
-        if quantity.is_sign_negative() {
-            if self.negative_style() == NegativeStyle::Brackets {
-                writer.write_char('(')?;
-            } else {
-                writer.write_char('-')?;
+        if quantity.is_sign_negative()
+            && let Some(neg_style) = self.negative_style
+        {
+            match neg_style {
+                NegativeStyle::NegativeSign => writer.write_char('-')?,
+                NegativeStyle::Brackets => writer.write_char('(')?,
             }
         }
 
@@ -579,7 +591,7 @@ impl NumberFormat {
         let decimal_start = start_pos + num_integer_digits as usize;
         for &byte in digit_buffer[decimal_start..decimal_start + scale as usize].iter() {
             // Don't write anything beyond max_scale
-            if !self.parts.is_empty() && fraction_parts.next().is_none() {
+            if !self.parts.is_empty() && fraction_parts.next().is_none() && !full_precision {
                 break;
             }
 
@@ -608,7 +620,7 @@ impl NumberFormat {
         }
 
         // Write closing negative bracket if needed
-        if quantity.is_sign_negative() && self.negative_style() == NegativeStyle::Brackets {
+        if quantity.is_sign_negative() && self.negative_style() == Some(NegativeStyle::Brackets) {
             writer.write_char(')')?;
         }
         Ok(())
@@ -661,32 +673,13 @@ impl NumberFormat {
         }
         num
     }
-
-    /*
-
-    /// Ensure at least `self.min_scale` number of zeros are on the end
-    fn add_padding_zeros(&self, num: &mut String) {
-        if let Some(min_scale) = self.min_scale {
-            let how_many = match num.bytes().position(|c| c == self.decimal_separator) {
-                Some(pos) => i16::from(min_scale) - (num.chars().count() - (pos + 1)) as i16,
-                None => {
-                    if min_scale > 0 {
-                        num.push(self.decimal_separator as char);
-                    }
-                    i16::from(min_scale)
-                }
-            };
-            for _ in 0..how_many {
-                num.push('0');
-            }
-        }
-    }*/
 }
 
 impl Default for NumberFormat {
     fn default() -> Self {
         Self {
-            negative_style: NegativeStyle::NegativeSign,
+            // The negative style is expressed on the default UnitFormat instead.
+            negative_style: None,
             parts: vec![],
             thousands_separator: b',',
             decimal_separator: b'.',
@@ -696,10 +689,10 @@ impl Default for NumberFormat {
 
 impl fmt::Display for NumberFormat {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        if self.negative_style == NegativeStyle::Brackets {
-            write!(f, "(")?;
-        } else {
-            write!(f, "-")?;
+        match self.negative_style() {
+            Some(NegativeStyle::NegativeSign) => write!(f, "-")?,
+            Some(NegativeStyle::Brackets) => write!(f, "(")?,
+            None => {}
         }
         for part in &self.parts {
             match part {
@@ -709,53 +702,21 @@ impl fmt::Display for NumberFormat {
                 NumberFormatPart::Separator(c) => write!(f, "{}", *c as char)?,
             }
         }
-        /*
-        let to_go = self.significant_digits.min(4);
-        for i in (0..to_go).rev() {
-            if i.is_multiple_of(3) {
-                write!(f, "{}", self.thousands_separator as char)?;
-            }
-            if to_go > self.significant_digits {
-                write!(f, "#")?;
-            } else {
-                write!(f, "0")?;
-            }
+        if let Some(NegativeStyle::Brackets) = &self.negative_style() {
+            write!(f, ")")?;
         }
-        write!(f, "1{}000", self.thousands_separator as char)?;
-
-        let mut wrote_dec_sep = false;
-        match self.min_scale {
-            Some(min_scale) if min_scale > 0 => {
-                write!(f, "{}", self.decimal_separator as char)?;
-                wrote_dec_sep = true;
-                for _ in 0..min_scale {
-                    write!(f, "0")?;
-                }
-            }
-            _ => {}
-        }
-        match self.max_scale {
-            Some(max_scale) if max_scale > 0 => {
-                if !wrote_dec_sep {
-                    write!(f, "{}", self.decimal_separator as char)?;
-                }
-                for _ in self.min_scale.unwrap_or(0)..max_scale {
-                    write!(f, "#")?;
-                }
-            }
-            _ => {}
-        }*/
         Ok(())
     }
 }
 
+/*
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum NegativePosition {
     /// E.g. $-10
     QuantityAdjacent,
     /// E.g. -$10
     CodeAdjacent,
-}
+}*/
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CodePosition {
@@ -827,7 +788,9 @@ pub struct UnitFormat {
     number_format: NumberFormat,
     code: CodeFormat,
     code_position: CodePosition,
-    negative_position: NegativePosition,
+    /// The style for any negative adjacent to the code but not the number format.
+    /// E.g. -$10.00 vs $-10.00.
+    negative_style: Option<NegativeStyle>,
 }
 
 impl UnitFormat {
@@ -835,17 +798,27 @@ impl UnitFormat {
         number_format: NumberFormat,
         code: CodeFormat,
         code_position: CodePosition,
-        negative_position: NegativePosition,
+        negative_style: Option<NegativeStyle>,
     ) -> Self {
-        Self { number_format, code, code_position, negative_position }
+        assert!(
+            negative_style.is_none() || number_format.negative_style.is_none(),
+            "Negatives cannot be specified on both before code and before amount positions"
+        );
+
+        Self { number_format, code, code_position, negative_style }
     }
 
     pub fn number_format(&self) -> &NumberFormat {
         &self.number_format
     }
 
-    pub fn negative_position(&self) -> NegativePosition {
-        self.negative_position
+    pub fn with_number_format(mut self, nf: NumberFormat) -> Self {
+        self.number_format = nf;
+        self
+    }
+
+    pub fn negative_style(&self) -> Option<NegativeStyle> {
+        self.negative_style
     }
 
     /// Gets whether the code should be on the left of the quantity.
@@ -861,26 +834,31 @@ impl UnitFormat {
         }
     }
 
-    pub fn code<'a, 'h>(&'a self, amount: Amount<'h>) -> Option<&'a str>
+    pub fn code<'a, 'h>(&'a self, unit_code: &'a str) -> Option<&'a str>
     where
         'h: 'a,
     {
         match &self.code {
             CodeFormat::Literal(s) => Some(&**s),
             CodeFormat::Never => None,
-            CodeFormat::Unit => Some(amount.unit().code()),
+            CodeFormat::Unit => Some(unit_code),
         }
     }
 
-    pub fn format(&self, amount: Amount) -> SS {
+    pub fn format(
+        &self,
+        quantity: Quantity,
+        unit_code: &str,
+        rounding_strategy: RoundingStrategy,
+    ) -> SS {
         let mut s = SS::new();
-        self.write_amount(amount, &mut s, None).unwrap();
+        self.write_amount(quantity, unit_code, Some(rounding_strategy), &mut s).unwrap();
         s
     }
 
-    pub fn format_precise(&self, amount: Amount) -> SS {
+    pub fn format_precise(&self, quantity: Quantity, unit_code: &str) -> SS {
         let mut s = SS::new();
-        self.write_amount(amount, &mut s, Some(&self.number_format.with_full_precision())).unwrap();
+        self.write_amount(quantity, unit_code, None, &mut s).unwrap();
         s
     }
 
@@ -906,8 +884,11 @@ impl UnitFormat {
             }
         };
         // Write negative sign before the code
-        if self.negative_position == NegativePosition::CodeAdjacent && code_on_left {
-            write!(writer, "-")?;
+        if let Some(neg_style) = self.negative_style {
+            match neg_style {
+                NegativeStyle::NegativeSign => write!(writer, "-")?,
+                NegativeStyle::Brackets => write!(writer, "(")?,
+            }
         }
 
         if code_on_left {
@@ -930,28 +911,32 @@ impl UnitFormat {
             }
         }
 
+        if let Some(negative_style) = self.negative_style
+            && negative_style == NegativeStyle::Brackets
+        {
+            write!(writer, ")")?;
+        }
+
         Ok(())
     }
 
+    /// Set `rounding_strategy` to `None` to write with full precision.
     pub fn write_amount(
         &self,
-        amount: Amount,
+        mut quantity: Quantity,
+        code: &str,
+        rounding_strategy: Option<RoundingStrategy>,
         writer: &mut impl fmt::Write,
-        alt_number_fmt: Option<&NumberFormat>,
     ) -> fmt::Result {
-        let number_format = match alt_number_fmt {
-            Some(nf) => nf,
-            None => &self.number_format,
-        };
-        let mut quantity = amount.quantity();
-        if let Some(max_scale) = number_format.max_scale() {
-            quantity = quantity
-                .round_dp_with_strategy(max_scale as u32, amount.unit().rounding_strategy().into());
+        if let (Some(max_scale), Some(rounding_strategy)) =
+            (self.number_format.max_scale(), rounding_strategy)
+        {
+            quantity = quantity.round_dp_with_strategy(max_scale as u32, rounding_strategy.into());
         }
 
-        let code_s = self.code(amount).unwrap_or("");
+        let code_s = self.code(code).unwrap_or("");
         let add_quotes = code_s.chars().any(parsing::amount::illegal_unit_code_char);
-        let code_on_left = self.code_on_left(amount.unit().code());
+        let code_on_left = self.code_on_left(code);
         let padding = match &self.code_position {
             CodePosition::PaddedLeft(padding) => &**padding,
             CodePosition::PaddedRight(padding) => &**padding,
@@ -964,12 +949,18 @@ impl UnitFormat {
             }
         };
         // Write negative sign before the code
-        if quantity.is_sign_negative()
-            && self.negative_position == NegativePosition::CodeAdjacent
-            && code_on_left
-        {
-            quantity = -quantity;
-            write!(writer, "-")?;
+        if quantity.is_sign_negative() {
+            match self.negative_style {
+                Some(NegativeStyle::NegativeSign) => {
+                    quantity = -quantity;
+                    write!(writer, "-")?
+                }
+                Some(NegativeStyle::Brackets) => {
+                    quantity = -quantity;
+                    write!(writer, "(")?;
+                }
+                None => {}
+            }
         }
 
         if code_on_left {
@@ -980,9 +971,9 @@ impl UnitFormat {
                     write!(writer, "{}{}", code_s, padding)?;
                 }
             }
-            number_format.write(quantity, writer)?;
+            self.number_format.write(quantity, rounding_strategy.is_none(), writer)?;
         } else {
-            number_format.write(quantity, writer)?;
+            self.number_format.write(quantity, rounding_strategy.is_none(), writer)?;
             if !code_s.is_empty() {
                 if add_quotes {
                     write!(writer, "{}\"{}\"", padding, code_s)?;
@@ -990,6 +981,10 @@ impl UnitFormat {
                     write!(writer, "{}{}", padding, code_s)?;
                 }
             }
+        }
+
+        if self.negative_style == Some(NegativeStyle::Brackets) {
+            write!(writer, ")")?;
         }
 
         Ok(())
@@ -1002,7 +997,7 @@ impl Default for UnitFormat {
             number_format: NumberFormat::default(),
             code: CodeFormat::default(),
             code_position: CodePosition::Adaptive,
-            negative_position: NegativePosition::CodeAdjacent,
+            negative_style: Some(NegativeStyle::NegativeSign),
         }
     }
 }

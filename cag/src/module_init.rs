@@ -7,7 +7,7 @@
  */
 use crate::cgt_configuration::UnitOfAccountChange;
 use crate::cgt_configuration::{AssignExpenses, MatchMethod};
-use crate::cgt_configuration::{CgtConfiguration, PoolConfiguration};
+use crate::cgt_configuration::{CagConfiguration, PoolConfiguration};
 use crate::ruleset;
 use chrono_tz::Tz;
 use journ_core::directive::{Directive, DirectiveKind};
@@ -15,7 +15,7 @@ use journ_core::error::parsing::IErrorMsg;
 use journ_core::error::parsing::promote;
 use journ_core::module::{Module, ModuleDirective, ModuleDirectiveInput};
 use journ_core::parsing::JParseResult;
-use journ_core::parsing::text_input::{BlockInput, ConfigInput, LocatedInput, TextInput};
+use journ_core::parsing::input::{BlockInput, ConfigInput, LocatedInput, TextInput};
 use journ_core::parsing::util::rest_line1;
 use journ_core::parsing::util::{line_value, param_value};
 use journ_core::parsing::{amount, entry};
@@ -26,8 +26,8 @@ use std::str::FromStr;
 use std::sync::LazyLock;
 
 pub static MODULE_NAME: &str = "capital_gains";
-pub static DEFAULT_CGT_CONFIG: LazyLock<CgtConfiguration> =
-    LazyLock::new(|| CgtConfiguration::default());
+pub static DEFAULT_CGT_CONFIG: LazyLock<CagConfiguration> =
+    LazyLock::new(|| CagConfiguration::default());
 
 pub fn initialize() -> Module {
     let mut module = Module::new(MODULE_NAME);
@@ -61,7 +61,7 @@ impl ModuleDirective for CgtDirective {
         'h: 'e,
         'e: 's,
     {
-        let mut config = CgtConfiguration::empty();
+        let mut config = CagConfiguration::empty();
         let (rem, input) = rest(input)?;
 
         match_blocks!(input,
@@ -109,11 +109,11 @@ impl ModuleDirective for CgtDirective {
             }
         )?;
 
-        let existing: CgtConfiguration =
+        let existing: CagConfiguration =
             input.config().module_config(MODULE_NAME).cloned().unwrap();
         match existing.merge(&config) {
             Ok(new_config) => {
-                let allocated = &*input.allocator().alloc(new_config);
+                let allocated = &*input.config().allocator().alloc(new_config);
                 input.config_mut().set_module_config(MODULE_NAME, allocated);
                 Ok((rem, Directive::new(Some(input.block()), DirectiveKind::Module(allocated))))
             }
@@ -133,6 +133,7 @@ where
     let mut pool_config = PoolConfiguration::new(pool_name.text().trim().to_string());
 
     match_blocks!(input,
+        /*
         param_value("unitOfAccount") => |input: I| {
             let (input, unit_code) = promote(IErrorMsg::UNIT, amount::unit)(input)?;
             let allocator = input.config().allocator();
@@ -147,7 +148,7 @@ where
             )?;
             pool_config.set_unit_of_account_change(Some(UnitOfAccountChange::new(unit.code().to_string(), value_date)));
             Ok(())
-        },
+        },*/
         param_value("name") => |input: I| {
             pool_config.set_new_name(promote(IErrorMsg::VALUE, line_value)(input)?.1.text().to_string());
             Ok(())

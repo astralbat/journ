@@ -12,19 +12,17 @@ use crate::configuration::Configuration;
 use crate::date_and_time::{DateAndTime, JDate};
 use crate::error::{BlockContext, BlockContextError, JournError, JournResult};
 use crate::ext::{RangeBoundsExt, StrExt};
-use crate::journal_entry_flow::Flows;
-use crate::journal_node::NodeId;
-use crate::metadata::{Metadata, MetadataKey};
+use crate::journal_entry_flow::{Flow, Flows};
+use crate::journal_node::{FIRST_NODE_ID, LAST_NODE_ID, NodeId};
+use crate::metadata::Metadata;
 use crate::parsing::text_block::TextBlock;
 use crate::posting::{Posting, PostingId};
 use crate::unit::Unit;
-use crate::valued_amount::Valuation;
 use crate::{err, match_map};
 use chrono::{
     DateTime, Datelike, Duration, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Timelike,
 };
 use chrono_tz::Tz;
-use linked_hash_set::LinkedHashSet;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::Zero;
 use rust_decimal_macros::*;
@@ -43,10 +41,60 @@ pub struct EntryId<'h> {
     id: u32,
 }
 
+/// An entry identifier that identifies entries in time order.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd)]
+pub struct EntryDateId<'h> {
+    // UTC date from compares first
+    datetime_from: NaiveDateTime,
+    // UTC date to compares second
+    datetime_to: NaiveDateTime,
+    // Fall back to comparing the entry in node/parsed order
+    id: EntryId<'h>,
+}
+
+impl<'h> EntryDateId<'h> {
+    pub fn date_range<R: RangeBounds<DateTime<Tz>>>(range: R) -> Range<EntryDateId<'h>> {
+        let start = match range.start_bound() {
+            Bound::Included(date) => date.naive_utc(),
+            Bound::Excluded(date) => date.add(Duration::seconds(1)).naive_utc(),
+            Bound::Unbounded => NaiveDateTime::new(
+                NaiveDate::from_ymd_opt(1, 1, 1).unwrap(),
+                NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
+            ),
+        };
+        let end = match range.end_bound() {
+            Bound::Included(date) => date.add(Duration::seconds(1)).naive_utc(),
+            Bound::Excluded(date) => date.naive_utc(),
+            // The max date where num_days_from_ce() fits in 20 bits
+            Bound::Unbounded => NaiveDateTime::new(
+                NaiveDate::from_ymd_opt(2871, 11, 25).unwrap(),
+                NaiveTime::from_hms_opt(23, 59, 59).unwrap(),
+            ),
+        };
+        EntryDateId {
+            datetime_from: start,
+            datetime_to: start,
+            id: EntryId { node_id: &FIRST_NODE_ID, id: 0 },
+        }..EntryDateId {
+            datetime_from: end,
+            datetime_to: end,
+            id: EntryId { node_id: &LAST_NODE_ID, id: u32::MAX },
+        }
+    }
+}
+
+impl<'h> From<&JournalEntry<'h>> for EntryDateId<'h> {
+    fn from(entry: &JournalEntry<'h>) -> Self {
+        let datetime_from = entry.date_and_time().datetime_from().naive_utc();
+        let datetime_to = entry.date_and_time().datetime_to().naive_utc();
+        EntryDateId { datetime_from, datetime_to, id: entry.id() }
+    }
+}
+
 impl<'h> EntryId<'h> {
     pub(crate) fn allocate(node_id: &'h NodeId<'h>) -> Self {
         thread_local! {
-            static ENTRY_COUNTER: Cell<u32> = Cell::new(0);
+            static ENTRY_COUNTER: Cell<u32> = const { Cell::new(0) };
         }
         let new_id = ENTRY_COUNTER.with(|k| {
             let prev_id = k.get();
@@ -78,6 +126,7 @@ impl<'h> EntryId<'h> {
     }
 
     /// Gets an id that points to the first entry at the particular date and time.
+    /// The id is shifted to the left by 27 bits to allow for 2^27 entries at the same date and time.
     pub(crate) fn id_first(date: &DateTime<Tz>) -> u64 {
         // This scheme still gives us room for a maximum 2^27 entries
         let utc_date = date.naive_utc();
@@ -309,14 +358,13 @@ impl<'h> JournalEntry<'h> {
             .filter_map(move |obj| if let EntryObject::Metadata(m) = obj { Some(m) } else { None })
     }
 
-    pub fn metadata_tag_values(&self, key: &str) -> LinkedHashSet<String> {
-        let mut vals = LinkedHashSet::new();
+    pub fn metadata_by_key(&self, key: &str) -> SmallVec<[&Metadata<'h>; 4]> {
+        let mut vals = SmallVec::new();
         for obj in self.objects.iter() {
             if let EntryObject::Metadata(m) = obj
                 && m.key() == key
-                && let Some(val) = m.value_unindented()
             {
-                vals.insert_if_absent(val);
+                vals.push(m);
             }
         }
         vals
@@ -326,7 +374,7 @@ impl<'h> JournalEntry<'h> {
         for obj in self.objects.iter() {
             if let EntryObject::Metadata(m) = obj
                 && m.key() == key
-                && m.value() == Some(value)
+                && m.value().map(|v| v == value).unwrap_or(false)
             {
                 return true;
             }
@@ -339,50 +387,47 @@ impl<'h> JournalEntry<'h> {
         self.objects.retain(|obj| matches!(obj, EntryObject::Metadata(..)));
     }
 
-    pub fn retain_metadata_tag_values<F>(&mut self, retain: F)
-    where
-        F: Fn(MetadataKey, Option<&str>) -> bool,
-    {
-        self.objects.retain(|obj| {
-            if let EntryObject::Metadata(m) = obj {
-                return retain(m.key(), m.value());
-            }
-            true
-        });
-    }
-
     /// Inserts the metadata at the specified position relating to other metadata items.
     /// If there are no other metadata items, the position _must_ be 0 and the metadata will be appended
     /// to the end of the entry.
     ///
     /// # Panics
     /// If the position is out of range.
-    pub fn insert_metadata(&mut self, pos: usize, key: &'h str, value: &'h str) {
+    pub fn insert_metadata(&mut self, pos: usize, metadata: Metadata<'h>) {
         let metadata_count =
             self.objects.iter().filter(|obj| matches!(obj, EntryObject::Metadata(..))).count();
         assert!(pos <= metadata_count, "Position out of range");
 
         // Find the prefixing spacing by examining other objects in the entry, preferably other metadata.
-        let mut block_text = match pos.checked_sub(1).and_then(|p| self.metadata().nth(p)) {
-            Some(md) => md.pretext().to_string(),
+        let mut block_text = String::new();
+        match pos.checked_sub(1).and_then(|p| self.metadata().nth(p)).and_then(|m| m.pretext()) {
+            Some(pretext) => {
+                block_text.push_str(pretext);
+            }
             None => {
-                let mut leading_whitespace = match self.objects.last() {
+                match self.objects.last() {
                     Some(EntryObject::Posting(pst, ..)) => {
                         // FIXME: This should be the posting's block pretext.
-                        "\n".to_string() + pst.leading_whitespace()
+                        block_text.push('\n');
+                        block_text.push_str(pst.leading_whitespace());
                     }
                     Some(EntryObject::Metadata(_md)) => unreachable!(),
                     // FIXME: This should be the comment's block pretext
-                    Some(EntryObject::Comments(c)) => c.leading_whitespace().to_string(),
-                    None => "  ".to_string(),
-                };
-                leading_whitespace.push('+');
-                leading_whitespace
+                    Some(EntryObject::Comments(c)) => {
+                        block_text.push_str(c.leading_whitespace());
+                    }
+                    None => {
+                        block_text.push_str("  ");
+                    }
+                }
+                block_text.push('+');
             }
         };
-        block_text.push_str(key);
-        block_text.push_str("  ");
-        block_text.push_str(value);
+        block_text.push_str(metadata.key().as_ref());
+        if let Some(v) = metadata.value() {
+            block_text.push_str("  ");
+            block_text.push_str(v);
+        }
 
         // Find the `self.objects` index: i where the metadata position is at pos.
         // If there are no other metadata items, the metadata will be appended
@@ -396,16 +441,13 @@ impl<'h> JournalEntry<'h> {
             .unwrap_or(self.objects.len());
 
         let allocator = self.config.allocator();
-        self.objects.insert(
-            insert_pos,
-            EntryObject::Metadata(Metadata::from(
-                &*allocator.alloc(TextBlock::from(allocator.alloc(block_text).as_str())),
-            )),
-        )
+        let block = allocator.alloc(TextBlock::from(allocator.alloc(block_text).as_str()));
+        self.objects
+            .insert(insert_pos, EntryObject::Metadata(Metadata::lazy(self.config.clone(), block)))
     }
 
-    pub fn append_metadata(&mut self, key: &'h str, value: &'h str) {
-        self.insert_metadata(self.metadata().count(), key, value);
+    pub fn append_metadata(&mut self, metadata: Metadata<'h>) {
+        self.insert_metadata(self.metadata().count(), metadata);
     }
 
     pub fn remove_metadata_tags_by_key(&mut self, key: &str) {
@@ -420,7 +462,7 @@ impl<'h> JournalEntry<'h> {
     pub fn remove_metadata_tags_by_key_and_value(&mut self, key: &str, val: &str) {
         self.objects.retain(|obj| {
             if let EntryObject::Metadata(m) = obj {
-                return m.key() != key || m.value() != Some(val);
+                return m.key() != key || m.value().map(|v| v != val).unwrap_or(true);
             }
             true
         });
@@ -439,8 +481,25 @@ impl<'h> JournalEntry<'h> {
         false
     }
 
-    pub fn flows(&self) -> Flows<'h> {
-        Flows::create(self)
+    pub fn flows(&self) -> impl Flows<'h> {
+        let mut flows: SmallVec<[Flow<'h>; 4]> = smallvec![];
+        for pst in self.postings() {
+            // Create a new flow for the posting without any pretext.
+            let mut va = pst.valued_amount().clone();
+            va.set_pretext("");
+            flows.push(Flow::new(Some(pst.account().clone()), va));
+
+            /*
+            match flows.iter_mut().find(|f| {
+                f.account_type() == pst.account().account_type() && f.unit() == pst.unit()
+            }) {
+                Some(flow) => *flow = (&*flow + new_flow).unwrap(),
+                None => flows.push(new_flow),
+            }*/
+        }
+        // A flow of net 0 isn't a flow.
+        flows.retain(|f| f.amount() != 0);
+        flows
     }
 
     /// Checks and creates a new modified entry with derived entries and elided postings.
@@ -597,6 +656,14 @@ impl<'h> JournalEntry<'h> {
             let mut credits_total = unit.with_quantity(0);
             let mut debits_total = unit.with_quantity(0);
             for pst in self.postings().filter(|p| p.account().is_balanced()) {
+                if let Some(val) = pst.valued_amount().value_in(unit) {
+                    if val > 0 {
+                        debits_total += val;
+                    } else {
+                        credits_total += val;
+                    }
+                }
+                /*
                 // We allow for there to be multiple valuations in the same unit. We just take the first one
                 // for our needs and leave it up to the ValuedAmount to ensure they're consistent.
                 if let Some(val) =
@@ -618,15 +685,16 @@ impl<'h> JournalEntry<'h> {
                                 debits_total += total;
                             }
                         }
-                    }
-                } else {
+                    }*/
+                else {
                     continue 'next_unit;
                 }
             }
-            if credits_total.abs() != debits_total {
+            let sum = credits_total.rounded() + debits_total.rounded();
+            if !sum.is_zero() {
                 error!("Error on entry:\n{:?}", self);
                 return Err(
-                    err!(err!("Credits: {}\n    Debits:  {}", credits_total, debits_total); "Unable to balance valuations in entry"),
+                    err!(err!("Credits: {}, Debits: {} ({} difference)", credits_total.format_precise(), debits_total.format_precise(), sum.format_precise()); "Unable to balance valuations in entry"),
                 );
             }
         }
@@ -648,9 +716,7 @@ impl<'h> JournalEntry<'h> {
         for pst in self.postings() {
             if pst.amount() == 0 {
                 for valuation in pst.valuations() {
-                    if let Valuation::Total(value, _) = valuation
-                        && !value.is_zero()
-                    {
+                    if !valuation.value().is_zero() {
                         return Err(err!(err!(
                                 "Value should be 0 for 0 posting amounts: {}",
                                 pst

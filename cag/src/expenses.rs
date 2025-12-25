@@ -5,18 +5,21 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
-use crate::cgt_configuration::{AssignExpenses, CgtConfiguration};
+use crate::cgt_configuration::{AssignExpenses, CagConfiguration};
 use crate::module_init::MODULE_NAME;
 use journ_core::journal_entry::JournalEntry;
+use journ_core::metadata::{Metadata, MetadataKey};
 use journ_core::unit::Unit;
 use journ_core::valued_amount::ValuedAmount;
 use journ_core::valuer::ValueResult;
 use rust_decimal::Decimal;
 use smallvec::SmallVec;
+use std::borrow::Cow;
 
-const SHARED_EXPENSE_TAG: &str = "CAG-DealExpense";
-const ACQUISITION_EXPENSE_TAG: &str = "CAG-AcquisitionExpense";
-const DISPOSAL_EXPENSE_TAG: &str = "CAG-DisposalExpense";
+pub const SHARED_EXPENSE_TAG: MetadataKey = MetadataKey(Cow::Borrowed("CAG-DealExpense"));
+pub const ACQUISITION_EXPENSE_TAG: MetadataKey =
+    MetadataKey(Cow::Borrowed("CAG-AcquisitionExpense"));
+pub const DISPOSAL_EXPENSE_TAG: MetadataKey = MetadataKey(Cow::Borrowed("CAG-DisposalExpense"));
 
 /// A scanner and holder of entry expenses.
 ///
@@ -53,20 +56,24 @@ impl<'h> EntryExpenses<'h> {
         let mut disposal_expenses = ValuedAmount::nil();
         let mut acquisition_expenses = ValuedAmount::nil();
         let mut shared_expenses = ValuedAmount::nil();
-        let mut pst_iter = entry.postings();
-        while let Some(pst) = pst_iter.next() {
-            let accum;
-            match pst.account().get_best_tag(&[
-                DISPOSAL_EXPENSE_TAG,
-                ACQUISITION_EXPENSE_TAG,
-                SHARED_EXPENSE_TAG,
-            ]) {
-                Some(DISPOSAL_EXPENSE_TAG) => accum = &mut disposal_expenses,
-                Some(ACQUISITION_EXPENSE_TAG) => accum = &mut acquisition_expenses,
-                Some(SHARED_EXPENSE_TAG) => accum = &mut shared_expenses,
+        for pst in entry.postings() {
+            let accum = match pst
+                .account()
+                .metadata_by_keys(&[
+                    &DISPOSAL_EXPENSE_TAG,
+                    &ACQUISITION_EXPENSE_TAG,
+                    &SHARED_EXPENSE_TAG,
+                ])
+                .into_iter()
+                .next()
+                .map(Metadata::key)
+            {
+                Some(k) if k == &DISPOSAL_EXPENSE_TAG => &mut disposal_expenses,
+                Some(k) if k == &ACQUISITION_EXPENSE_TAG => &mut acquisition_expenses,
+                Some(k) if k == &SHARED_EXPENSE_TAG => &mut shared_expenses,
                 Some(_) => unreachable!(),
                 None => continue,
-            }
+            };
             match &*accum + pst.valued_amount() {
                 Some(val) if val.units().count() == 1 && val.value_in(value_unit).is_none() => {
                     ValueResult::ValuationNeeded(val.unit(), value_unit)?;
@@ -90,7 +97,6 @@ impl<'h> EntryExpenses<'h> {
             }
             Some(_) => {}
             None => {
-                drop(pst_iter);
                 for expense in [&acquisition_expenses, &disposal_expenses, &shared_expenses].iter()
                 {
                     if expense.value_in(value_unit).is_none() {
@@ -102,7 +108,7 @@ impl<'h> EntryExpenses<'h> {
 
         let assign_expenses = entry
             .config()
-            .module_config::<CgtConfiguration>(MODULE_NAME)
+            .module_config::<CagConfiguration>(MODULE_NAME)
             .unwrap()
             .assign_expenses();
 
@@ -136,28 +142,25 @@ impl<'h> EntryExpenses<'h> {
             iter.clone().map(|f| if f.amount().is_positive() { f } else { &nil_amount });
         let disposal_filter =
             iter.clone().map(|f| if f.amount().is_negative() { f } else { &nil_amount });
-        let shared_filter = iter.clone().map(|f| match self.assign_expenses {
-            AssignExpenses::PreferAcquisition if has_acquisition => {
-                if f.amount().is_positive() {
-                    f
-                } else {
-                    &nil_amount
+        let shared_filter =
+            iter.clone().map(|f| match self.assign_expenses {
+                AssignExpenses::PreferAcquisition if has_acquisition => {
+                    if f.amount().is_positive() { f } else { &nil_amount }
                 }
-            }
-            AssignExpenses::PreferDisposal if has_disposal => {
-                if f.amount().is_negative() {
-                    f
-                } else {
-                    &nil_amount
+                AssignExpenses::PreferDisposal if has_disposal => {
+                    if f.amount().is_negative() {
+                        f
+                    } else {
+                        &nil_amount
+                    }
                 }
-            }
-            _ => f,
-        });
+                _ => f,
+            });
 
         let (acquisition_weights, disposal_weights, shared_weights) = match (
-            ValuedAmount::into_normalized_weights(acquisition_filter.clone()),
-            ValuedAmount::into_normalized_weights(disposal_filter.clone()),
-            ValuedAmount::into_normalized_weights(shared_filter.clone()),
+            ValuedAmount::normalized_weights(acquisition_filter.clone()),
+            ValuedAmount::normalized_weights(disposal_filter.clone()),
+            ValuedAmount::normalized_weights(shared_filter.clone()),
         ) {
             (Some(w1), Some(w2), Some(w3)) => (w1, w2, w3),
             _ => {

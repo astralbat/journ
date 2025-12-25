@@ -6,16 +6,15 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::expr::Expr;
-use crate::expr::aggregation::{AggState, CoSum, Max, Min, Sum, SumIf};
+use crate::expr::aggregation::{AggState, CoSum, Max, Min, Sum, SumIf, Unique};
 use crate::expr::plan::Plan;
 use journ_core::err;
 use journ_core::error::JournResult;
-use journ_core::ext::VecLike;
 use journ_core::reporting::table::Cell;
+use nom::Err as NomErr;
 use nom::bytes::complete::tag_no_case;
 use nom::combinator::{cut, map_res};
 use nom::error::{VerboseError, context, convert_error};
-use nom::{Err as NomErr, Parser};
 use nom::{
     IResult,
     branch::alt,
@@ -36,6 +35,7 @@ pub enum AggKind<'h> {
     CoSum(Vec<Expr<'h>>),
     Min(Vec<Expr<'h>>),
     Max(Vec<Expr<'h>>),
+    Unique(Vec<Expr<'h>>),
 }
 impl<'h> AggKind<'h> {
     fn from_str_and_args(s: &str, args: Vec<Expr<'h>>) -> Option<Self> {
@@ -45,6 +45,7 @@ impl<'h> AggKind<'h> {
             "cosum" => Some(AggKind::CoSum(args)),
             "min" => Some(AggKind::Min(args)),
             "max" => Some(AggKind::Max(args)),
+            "unique" => Some(AggKind::Unique(args)),
             _ => None,
         }
     }
@@ -66,6 +67,9 @@ impl<'h> AggKind<'h> {
             AggKind::Max(args) => {
                 Max::new(args.clone()).map(|s| Box::new(s) as Box<dyn AggState<'h>>)
             }
+            AggKind::Unique(args) => {
+                Unique::new(args.clone()).map(|s| Box::new(s) as Box<dyn AggState<'h>>)
+            }
         }
     }
 }
@@ -79,6 +83,7 @@ impl fmt::Display for AggKind<'_> {
             AggKind::CoSum(args) => write!(f, "CoSum({})", join_args(args)),
             AggKind::Min(args) => write!(f, "Min({})", join_args(args)),
             AggKind::Max(args) => write!(f, "Max({})", join_args(args)),
+            AggKind::Unique(args) => write!(f, "Unique({})", join_args(args)),
         }
     }
 }
@@ -209,7 +214,7 @@ fn number(input: &str) -> IResult<&str, Decimal, VerboseError<&str>> {
 // Parse function arguments (comma-separated expressions)
 fn function_args<'h>(
     agg_functions: &RefCell<Vec<AggKind<'h>>>,
-) -> impl FnMut(&'h str) -> IResult<&str, Vec<Expr>, VerboseError<&str>> {
+) -> impl FnMut(&'h str) -> IResult<&'h str, Vec<Expr<'h>>, VerboseError<&'h str>> {
     move |input| {
         context(
             "function arguments",
@@ -223,7 +228,7 @@ fn function_args<'h>(
 
 fn aggregation_function<'h>(
     agg_functions: &RefCell<Vec<AggKind<'h>>>,
-) -> impl FnMut(&'h str) -> IResult<&str, Expr, VerboseError<&str>> {
+) -> impl FnMut(&'h str) -> IResult<&'h str, Expr<'h>, VerboseError<&'h str>> {
     move |input| {
         map_res(function(agg_functions), |(name, args)| {
             let kind = AggKind::from_str_and_args(name, args.clone()).ok_or_else(|| {
@@ -247,7 +252,7 @@ fn aggregation_function<'h>(
 // Parse function calls: name(arg1, arg2, ...)
 fn function<'h>(
     agg_functions: &RefCell<Vec<AggKind<'h>>>,
-) -> impl FnMut(&'h str) -> IResult<&str, (&str, Vec<Expr>), VerboseError<&str>> {
+) -> impl FnMut(&'h str) -> IResult<&'h str, (&'h str, Vec<Expr<'h>>), VerboseError<&'h str>> {
     move |input| {
         map(
             tuple((
@@ -271,13 +276,13 @@ fn function<'h>(
 // Parse primary expressions (atoms)
 fn primary<'h>(
     agg_functions: &RefCell<Vec<AggKind<'h>>>,
-) -> impl FnMut(&'h str) -> IResult<&str, Expr, VerboseError<&str>> {
+) -> impl FnMut(&'h str) -> IResult<&'h str, Expr<'h>, VerboseError<&'h str>> {
     move |input| {
         context(
             "primary expression",
             alt((
                 map(number, Expr::Number),
-                map(string_literal, |s| Expr::Literal(s.into())),
+                map(string_literal, Expr::Literal),
                 aggregation_function(agg_functions),
                 map(function(agg_functions), |(name, args)| Expr::ScalarFunction {
                     name: name.into(),
@@ -306,7 +311,7 @@ fn binary_op(input: &str) -> IResult<&str, BinOp, VerboseError<&str>> {
 // Parse expressions with operator precedence (simplified)
 fn binop_expr<'h>(
     agg_functions: &RefCell<Vec<AggKind<'h>>>,
-) -> impl FnMut(&'h str) -> IResult<&str, Expr, VerboseError<&str>> {
+) -> impl FnMut(&'h str) -> IResult<&'h str, Expr<'h>, VerboseError<&'h str>> {
     move |input| {
         let (input, left) = ws(primary(agg_functions))(input)?;
 
@@ -325,7 +330,7 @@ fn binop_expr<'h>(
 
 fn compare<'h>(
     agg_functions: &RefCell<Vec<AggKind<'h>>>,
-) -> impl FnMut(&'h str) -> IResult<&str, Expr, VerboseError<&str>> {
+) -> impl FnMut(&'h str) -> IResult<&'h str, Expr<'h>, VerboseError<&'h str>> {
     move |input| {
         let (input, left) = ws(binop_expr(agg_functions))(input)?;
         match opt(tuple((
@@ -343,7 +348,7 @@ fn compare<'h>(
         )))(input)?
         {
             (input, Some((op, right))) => {
-                Ok((input, Expr::CompareExpr { left: Box::new(left), op, right: Box::new(right) }))
+                Ok((input, Expr::Compare { left: Box::new(left), op, right: Box::new(right) }))
             }
             (input, None) => Ok((input, left)),
         }
@@ -352,7 +357,7 @@ fn compare<'h>(
 
 fn expr<'h>(
     agg_functions: &RefCell<Vec<AggKind<'h>>>,
-) -> impl FnMut(&'h str) -> IResult<&str, Expr, VerboseError<&str>> {
+) -> impl FnMut(&'h str) -> IResult<&'h str, Expr<'h>, VerboseError<&'h str>> {
     move |input| {
         let (input, left) = ws(compare(agg_functions))(input)?;
 
@@ -365,7 +370,7 @@ fn expr<'h>(
             ws(compare(agg_functions)),
         )))(input)?;
         // Build left-associative expression tree
-        let result = log_parts.into_iter().fold(left, |acc, (op, right)| Expr::LogicalOpExpr {
+        let result = log_parts.into_iter().fold(left, |acc, (op, right)| Expr::LogicalOp {
             left: Box::new(acc),
             op,
             right: Box::new(right),
@@ -390,17 +395,17 @@ fn column_alias(input: &str) -> IResult<&str, &str, VerboseError<&str>> {
 // Parse a single column specification
 fn column_spec<'h>(
     agg_functions: &RefCell<Vec<AggKind<'h>>>,
-) -> impl FnMut(&'h str) -> IResult<&str, Expr, VerboseError<&str>> {
+) -> impl FnMut(&'h str) -> IResult<&'h str, Expr<'h>, VerboseError<&'h str>> {
     move |input| {
         map(tuple((expr(agg_functions), opt(column_alias))), |(expr, alias)| match alias {
-            Some(alias) => Expr::Aliased(Box::new(expr), alias.into()),
+            Some(alias) => Expr::Aliased(Box::new(expr), alias),
             None => expr,
         })(input)
     }
 }
 
 // Parse the full column list: col1, col2, expr as "Alias", ...
-pub fn parse_columns<'h>(input: &'h str) -> JournResult<(Vec<Expr>, Vec<AggKind<'h>>)> {
+pub fn parse_columns(input: &'_ str) -> JournResult<(Vec<Expr<'_>>, Vec<AggKind<'_>>)> {
     let agg_functions = RefCell::new(Vec::new());
     match separated_list0(ws(char(',')), ws(column_spec(&agg_functions)))(input) {
         Ok(("", cols)) => Ok((cols, agg_functions.take())),
@@ -410,7 +415,7 @@ pub fn parse_columns<'h>(input: &'h str) -> JournResult<(Vec<Expr>, Vec<AggKind<
     }
 }
 
-pub fn parse_grouping(input: &str) -> JournResult<Vec<Expr>> {
+pub fn parse_grouping<'h>(input: &'h str) -> JournResult<Vec<Expr<'h>>> {
     let agg_functions = RefCell::new(Vec::new());
     let res = match separated_list0(ws(char(',')), ws(column_spec(&agg_functions)))(input) {
         Ok(("", col)) => Ok(col),

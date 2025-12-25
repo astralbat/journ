@@ -28,6 +28,22 @@ impl Lambda {
         &self.expression
     }
 
+    pub fn expression_with_args<S: AsRef<str>>(&self, args: Vec<S>) -> String {
+        assert_eq!(args.len(), self.parameters.len());
+        let mut arg_string = String::new();
+        for (i, (p, a)) in self.parameters().iter().zip(args).enumerate() {
+            if i > 0 {
+                arg_string.push_str(", ");
+            }
+            arg_string.push_str(p);
+            arg_string.push('=');
+            arg_string.push_str(a.as_ref());
+        }
+        arg_string.push_str(" -> ");
+        arg_string.push_str(self.expression().as_ref());
+        arg_string
+    }
+
     /// Appends the code on to the end of the lambda and returns a new lambda.
     pub fn append(self, code: &str) -> Lambda {
         Lambda { parameters: self.parameters, expression: self.expression + code }

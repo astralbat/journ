@@ -12,7 +12,6 @@ use crate::expr::plan::Plan;
 use crate::expr::{ColumnValue, Expr};
 use journ_core::error::JournResult;
 use std::hash::Hash;
-use std::iter::Sum;
 
 #[derive(Debug, Clone)]
 pub struct GroupKey<'h> {

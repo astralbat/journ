@@ -14,7 +14,7 @@ pub trait AggState<'h> {
     /// Add a value to the aggregation state.
     fn add(&mut self, context: &mut dyn IdentifierContext<'h>) -> JournResult<()>;
 
-    fn merge(&mut self, other: &dyn AggState<'h>) -> JournResult<()> {
+    fn merge(&mut self, _other: &dyn AggState<'h>) -> JournResult<()> {
         Err(journ_core::err!("Merging aggregation states is not supported for this aggregation"))
     }
 

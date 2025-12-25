@@ -21,7 +21,7 @@ use journ_core::err;
 use journ_core::error::JournResult;
 use journ_core::reporting::table;
 use journ_core::unit::Unit;
-use journ_core::valued_amount::{Valuation, ValuedAmount};
+use journ_core::valued_amount::ValuedAmount;
 use log::{debug, info, warn};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -102,11 +102,7 @@ impl<'h> Pool<'h> {
     /// Gets the current `MatchMethod` according to whether the pool's balance is negative or positive.
     pub fn current_method(&self, unit: &'h Unit<'h>) -> MatchMethod {
         self.holdings.get(unit).map_or(self.methods.0, |h| {
-            if h.total().amount().is_negative() {
-                self.methods.1
-            } else {
-                self.methods.0
-            }
+            if h.total().amount().is_negative() { self.methods.1 } else { self.methods.0 }
         })
     }
 
@@ -133,9 +129,12 @@ impl<'h> Pool<'h> {
             return Ok(());
         }
         for (_unit, holding) in &mut self.holdings.iter_mut() {
-            if let Err(e) = holding.set_unit_of_account(uoa, config_and_value_date) {
-                return Err(err!("Unable to alter pool unit of account: {}", e));
+            let err = |e| err!("Unable to alter pool unit of account: {}", e);
+            match config_and_value_date {
+                Some((cfg, date)) => holding.set_value_on_date(uoa, cfg, date),
+                None => holding.ensure_valued(uoa),
             }
+            .map_err(err)?;
         }
         self.unit_of_account = uoa;
         Ok(())
@@ -170,7 +169,7 @@ impl<'h> Pool<'h> {
         event_datetime: JDateTimeRange<'h>,
     ) -> JournResult<PoolEvent<'h>> {
         // Ensure that incoming deals can be valued in the pool's unit of account
-        group.set_unit_of_account(self.unit_of_account, None)?;
+        group.ensure_valued(self.unit_of_account)?;
 
         let deal_unit = group.unit();
         let bal_before = self
@@ -203,7 +202,7 @@ impl<'h> Pool<'h> {
         event_datetime: JDateTimeRange<'h>,
     ) -> JournResult<Result<(Vec<PoolEvent<'h>>, Option<DealGroup<'h>>), DealGroup<'h>>> {
         // Ensure the unit of account is set so that adj_deal.amount() is successful.
-        originator.set_unit_of_account(self.unit_of_account, None)?;
+        originator.ensure_valued(self.unit_of_account)?;
 
         let mut events = vec![];
         let mut originator_remaining = Some(originator);
@@ -273,7 +272,7 @@ impl<'h> Pool<'h> {
                         Ok((Some(event), originator_part_remaining))
                     }
                     Err(target) => {
-                        self.holdings.insert(unit, target);
+                        self.holdings.insert(unit, *target);
                         Err(originator)
                     }
                 }
@@ -408,14 +407,9 @@ impl<'h> PoolBalance<'h> {
         self.0
     }
 
-    /// Gets the first valuation; the primary valuation.
-    pub fn first_valuation(&self) -> Option<Valuation<'h>> {
-        self.0.valuations().next().cloned()
-    }
-
     /// Gets valuations only, excluding the main amount
     pub fn valuations(&self) -> impl Iterator<Item = Amount<'h>> + '_ {
-        self.0.totalled_valuations().into_iter()
+        self.0.valuations().map(|v| v.value())
     }
 }
 

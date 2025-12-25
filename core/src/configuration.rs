@@ -25,7 +25,7 @@ use std::fmt;
 use std::fmt::{Debug, Formatter};
 use std::ops::Deref;
 use std::string::ToString;
-use std::sync::{Arc, MutexGuard};
+use std::sync::Arc;
 
 #[derive(Debug, PartialEq, Eq, Hash, Copy, Clone)]
 pub struct ConfigurationVersion<'h> {
@@ -69,6 +69,7 @@ struct BaseConfiguration<'h> {
     accounts: HashMap<String, Arc<Account<'h>>>,
     /// Maps module names to their configuration.
     module_config: HashMap<&'static str, &'h dyn ModuleConfiguration>,
+    herd_allocator: &'h HerdAllocator<'h>,
 }
 
 impl<'h> BaseConfiguration<'h> {
@@ -90,6 +91,7 @@ impl<'h> BaseConfiguration<'h> {
             accounts: Default::default(),
             module_config: Default::default(),
             version: ConfigurationVersion::initial(node_id),
+            herd_allocator: allocator,
         };
         for module in MODULES.lock().unwrap().iter() {
             if let Some(default_config) = module.default_config() {
@@ -116,10 +118,13 @@ impl<'h> BaseConfiguration<'h> {
                 units: self.units.clone(),
                 accounts: self.accounts.clone(),
                 module_config: self.module_config.clone(),
+                herd_allocator: self.herd_allocator,
             };
             *self = Arc::new(new_base);
             Arc::get_mut(self).unwrap()
         } else {
+            // This should be ok still since we borrowed self as &mut at the
+            // start of the call.
             Arc::get_mut(self).unwrap()
         }
     }
@@ -129,13 +134,6 @@ impl<'h> BaseConfiguration<'h> {
             // If the unit is not found, check the parent configuration if it exists.
             self.parent.as_ref().and_then(|parent| parent.get_unit(code))
         })
-    }
-
-    pub fn units<'a>(&'a self) -> Box<dyn Iterator<Item = &'h Unit<'h>> + 'a> {
-        match &self.parent {
-            Some(parent) => Box::new(parent.units().chain(self.units.values().copied())),
-            None => Box::new(self.units.values().copied()),
-        }
     }
 
     /// An iterator of all parent accounts, followed by all child accounts.
@@ -297,7 +295,6 @@ pub enum MergeCgtError {
 /// directive where a reference to the same configuration is used.
 #[derive(Clone)]
 pub struct Configuration<'h> {
-    herd_allocator: &'h HerdAllocator<'h>,
     base_config: Arc<BaseConfiguration<'h>>,
 }
 
@@ -313,20 +310,30 @@ impl<'h> Configuration<'h> {
         allocator: &'h HerdAllocator<'h>,
         node_id: &'h NodeId<'h>,
     ) -> Self {
-        Self {
-            base_config: Arc::new(BaseConfiguration::new(None, args, allocator, node_id)),
-            herd_allocator: allocator,
-        }
+        Self { base_config: Arc::new(BaseConfiguration::new(None, args, allocator, node_id)) }
     }
 
     /// Creates a new `Configuration` that is a branch of the current one. The new configuration
     /// is essentially the same as the current one.
-    pub fn branch(&self) -> Self {
+    pub fn branch(&self, node_id: &'h NodeId<'h>) -> Self {
+        // We may link parent to our base_config or directly to a parent of the base_config if the version has
+        // been unchanged.
+        let mut parent = self.base_config.clone();
+        if let Some(parent_parent) = &parent.parent
+            && parent_parent.version == self.base_config.version
+        {
+            parent = parent.clone();
+        }
+
         Configuration {
             base_config: Arc::new(BaseConfiguration {
-                parent: Some(self.base_config.clone()),
+                parent: Some(parent),
                 args: self.base_config.args,
-                version: self.base_config.version.next(),
+                version: if self.base_config.version.node_id == node_id {
+                    self.base_config.version
+                } else {
+                    ConfigurationVersion::initial(node_id)
+                },
                 date_format: self.base_config.date_format,
                 time_format: self.base_config.time_format,
                 timezone: self.base_config.timezone,
@@ -335,8 +342,8 @@ impl<'h> Configuration<'h> {
                 units: HashMap::new(),
                 accounts: HashMap::new(),
                 module_config: HashMap::new(),
+                herd_allocator: self.base_config.herd_allocator,
             }),
-            herd_allocator: self.herd_allocator,
         }
     }
 
@@ -380,6 +387,7 @@ impl<'h> Configuration<'h> {
     pub fn set_time_zone(&mut self, tz: Tz) {
         let base_config = self.get_mut();
         base_config.timezone = tz;
+        base_config.version = base_config.version.next();
     }
 
     pub fn number_format(&self) -> &'h NumberFormat {
@@ -402,11 +410,6 @@ impl<'h> Configuration<'h> {
 
     pub fn get_unit(&self, code: &str) -> Option<&'h Unit<'h>> {
         self.base_config.get_unit(code)
-    }
-
-    /// An `Iterator` of all `Units` kept by this `Configuration`.
-    pub fn units(&self) -> impl Iterator<Item = &'h Unit<'h>> + '_ {
-        self.base_config.units()
     }
 
     /// Inserts the unit if it doesn't already exist. If it exists, then a new unit is created
@@ -508,6 +511,7 @@ impl<'h> Configuration<'h> {
         for (k, v) in config.base_config.module_config.iter() {
             base_config.module_config.insert(k, *v);
         }
+        base_config.version = base_config.version.next();
     }
 
     /// The set of all unique price databases.
@@ -527,7 +531,8 @@ impl<'h> Configuration<'h> {
     }
 
     fn insert_account(&mut self, account: Arc<Account<'h>>) {
-        match self.get_mut().accounts.entry(account.name_exact().to_string()) {
+        let base_config = self.get_mut();
+        match base_config.accounts.entry(account.name_exact().to_string()) {
             im::hashmap::Entry::Vacant(ve) => {
                 ve.insert(account);
             }
@@ -563,12 +568,16 @@ impl<'h> Configuration<'h> {
         secondary: &Arc<Account<'h>>,
     ) -> Arc<Account<'h>> {
         let mut metadata = vec![];
-        metadata.append(&mut primary.metadata().clone());
-        metadata.append(&mut secondary.metadata().clone());
+        metadata.append(&mut primary.lazy_metadata().clone());
+        metadata.append(&mut secondary.lazy_metadata().clone());
+
+        let mut units = vec![];
+        units.append(&mut primary.units().clone());
+        units.append(&mut secondary.units().clone());
 
         let parent = Account::parent_str(primary.name_exact())
             .map(|parent| self.get_or_create_account(parent));
-        Arc::new(Account::new(primary.name_exact().to_string(), parent, metadata))
+        Arc::new(Account::new(primary.name_exact().to_string(), parent, metadata, units))
     }
 
     pub fn get_or_create_account<'a, S: Into<Cow<'a, str>>>(
@@ -580,7 +589,7 @@ impl<'h> Configuration<'h> {
             Some(acc) => Arc::clone(acc),
             None => {
                 let parent = Account::parent_str(&full_name).map(|s| self.get_or_create_account(s));
-                let acc = Arc::new(Account::new(full_name.into_owned(), parent, vec![]));
+                let acc = Arc::new(Account::new(full_name.into_owned(), parent, vec![], vec![]));
                 self.insert_account(Arc::clone(&acc));
                 acc
             }
@@ -613,12 +622,12 @@ impl<'h> Configuration<'h> {
     }
 
     pub fn allocator(&self) -> &'h HerdAllocator<'h> {
-        self.herd_allocator
+        self.base_config.herd_allocator
     }
 
     /// Allocates an object.
     pub fn alloc<T>(&self, t: T) -> &'h mut T {
-        self.herd_allocator.alloc(t)
+        self.base_config.herd_allocator.alloc(t)
     }
 
     fn get_mut(&mut self) -> &mut BaseConfiguration<'h> {
@@ -643,27 +652,15 @@ impl Debug for Configuration<'_> {
 
 impl<'s, 'h> DerefMutAndDebug<'h, 's, Configuration<'h>> for &'s mut Configuration<'h> {}
 
-impl<'s, 'h> DerefMutAndDebug<'h, 's, Configuration<'h>> for MutexGuard<'s, Configuration<'h>> {}
+//impl<'s, 'h> DerefMutAndDebug<'h, 's, Configuration<'h>> for MutexGuard<'s, Configuration<'h>> {}
 
 fn as_expressions<S: AsRef<str>, I: Iterator<Item = S>>(items: I) -> Vec<Expression> {
-    let mut expressions = vec![];
-    for item in items {
-        // Replace the escaped '..' with a regex that matches any characters.
-        let mut s = regex::escape(item.as_ref()).replace("\\.\\.", ".*");
-        // The whole item has to match.
-        s.insert(0, '^');
-        s.push('$');
-
-        expressions.push(Expression {
-            regex: RegexBuilder::new(&s).case_insensitive(true).build().unwrap(),
-            input: item.as_ref().to_string(),
-        });
-    }
-    expressions
+    items.map(|i| Expression::from(i.as_ref())).collect()
 }
 
+/// Case-insensitive pattern matching with ".." used to match any number of characters like ".*".
 #[derive(Debug, Clone)]
-struct Expression {
+pub struct Expression {
     pub regex: Regex,
     /// The original user input that generated the expression.
     pub input: String,
@@ -678,6 +675,20 @@ impl Deref for Expression {
 impl PartialEq for Expression {
     fn eq(&self, other: &Self) -> bool {
         self.input == other.input
+    }
+}
+impl From<&str> for Expression {
+    fn from(input: &str) -> Self {
+        // Replace the escaped '..' with a regex that matches any characters.
+        let mut s = regex::escape(input).replace("\\.\\.", ".*");
+        // The whole item has to match.
+        s.insert(0, '^');
+        s.push('$');
+
+        Expression {
+            regex: RegexBuilder::new(&s).case_insensitive(true).build().unwrap(),
+            input: input.to_string(),
+        }
     }
 }
 
@@ -727,6 +738,10 @@ impl AccountFilter {
     /// Creates a new account filter from the given slice of strings.
     pub fn new<S: AsRef<str>, I: Iterator<Item = S>>(accounts: I) -> Self {
         Self { expressions: as_expressions(accounts) }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.expressions.is_empty()
     }
 }
 

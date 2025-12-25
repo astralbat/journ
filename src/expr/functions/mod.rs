@@ -6,6 +6,7 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 pub mod concat;
+pub mod cond;
 mod date;
 mod datevalue;
 pub mod max;
@@ -17,6 +18,7 @@ pub mod text;
 pub mod value;
 
 pub use concat::concat;
+pub use cond::cond;
 pub use date::date;
 pub use datevalue::datevalue;
 pub use max::max;

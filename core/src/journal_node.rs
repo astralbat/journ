@@ -6,13 +6,14 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::alloc::HerdAllocator;
+use crate::configuration::{AlwaysIncluded, Filter};
 use crate::directive::{Directive, DirectiveKind};
 use crate::err;
 use crate::error::JournResult;
 use crate::journal_entry::{EntryId, JournalEntry};
 use crate::journal_node_segment::JournalNodeSegment;
+use crate::parsing::input::TextBlockInput;
 use crate::parsing::text_block::TextBlock;
-use crate::parsing::text_input::TextBlockInput;
 use std::fs::OpenOptions;
 use std::hash::Hash;
 use std::io::{BufWriter, Write};
@@ -99,6 +100,8 @@ pub struct NodeId<'h> {
     id: u32,
 }
 
+pub static FIRST_NODE_ID: NodeId = NodeId { parent: Err(1), id: 1 };
+pub static LAST_NODE_ID: NodeId = NodeId { parent: Err(u32::MAX), id: u32::MAX };
 impl<'h> NodeId<'h> {
     pub fn new_root() -> Self {
         static ROOT_COUNTER: AtomicU32 = AtomicU32::new(1);
@@ -162,17 +165,19 @@ impl PartialOrd for NodeId<'_> {
 
 impl Ord for NodeId<'_> {
     fn cmp(&self, other: &Self) -> cmp::Ordering {
-        let self_depth = self.depth();
-        let other_depth = other.depth();
+        let mut self_depth = self.depth();
+        let mut other_depth = other.depth();
 
         // Bring the lower node up to the same depth as the upper one.
         let mut self_base = self;
         let mut other_base = other;
         while self_depth > other_depth {
             self_base = self_base.parent.unwrap();
+            self_depth -= 1;
         }
         while other_depth > self_depth {
             other_base = other_base.parent.unwrap();
+            other_depth -= 1;
         }
 
         // Compare the nodes starting from the same depth.
@@ -486,7 +491,7 @@ impl<'h> JournalNode<'h> {
                         .open(file)
                         .map_err(|e| err!(e; "IO Error"))?,
                 );
-                self.write(&mut writer, None)?;
+                self.write(&mut writer, &AlwaysIncluded)?;
                 // Ensure a newline at the end of the file as is best practice.
                 writeln!(writer).map_err(|e| err!(e; "IO Error"))?;
                 Ok(())
@@ -528,41 +533,40 @@ impl<'h> JournalNode<'h> {
         Ok(())
     }
 
-    pub fn write<W: Write>(&self, writer: &mut W, account_filter: Option<&str>) -> JournResult<()> {
+    pub fn write<W: Write, F: Filter<Directive<'h>>>(
+        &self,
+        writer: &mut W,
+        directive_filter: &F,
+    ) -> JournResult<()> {
         for (i, seg) in self.segments().iter().enumerate() {
             self.write_from_dir_iter(
                 Box::new(seg.directives().iter()),
                 writer,
-                account_filter,
+                directive_filter,
                 if i == 0 { "" } else { "\n" },
             )?;
         }
         Ok(())
     }
 
-    pub fn flat_write_all<W: Write>(
+    pub fn flat_write_all<W: Write, F: Filter<Directive<'h>>>(
         &self,
         writer: &mut W,
-        account_filter: Option<&str>,
+        directive_filter: &F,
     ) -> JournResult<()> {
-        self.write_from_dir_iter(Box::new(self.all_directives_iter()), writer, account_filter, "")
+        self.write_from_dir_iter(Box::new(self.all_directives_iter()), writer, directive_filter, "")
     }
 
-    fn write_from_dir_iter<'a, W: Write>(
+    fn write_from_dir_iter<'a, W: Write, F: Filter<Directive<'h>>>(
         &self,
-        dir_iter: Box<dyn Iterator<Item = &'a Directive> + 'a>,
+        dir_iter: Box<dyn Iterator<Item = &'a Directive<'h>> + 'a>,
         writer: &mut W,
-        account_filter: Option<&str>,
+        directive_filter: &F,
         initial_leading_space: &str,
     ) -> JournResult<()> {
-        let dir_iter: Box<dyn Iterator<Item = &'a Directive>> = Box::new(dir_iter.filter(|d| {
-            if let Some(filter) = &account_filter
-                && let DirectiveKind::Entry(entry) = d.kind()
-            {
-                return entry.matches_account_filter(filter);
-            }
-            true
-        }));
+        let map_err = |e| err!(e; "IO Error");
+        let dir_iter: Box<dyn Iterator<Item = &'a Directive>> =
+            Box::new(dir_iter.filter(|d| directive_filter.is_included(d)));
         let mut last_leading_space = initial_leading_space;
         for (i, dir) in dir_iter.enumerate() {
             // For the second directive onwards, the minimal leading space is a newline.
@@ -571,7 +575,13 @@ impl<'h> JournalNode<'h> {
             }
             match dir.parsed() {
                 Some(parsed) => {
-                    write!(writer, "{parsed}").map_err(|e| err!(e; "IO Error"))?;
+                    // Makes print cmd cleaner
+                    if i == 0 {
+                        write!(writer, "{}", parsed.skip_leading_blank_lines().0)
+                            .map_err(map_err)?;
+                    } else {
+                        write!(writer, "{parsed}").map_err(map_err)?;
+                    }
                     last_leading_space = parsed.leading_blank_lines()
                 }
                 None => {
@@ -579,12 +589,10 @@ impl<'h> JournalNode<'h> {
                     // In this case, we copy the last leading space from the previous raw directive.
                     match dir.kind() {
                         DirectiveKind::Entry(entry) => {
-                            write!(writer, "{last_leading_space}{entry}")
-                                .map_err(|e| err!(e; "IO Error"))?;
+                            write!(writer, "{last_leading_space}{entry}").map_err(map_err)?;
                         }
                         DirectiveKind::Price(price) => {
-                            write!(writer, "{last_leading_space}{price}")
-                                .map_err(|e| err!(e; "IO Error"))?;
+                            write!(writer, "{last_leading_space}{price}").map_err(map_err)?;
                         }
                         _ => panic!(
                             "The only objects that can be written are entries and prices; write parsed text for other directives"
@@ -597,16 +605,16 @@ impl<'h> JournalNode<'h> {
     }
 
     /// Prints the journal to stdout
-    pub fn print(&self, account_filter: Option<&str>) -> JournResult<()> {
+    pub fn print<F: Filter<Directive<'h>>>(&self, directive_filter: &F) -> JournResult<()> {
         let stdout = std::io::stdout();
         let mut writer = BufWriter::new(stdout);
-        self.write(&mut writer, account_filter)
+        self.write(&mut writer, directive_filter)
     }
 
-    pub fn print_all(&self, account_filter: Option<&str>) -> JournResult<()> {
+    pub fn print_all<F: Filter<Directive<'h>>>(&self, directive_filter: &F) -> JournResult<()> {
         let stdout = std::io::stdout();
         let mut writer = BufWriter::new(stdout);
-        self.flat_write_all(&mut writer, account_filter)
+        self.flat_write_all(&mut writer, directive_filter)
     }
 }
 

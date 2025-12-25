@@ -9,7 +9,7 @@ use crate::arguments::DateTimeArguments;
 use crate::error::parsing::IParseError;
 use crate::error::{JournError, JournResult};
 use crate::ext::RangeBoundsExt;
-use crate::parsing::text_input::TextInput;
+use crate::parsing::input::TextInput;
 use crate::parsing::{IParseResult, JParseResult};
 use crate::reporting::table::{Cell, WrapPolicy};
 use crate::reporting::table2;

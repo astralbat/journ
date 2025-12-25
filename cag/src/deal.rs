@@ -6,7 +6,7 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::adjustment::Adjustment;
-use crate::cgt_configuration::{CagCommand, CgtConfiguration};
+use crate::cgt_configuration::{CagCommand, CagConfiguration};
 use crate::deal_holding::DealHolding;
 use crate::module_init::MODULE_NAME;
 use crate::pool::PoolBalance;
@@ -16,10 +16,13 @@ use journ_core::arguments::Arguments;
 use journ_core::date_and_time::JDateTimeRange;
 use journ_core::error::JournResult;
 use journ_core::journal_entry::{EntryId, JournalEntry};
+use journ_core::journal_entry_flow::Flow;
+use journ_core::metadata::Metadata;
 use journ_core::reporting::table;
 use journ_core::unit::Unit;
 use journ_core::valued_amount::ValuedAmount;
-use journ_core::valuer::SystemValuer;
+use journ_core::valuer::{SystemValuer, ValuationError};
+use smallvec::SmallVec;
 use std::fmt;
 use std::fmt::Formatter;
 use std::ops::Add;
@@ -66,12 +69,27 @@ impl<'h> DealId<'h> {
 }
 
 #[derive(Clone)]
+pub enum DealOrigin<'h> {
+    Entry(&'h JournalEntry<'h>),
+    Flow(&'h JournalEntry<'h>, Flow<'h>),
+}
+impl<'h> DealOrigin<'h> {
+    pub fn entry(&self) -> &'h JournalEntry<'h> {
+        match self {
+            DealOrigin::Entry(entry) => entry,
+            DealOrigin::Flow(entry, _) => entry,
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct Deal<'h> {
     /// The deal id. Sorting deals by their id will allow them to written to a `JournalEntry` in the
     /// correct order.
     id: DealId<'h>,
     /// The entry from which the deal or belongs to.
     entry: &'h JournalEntry<'h>,
+    metadata: SmallVec<[Metadata<'h>; 4]>,
     datetime: JDateTimeRange<'h>,
     /// Positive for acquisitions, negative for disposals. May be zero but never nil.
     /// The values represent the cost of the deal before allowable expenses for acquisitions; or it may reflect gross proceeds for disposals.
@@ -98,21 +116,18 @@ pub struct Deal<'h> {
 }
 
 impl<'h> Deal<'h> {
+    /// Creates a new deal.
+    /// Returns `Err` when the unit of account cannot be detected.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         position: Option<u32>,
         entry: &'h JournalEntry<'h>,
+        metadata: SmallVec<[Metadata<'h>; 4]>,
         mut valued_amount: ValuedAmount<'h>,
-        mut allowable_expenses: ValuedAmount<'h>,
         taxable_gain: Option<ValuedAmount<'h>>,
         required: bool,
-    ) -> Self {
+    ) -> JournResult<Self> {
         assert!(!valued_amount.is_nil());
-        assert!(
-            allowable_expenses.is_nil()
-                || allowable_expenses.units().all(|u| u != valued_amount.unit()),
-            "Expenses must not have the same unit as the valued amount"
-        );
 
         let id = position
             .map(|id| DealId::new(entry.id(), id))
@@ -128,32 +143,29 @@ impl<'h> Deal<'h> {
 
         let round_deals = entry
             .config()
-            .module_config::<CgtConfiguration>(MODULE_NAME)
+            .module_config::<CagConfiguration>(MODULE_NAME)
             .unwrap()
             .round_deal_values();
         if round_deals {
-            valued_amount.to_totalled_valuations();
+            valued_amount.make_all_valuations_total();
             valued_amount.round_total_valuations();
-            allowable_expenses.to_totalled_valuations();
-            allowable_expenses.round();
         }
 
-        let balance = Self::calc_balance(&valued_amount, &allowable_expenses, &[]);
+        let balance = Self::calc_balance(&valued_amount, &ValuedAmount::nil(), &[]);
 
-        Self {
+        Ok(Self {
             id,
             datetime,
-            //unit_of_account: None,
             entry,
+            metadata,
             valued_amount,
-            allowable_expenses,
+            allowable_expenses: ValuedAmount::nil(),
             taxable_gain,
             required,
-            //has_split: false,
             split_parent: None,
             balance,
             adjustments: vec![],
-        }
+        })
     }
 
     pub fn zero(unit: &'h Unit<'h>, entry: &'h JournalEntry<'h>) -> Self {
@@ -161,11 +173,35 @@ impl<'h> Deal<'h> {
         Self::new(
             None,
             entry,
+            SmallVec::new(),
             ValuedAmount::new_in(AmountExpr::from(unit.with_quantity(0)), allocator),
-            ValuedAmount::nil(),
             None,
             false,
         )
+        .unwrap()
+    }
+
+    pub fn add_expenses(&mut self, allowable_expenses: ValuedAmount<'h>) {
+        assert!(
+            allowable_expenses.is_nil()
+                || allowable_expenses.units().all(|u| u != self.valued_amount.unit()),
+            "Expenses must not have the same unit as the valued amount"
+        );
+
+        self.allowable_expenses = allowable_expenses;
+
+        let round_deals = self
+            .entry()
+            .config()
+            .module_config::<CagConfiguration>(MODULE_NAME)
+            .unwrap()
+            .round_deal_values();
+        if round_deals {
+            self.allowable_expenses.make_all_valuations_total();
+            self.allowable_expenses.round();
+        }
+
+        self.balance = Self::calc_balance(&self.valued_amount, &self.allowable_expenses, &[]);
     }
 
     pub fn id(&self) -> DealId<'h> {
@@ -206,14 +242,24 @@ impl<'h> Deal<'h> {
     /// Ensure that all of the deal's components can be valued in the specified `unit`.
     /// If not, attempt to perform a valuation on the entry which will first try to derive the valuation,
     /// and fallback to using the price lookup functionality.
-    pub fn value_with_system_valuer(&mut self, unit: &'h Unit<'h>) -> JournResult<()> {
-        let mut system_valuer = SystemValuer::from(self.entry);
+    pub fn ensure_valued(
+        &mut self,
+        unit_of_account: &'h Unit<'h>,
+        rounded: bool,
+    ) -> Result<(), ValuationError> {
+        let mut system_valuer = SystemValuer::from(self.entry());
 
-        self.valued_amount.value_in_or_value_with(unit, &mut system_valuer)?;
-        self.allowable_expenses.value_in_or_value_with(unit, &mut system_valuer)?;
+        self.valued_amount.value_in_or_value_with(unit_of_account, &mut system_valuer, rounded)?;
+        self.allowable_expenses.value_in_or_value_with(
+            unit_of_account,
+            &mut system_valuer,
+            rounded,
+        )?;
         self.taxable_gain
             .as_mut()
-            .map(|tg| tg.value_in_or_value_with(unit, &mut system_valuer).map(Some))
+            .map(|tg| {
+                tg.value_in_or_value_with(unit_of_account, &mut system_valuer, rounded).map(Some)
+            })
             .unwrap_or(Ok(None))?;
         self.balance =
             Self::calc_balance(&self.valued_amount, &self.allowable_expenses, &self.adjustments);
@@ -240,8 +286,9 @@ impl<'h> Deal<'h> {
 
     /// Gets the `PoolBalance` as if a pool only contained this deal.
     ///
-    /// # Example
-    /// a deal of 5 BTC @@ $1000 ++ 0.1 BTC @@ $20 should have a balance of 5 BTC @@ $1020.
+    /// # Examples
+    /// * A deal of 5 BTC @@ $1000 ++ 0.1 BTC @@ $20 should have a balance of 5.1 BTC @@ $1020 (total cost).
+    /// * A deal of -5 BTC @@ $1000 ++ 0.1 BTC @@ $20 should have a balance of 4.9 BTC @@ $880 (net proceeds).
     fn calc_balance(
         valued_amount: &ValuedAmount<'h>,
         expenses: &ValuedAmount<'h>,
@@ -260,6 +307,10 @@ impl<'h> Deal<'h> {
         self.entry
     }
 
+    pub fn metadata(&self) -> &[Metadata<'h>] {
+        &self.metadata
+    }
+
     pub fn expenses(&self) -> &ValuedAmount<'h> {
         &self.allowable_expenses
     }
@@ -274,7 +325,7 @@ impl<'h> Deal<'h> {
 
     /// Gets the parent deal that this deal was split from using [Deal::split_max()], if any.
     pub fn split_parent(&self) -> Option<&DealHolding<'h>> {
-        self.split_parent.as_ref().map(|parent| &**parent)
+        self.split_parent.as_deref()
     }
 
     /// Gets whether the deal has been split up from a bigger deal.
@@ -390,10 +441,7 @@ impl<'h> Add<&Deal<'h>> for Deal<'h> {
 
         self.adjustments.append(&mut rhs.adjustments.clone());
         self.valued_amount = (&self.valued_amount + &rhs.valued_amount).unwrap();
-        self.allowable_expenses = match &self.allowable_expenses + &rhs.allowable_expenses {
-            Some(expenses) => expenses,
-            None => return None,
-        };
+        self.allowable_expenses = (&self.allowable_expenses + &rhs.allowable_expenses)?;
         self.balance =
             Self::calc_balance(&self.valued_amount, &self.allowable_expenses, &self.adjustments);
         Some(self)

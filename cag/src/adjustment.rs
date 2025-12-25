@@ -6,18 +6,18 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use journ_core::alloc::HerdAllocator;
-use journ_core::amount::{Amount, AmountExpr, Quantity};
+use journ_core::amount::{Amount, Quantity};
 use journ_core::date_and_time::JDateTimeRange;
-use journ_core::err;
 use journ_core::error::JournResult;
 use journ_core::journal_entry::{EntryId, JournalEntry};
 use journ_core::metadata::Metadata;
 use journ_core::reporting::table::{Cell, WrapPolicy};
 use journ_core::unit::Unit;
-use journ_core::valued_amount::{Valuation, ValuedAmount};
+use journ_core::valued_amount::{PostingValuation, ValuedAmount};
 use log::trace;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::One;
+use smallvec::SmallVec;
 use std::fmt;
 use std::fmt::Formatter;
 use yaml_rust::Yaml;
@@ -68,6 +68,12 @@ impl<'h> AmountAdjustment<'h> {
             AmountAdjustment::Add(amount) => {
                 let left = amount.with_quantity(qty);
                 let right = amount - qty;
+                trace!(
+                    "Splitting additive adjustment {} into {}, {}",
+                    amount.format_precise(),
+                    left.format_precise(),
+                    right.format_precise()
+                );
                 (AmountAdjustment::Add(left), AmountAdjustment::Add(right))
             }
             AmountAdjustment::Scale(scalar) => {
@@ -101,11 +107,11 @@ impl fmt::Display for AmountAdjustment<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             AmountAdjustment::Add(amount) if amount.is_positive() => {
-                write!(f, "+{}", self.amount())
+                write!(f, "+{}", self.amount().format_precise())
             }
-            AmountAdjustment::Add(_) => write!(f, "{}", self.amount()),
-            AmountAdjustment::Scale(_) => write!(f, "*{}", self.amount()),
-            AmountAdjustment::Set(_) => write!(f, "={}", self.amount()),
+            AmountAdjustment::Add(_) => write!(f, "{}", self.amount().format_precise()),
+            AmountAdjustment::Scale(_) => write!(f, "*{}", self.amount().format_precise()),
+            AmountAdjustment::Set(_) => write!(f, "={}", self.amount().format_precise()),
         }
     }
 }
@@ -148,51 +154,6 @@ impl From<&AmountAdjustment<'_>> for Yaml {
     }
 }
 
-/*
-#[derive(Debug, Clone)]
-pub enum ConsiderationAdjustment<'h> {
-    AddValuedAmount(ValuedAmount<'h>),
-    ScaleQuantity(Quantity),
-}
-
-impl<'h> ConsiderationAdjustment<'h> {
-    pub fn is_additive(&self) -> bool {
-        matches!(self, ConsiderationAdjustment::AddValuedAmount(_))
-    }
-}
-
-impl fmt::Display for ConsiderationAdjustment<'_> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            ConsiderationAdjustment::AddValuedAmount(portion) => {
-                write!(f, "+ {}", portion)
-            }
-            ConsiderationAdjustment::ScaleQuantity(q) => write!(f, "* {}", q),
-        }
-    }
-}
-
-impl From<&ConsiderationAdjustment<'_>> for Yaml {
-    fn from(cons_adj: &ConsiderationAdjustment) -> Self {
-        let mut hash = Hash::new();
-        match cons_adj {
-            ConsiderationAdjustment::AddValuedAmount(va) if va.amount().is_positive() => {
-                hash.insert(Yaml::String("op".to_string()), Yaml::String("+".to_string()));
-                hash.insert(Yaml::String("value".to_string()), va.into());
-            }
-            ConsiderationAdjustment::AddValuedAmount(va) => {
-                hash.insert(Yaml::String("op".to_string()), Yaml::String("-".to_string()));
-                hash.insert(Yaml::String("value".to_string()), (&va.clone().abs()).into());
-            }
-            ConsiderationAdjustment::ScaleQuantity(q) => {
-                hash.insert(Yaml::String("op".to_string()), Yaml::String("*".to_string()));
-                hash.insert(Yaml::String("quantity".to_string()), Yaml::String(q.to_string()));
-            }
-        }
-        Yaml::Hash(hash)
-    }
-}*/
-
 /// An adjustment to a specific pool, or all pools.
 ///
 /// There are various scenarios to be aware of here. The easiest kind of adjustment
@@ -210,9 +171,9 @@ pub struct Adjustment<'h> {
     /// If set, only apply the adjustment to the specified pool
     pool: Option<&'h str>,
     entry: &'h JournalEntry<'h>,
+    metadata: SmallVec<[Metadata<'h>; 4]>,
     datetime: JDateTimeRange<'h>,
     amount_adjustments: Vec<AmountAdjustment<'h>>,
-    //consideration_adj: Option<ConsiderationAdjustment<'h>>,
     properties: Vec<Metadata<'h>>,
     allocator: &'h HerdAllocator<'h>,
 }
@@ -221,9 +182,9 @@ impl<'h> Adjustment<'h> {
     pub fn new(
         position: u32,
         entry: &'h JournalEntry<'h>,
+        metadata: SmallVec<[Metadata<'h>; 4]>,
         pool: Option<&'h str>,
         amount_adjustments: Vec<AmountAdjustment<'h>>,
-        //consideration_adj: Option<ConsiderationAdjustment<'h>>,
     ) -> Self {
         assert!(
             !amount_adjustments.is_empty(),
@@ -239,6 +200,7 @@ impl<'h> Adjustment<'h> {
         Adjustment {
             datetime,
             entry,
+            metadata,
             pool,
             amount_adjustments,
             id: AdjustmentId::new(entry_id, position),
@@ -246,26 +208,6 @@ impl<'h> Adjustment<'h> {
             allocator: entry.config().allocator(),
         }
     }
-
-    /*
-    /// Gets the identity adjustment that leaves the transaction the same after applying.
-    pub fn identity(entry: Arc<Mutex<JournalEntry<'h>>>, unit: &'h Unit<'h>) -> Self {
-        let entry_lock = entry.lock().unwrap();
-        let entry_id = entry_lock.id();
-        let datetime = *entry_lock.date_and_time().datetime_range();
-        drop(entry_lock);
-        Adjustment {
-            id: AdjustmentId::new(entry_id, 0),
-            entry,
-            pool: None,
-            datetime,
-            amount_adj: AmountAdjustment::ScaleQuantity(
-                unit.with_quantity(Decimal::one()).into(),
-            ),
-            consideration_adj: None,
-            properties: vec![],
-        }
-    }*/
 
     /// Gets whether this identity is the same as the identity adjustment.
     pub fn is_identity(&self) -> bool {
@@ -278,54 +220,10 @@ impl<'h> Adjustment<'h> {
 
     /// Gets whether all adjustments are scalar.
     pub fn is_scalar(&self) -> bool {
-        self.amount_adjustments.iter().all(|amnt_adj| match amnt_adj {
-            AmountAdjustment::Scale(_) => true,
-            _ => false,
-        })
+        self.amount_adjustments
+            .iter()
+            .all(|amnt_adj| matches!(amnt_adj, AmountAdjustment::Scale(_)))
     }
-
-    /*
-    /// Converts the amount adjustment into a scalar adjustment if it is not already scalar.
-    /// This is feasible iff the total being adjusted is not zero.
-    pub fn try_set_amount_adj_to_scalar(&mut self, adjusted_total: Amount<'h>) -> bool {
-        if let AmountAdjustment::AddAmount(amount_to_add) = self.amount_adj {
-            if adjusted_total.is_zero() {
-                return false;
-            }
-            let percent_increase = amount_to_add / adjusted_total;
-            self.amount_adj = AmountAdjustment::ScaleQuantity(percent_increase + Decimal::one());
-        }
-        true
-    }*/
-
-    /*
-    /// Try and set the consideration adjustment to a scalar adjustment if it is not already scalar.
-    /// This is feasible iff the total being adjusted is not zero, and the `adjusted_total` and the `delta`
-    /// both have a single common unit (multiple units might require different scalars).
-    pub fn try_set_consideration_adj_to_scalar(
-        &mut self,
-        adjusted_total: &ValuedAmount<'h>,
-    ) -> Option<&ConsiderationAdjustment<'h>> {
-        if let Some(ConsiderationAdjustment::AddValuedAmount(delta)) = &mut self.consideration_adj {
-            if adjusted_total.is_zero() {
-                return None;
-            }
-            let common_unit = {
-                let mut common_units = adjusted_total.common_units(delta);
-                let common_unit = common_units.next()?;
-                if common_units.next().is_some() {
-                    return None;
-                }
-                common_unit
-            };
-            let delta_amount = delta.value_in(common_unit).unwrap();
-            let percent_increase = delta_amount / adjusted_total.value_in(common_unit).unwrap();
-            self.consideration_adj = Some(ConsiderationAdjustment::ScaleQuantity(
-                percent_increase.quantity() + Decimal::one(),
-            ));
-        }
-        self.consideration_adj.as_ref()
-    }*/
 
     pub fn id(&self) -> AdjustmentId<'h> {
         self.id
@@ -442,6 +340,7 @@ impl<'h> Adjustment<'h> {
             Adjustment {
                 id: self.id,
                 entry: self.entry,
+                metadata: self.metadata.clone(),
                 pool: self.pool,
                 datetime: self.datetime,
                 amount_adjustments: l_adjs,
@@ -451,6 +350,7 @@ impl<'h> Adjustment<'h> {
             Adjustment {
                 id: self.id,
                 entry: self.entry,
+                metadata: self.metadata,
                 pool: self.pool,
                 datetime: self.datetime,
                 amount_adjustments: r_adjs,
@@ -468,7 +368,7 @@ impl<'h> Adjustment<'h> {
     /// If any of the amount adjustments are `SetQuantity`. These should be converted to `AddAmount` before applying.
     pub fn apply(&self, valued_amount: &mut ValuedAmount<'h>) -> JournResult<()> {
         assert_eq!(valued_amount.unit(), self.unit());
-        debug_assert!(valued_amount.valuations().all(|v| matches!(v, Valuation::Total(_, _))));
+        debug_assert!(valued_amount.posting_valuations().all(PostingValuation::is_total));
 
         trace!("Applying adjustment {} to {}", self, valued_amount);
 
@@ -476,111 +376,34 @@ impl<'h> Adjustment<'h> {
         let mut canonical_self = self.clone();
         canonical_self.make_canonical();
 
+        let originally_positive = valued_amount.amount().is_positive();
         valued_amount
             .set_amount(canonical_self.amount_adjustments[0].apply(valued_amount.amount()));
+
         for amnt_adj in &canonical_self.amount_adjustments[1..] {
-            let existing_amount =
+            let mut existing_amount =
                 valued_amount.value_in(amnt_adj.amount().unit()).unwrap_or(Amount::nil());
+            // If the sign got flipped during the primary amount adjustment, the value_in() function is now going to return the inverse
+            // of what we want. So flip it back.
+            if valued_amount.amount() != 0
+                && valued_amount.amount().is_positive() != originally_positive
+            {
+                existing_amount = -existing_amount;
+            }
 
             let new_amount = amnt_adj.apply(existing_amount);
 
             // The signs need to match. It does not make sense to have an adjustment that causes the
             // valued amount to have conflicting signs. E.g. "10 Units @@ -$5" implies that each unit
-            // has a negative value which, even if makes sense in some situations, cannot be modelled currently.
-            if new_amount.is_positive() != valued_amount.amount().is_positive() {
-                return Err(err!("Adjustment would change the sign of the considered value"));
-            }
-            let new_value = AmountExpr::new(new_amount.abs(), " @@ ", None);
-            valued_amount.set_valuation(Valuation::Total(new_value, false));
+            // has a negative value which, even if it makes sense in some situations, cannot be modelled currently.
+            //if new_amount.is_positive() != valued_amount.amount().is_positive() {
+            //    return Err(err!("Adjustment would change the sign of the considered value")
+            //        .with_source(err!("{} on {}", amnt_adj, existing_amount.format_precise())));
+            //}
+            valued_amount.set_valuation(PostingValuation::new_total(new_amount, false));
         }
         Ok(())
     }
-
-    /*
-    /// Splits the adjustment into a number of parts equal to the number of weights.
-    ///
-    /// # Panics
-    /// If the sum of the weights is not equal to 1.
-    pub fn split_weights(self, weights: &[Decimal]) -> Vec<Self> {
-        assert_eq!(weights.iter().sum::<Decimal>(), Decimal::one());
-
-        let mut adjustments = vec![];
-        for (i, weight) in weights.iter().enumerate() {
-            let (adj, remainder) = self.clone().split(*weight);
-            adjustments.push(adj);
-            if i == weights.len() - 1 {
-                adjustments.push(remainder);
-                break;
-            }
-        }
-        adjustments
-    }*/
-
-    /*
-    /// Ensures that the adjustment's consideration component can be valued in the
-    /// specified unit of account, if it is an add adjustment.
-    pub fn set_unit_of_account(
-        &mut self,
-        config: &Configuration<'h>,
-        uoa: &'h Unit<'h>,
-        value_date: Option<DateTime<Tz>>,
-    ) -> JournResult<()> {
-        if let Some(ConsiderationAdjustment::AddValuedAmount(add_amount)) =
-            self.consideration_adj.as_mut()
-        {
-            match value_date {
-                Some(date) => {
-                    let date_valuer = |mut config: Configuration<'h>, value_date: DateTime<Tz>| {
-                        move |base_amount: Amount<'h>| {
-                            let price = valuer::get_value(
-                                &mut config,
-                                base_amount.unit(),
-                                uoa,
-                                value_date,
-                            )?;
-                            Ok((base_amount * price.price()).rounded())
-                        }
-                    };
-                    add_amount.value_with(date_valuer(config.clone(), date))?;
-                }
-                None => {
-                    let entry_clone = Arc::clone(&self.entry);
-                    let entry_valuer = |base_amount: Amount<'h>| {
-                        let mut entry_lock = entry_clone.lock().unwrap();
-                        let prices = valuer::value_with_entry_and_write(
-                            &mut entry_lock,
-                            base_amount.unit(),
-                            uoa,
-                        )?;
-                        Ok((prices.last().unwrap().price() * base_amount.quantity()).rounded())
-                    };
-                    add_amount.value_in_or_value_with(uoa, entry_valuer)?;
-                }
-            }
-        }
-        Ok(())
-    }*/
-
-    /*
-    pub fn split(self, amount_percent: Decimal) -> (Self, Self) {
-        // We split the adjustment on the percentage only when the arithmetic function is Add. Scale functions will stay the same.
-        let get_arith_parts = |f: Option<ArithmeticFunction>| match f {
-            Some(f) => match f {
-                Add(m) => {
-                    let amount_left = (m * amount_percent).rounded();
-                    (Some(Add(amount_left)), Some(Add(m - amount_left)))
-                }
-                Scale(m) => (Some(Scale(m)), Some(Scale(m))),
-            },
-            None => (None, None),
-        };
-        let amount_adj_parts = get_arith_parts(Some(self.amount_adj));
-        let cons_adj_parts = get_arith_parts(self.consideration_adj);
-        (
-            PoolAdjustment::new(self.id.id, Arc::clone(self.entry()), amount_adj_parts.0.unwrap(), cons_adj_parts.0),
-            PoolAdjustment::new(self.id.id, Arc::clone(self.entry()), amount_adj_parts.1.unwrap(), cons_adj_parts.1),
-        )
-    }*/
 }
 
 impl PartialEq for Adjustment<'_> {

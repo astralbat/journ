@@ -217,16 +217,16 @@ impl StrExt for str {
         };
 
         let negative = match format.negative_style() {
-            NegativeStyle::NegativeSign => s.as_bytes().first().copied() == Some(b'-'),
-            NegativeStyle::Brackets => {
+            Some(NegativeStyle::NegativeSign) | None => s.as_bytes().first().copied() == Some(b'-'),
+            Some(NegativeStyle::Brackets) => {
                 s.as_bytes().first().copied() == Some(b'(')
                     && s.as_bytes().last().copied() == Some(b')')
             }
         };
         let (first_pos, last_pos) = if negative {
             match format.negative_style() {
-                NegativeStyle::NegativeSign => (1, s.len()),
-                NegativeStyle::Brackets => (1, s.len() - 1),
+                Some(NegativeStyle::NegativeSign) | None => (1, s.len()),
+                Some(NegativeStyle::Brackets) => (1, s.len() - 1),
             }
         } else {
             (0, s.len())

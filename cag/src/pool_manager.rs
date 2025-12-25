@@ -6,7 +6,7 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::adjustment::Adjustment;
-use crate::cgt_configuration::{CgtConfiguration, MatchMethod};
+use crate::cgt_configuration::{CagConfiguration, MatchMethod};
 use crate::deal::DealId;
 use crate::deal_group::DealGroup;
 use crate::deal_holding::DealHolding;
@@ -27,8 +27,8 @@ use log::debug;
 use std::collections::HashMap;
 
 pub struct PoolManager<'h> {
-    /// The default unit of account to use for all pools when none is specified by the pool configuration.
-    default_unit_of_account: &'h Unit<'h>,
+    /// The unit of account to use. This can change over time with configuration updates.
+    unit_of_account: &'h Unit<'h>,
     config: Option<Configuration<'h>>,
     unit_filter: Box<dyn Filter<Unit<'h>> + 'h>,
     /// Pools are expected to be in the order they are declared in the configuration.
@@ -37,11 +37,11 @@ pub struct PoolManager<'h> {
 }
 
 impl<'h, 'u> PoolManager<'h> {
-    pub fn new(default_unit_of_account: &'h Unit<'h>, allocator: &'h HerdAllocator<'h>) -> Self {
+    pub fn new(unit_of_account: &'h Unit<'h>, allocator: &'h HerdAllocator<'h>) -> Self {
         // The starting implied pool is named "Pool".
         PoolManager {
             config: None,
-            default_unit_of_account,
+            unit_of_account,
             unit_filter: Box::new(|_: &Unit<'_>| true),
             pools: Vec::new_in(allocator),
             pool_schedulers: HashMap::new(),
@@ -50,6 +50,10 @@ impl<'h, 'u> PoolManager<'h> {
 
     pub fn pools(&self) -> &[Pool<'h>] {
         &self.pools
+    }
+
+    pub fn unit_of_account(&self) -> &'h Unit<'h> {
+        self.unit_of_account
     }
 
     pub fn set_unit_filter(&mut self, unit_filter: Box<dyn Filter<Unit<'h>> + 'h>) {
@@ -68,7 +72,7 @@ impl<'h, 'u> PoolManager<'h> {
         name: &'h str,
         pool_uoa: &'h Unit<'h>,
     ) -> &'a mut Pool<'h> {
-        let cgt_config = config.module_config::<CgtConfiguration>(MODULE_NAME).unwrap();
+        let cgt_config = config.module_config::<CagConfiguration>(MODULE_NAME).unwrap();
         let pool_config = cgt_config.find_pool(name).unwrap();
         let pos = pools.iter_mut().position(|p| p.id() == pool_config.id().unwrap());
         match pos {
@@ -84,41 +88,6 @@ impl<'h, 'u> PoolManager<'h> {
                 pools.push(pool);
                 pools.last_mut().unwrap()
             }
-        }
-    }
-
-    /// Gets the unit of account for the would-be destination pool of the `deal`.
-    /// If there are no pools configured, no default unit of account, then the deal's unit is returned.
-    pub fn initial_unit_of_account(&self, deal_group: &DealGroup<'h>) -> &'h Unit<'h> {
-        let uoa_from_pool_name = |pool_name| -> &'h Unit<'h> {
-            self.pools
-                .iter()
-                .find(|p| p.name() == pool_name)
-                .map(|p| p.unit_of_account())
-                .unwrap_or(self.default_unit_of_account)
-        };
-
-        let mut rules = deal_group.next_rules();
-        'rules: loop {
-            for rule in rules {
-                match rule {
-                    Rule::Decision(decision) => {
-                        if deal_group.matches(decision.condition(), deal_group.datetime().start()) {
-                            rules = decision.rules();
-                            continue 'rules;
-                        }
-                    }
-                    Rule::Action(ActionRule::Pool(name, cond)) => {
-                        if deal_group.matches(&cond, deal_group.datetime().start()) {
-                            break 'rules uoa_from_pool_name(name);
-                        }
-                    }
-                    Rule::Action(ActionRule::Match(name)) => {
-                        break 'rules uoa_from_pool_name(name);
-                    }
-                }
-            }
-            break deal_group.unit();
         }
     }
 
@@ -169,6 +138,8 @@ impl<'h, 'u> PoolManager<'h> {
     }
 
     pub fn push_deal_group(&mut self, group: DealGroup<'h>) -> JournResult<Vec<PoolEvent<'h>>> {
+        assert_ne!(group.total().amount(), 0, "Cannot push deals of 0");
+
         let datetime = group.datetime();
         let mut pool_events = vec![];
         pool_events.extend(self.progress_deals(datetime)?);
@@ -196,33 +167,6 @@ impl<'h, 'u> PoolManager<'h> {
         Ok(pool_events)
     }
 
-    /*
-    /// Push a group of events sharing the same date and time.
-    pub fn push_events(
-        &mut self,
-        events: impl Iterator<Item = DealingEvent<'h>>,
-    ) -> JournResult<Vec<PoolEvent<'h>>> {
-        let mut pool_events = vec![];
-
-        for (i, event) in events.enumerate() {
-            if i == 0 {
-                pool_events.extend(self.progress_deals(event.datetime())?);
-            }
-
-            match event {
-                DealingEvent::Deal(deal) => {
-                    trace!("Including deal: {}", deal);
-                    let datetime = deal.datetime();
-                    self.apply_deal_rules(deal.into(), datetime, &mut pool_events).unwrap();
-                }
-                DealingEvent::PoolAdjustment(pa) => {
-                    pool_events.extend(self.add_pool_adjustment(pa)?)
-                }
-            }
-        }
-        Ok(pool_events)
-    }*/
-
     /// Applies the rules of the `deal` using the current pool configuration.
     fn apply_deal_rules(
         &mut self,
@@ -238,7 +182,7 @@ impl<'h, 'u> PoolManager<'h> {
                             self.config.as_ref().unwrap(),
                             &mut self.pools,
                             pool_name,
-                            self.default_unit_of_account,
+                            self.unit_of_account,
                         );
                         match pool.try_match(group, event_datetime)? {
                             Ok((match_events, remainder)) => {
@@ -262,7 +206,7 @@ impl<'h, 'u> PoolManager<'h> {
                             self.config.as_ref().unwrap(),
                             &mut self.pools,
                             pool_name,
-                            self.default_unit_of_account,
+                            self.unit_of_account,
                         );
                         let pool_id = pool.id();
                         let deal_id = group.id();
@@ -387,43 +331,37 @@ impl<'h, 'u> PoolManager<'h> {
         if self.config.as_ref() != Some(new_config) {
             self.config = Some(new_config.clone());
             let new_config = self.config.as_ref().unwrap();
-            let new_cgt_config = new_config.module_config::<CgtConfiguration>(MODULE_NAME).unwrap();
+            let new_cgt_config = new_config.module_config::<CagConfiguration>(MODULE_NAME).unwrap();
             let default_uoa = new_cgt_config
                 .unit_of_account_change()
                 .and_then(|uoac| new_config.get_unit(uoac.unit_of_account()))
-                .unwrap_or(self.default_unit_of_account);
+                .unwrap_or(self.unit_of_account);
 
+            let uoac = new_cgt_config.unit_of_account_change();
+            let uoa = uoac
+                .map(|uoac| new_config.get_unit(uoac.unit_of_account()).unwrap())
+                .unwrap_or(default_uoa);
             for new_pool_config in new_cgt_config.pools() {
-                let pool_uoac = new_pool_config
-                    .unit_of_account_change()
-                    .or(new_cgt_config.unit_of_account_change());
-                let pool_uoa = pool_uoac
-                    .map(|uoac| new_config.get_unit(uoac.unit_of_account()).unwrap())
-                    .unwrap_or(default_uoa);
-
                 let pool = PoolManager::get_or_create_pool(
                     self.config.as_ref().unwrap(),
                     &mut self.pools,
                     new_pool_config.name(),
-                    pool_uoa,
+                    uoa,
                 );
                 pool.set_methods(new_pool_config.methods());
                 if let Some(new_name) = new_pool_config.new_name() {
                     pool.set_name(new_name);
                 }
-                if let Some(uoac) = pool_uoac {
-                    pool.change_unit_of_account(
-                        pool_uoa,
-                        uoac.value_date().map(|d| (new_config, d)),
-                    )?;
+                if let Some(uoac) = uoac {
+                    pool.change_unit_of_account(uoa, uoac.value_date().map(|d| (new_config, d)))?;
                 }
             }
         }
         Ok(())
     }
 
-    fn cgt_config(&self) -> Option<&CgtConfiguration> {
-        self.config.as_ref().map(|c| c.module_config::<CgtConfiguration>(MODULE_NAME).unwrap())
+    fn cgt_config(&self) -> Option<&CagConfiguration> {
+        self.config.as_ref().map(|c| c.module_config::<CagConfiguration>(MODULE_NAME).unwrap())
     }
 }
 

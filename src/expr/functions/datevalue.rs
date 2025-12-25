@@ -6,23 +6,26 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::expr::column_value::ColumnValue;
-use crate::expr::context::EvalContext;
+use crate::expr::{Expr, IdentifierContext};
 use journ_core::arguments::Arguments;
 use journ_core::date_and_time::{JDate, JDateTime};
 use journ_core::err;
 use journ_core::error::JournResult;
 
 /// Parse a date from a string, returning a Date value.
-pub fn datevalue<'h, 'a, 's>(args: &[ColumnValue<'h>]) -> JournResult<ColumnValue<'h>> {
-    if args.len() < 1 || args.len() > 4 {
+pub fn datevalue<'h>(
+    args: &[Expr<'h>],
+    context: &mut dyn IdentifierContext<'h>,
+) -> JournResult<ColumnValue<'h>> {
+    if args.is_empty() || args.len() > 4 {
         return Err(err!(
             "Function 'datevalue(text [,date_format [,time_format [,time_zone]])' requires one, two, three or four arguments"
         ));
     }
-    let text_arg = &args[0];
-    let date_format_arg = args.get(1);
-    let time_format_arg = args.get(2);
-    let time_zone_arg = args.get(3);
+    let text_arg = &args[0].eval(context)?;
+    let date_format_arg = args.get(1).map(|a| a.eval(context)).transpose()?;
+    let time_format_arg = args.get(2).map(|a| a.eval(context)).transpose()?;
+    let time_zone_arg = args.get(3).map(|a| a.eval(context)).transpose()?;
 
     if text_arg.is_undefined() {
         return Ok(ColumnValue::Undefined);

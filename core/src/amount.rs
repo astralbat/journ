@@ -29,6 +29,22 @@ use yaml_rust::Yaml;
 /// A quantity is a `Decimal` that forms the numeric part of an `Amount`. E.g. the '5' in '$5'.
 pub type Quantity = Decimal;
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum Sign {
+    Positive,
+    Negative,
+    Zero,
+}
+impl Sign {
+    /// Positive and Negative are not compatible
+    pub fn is_compatible(&self, other: Self) -> bool {
+        !matches!(
+            (self, other),
+            (Sign::Negative, Sign::Positive) | (Sign::Positive, Sign::Negative)
+        )
+    }
+}
+
 /// Amounts are the basis of pretty much everything.
 ///
 /// They are the 'money' values held by [Posting]s. Amounts within `Postings` are generally either credits
@@ -82,6 +98,7 @@ impl<'h> Amount<'h> {
         self.unit
     }
 
+    /// Gets the scale (number of decimal places) of the amount's quantity.
     pub fn scale(&self) -> u32 {
         self.quantity.normalize().scale()
     }
@@ -117,6 +134,17 @@ impl<'h> Amount<'h> {
         }
     }
 
+    pub fn rounded_dec_places_with_strategy(
+        &self,
+        num_dec_places: u8,
+        strategy: RoundingStrategy,
+    ) -> Amount<'h> {
+        Amount::new(
+            self.unit,
+            self.quantity.round_dp_with_strategy(num_dec_places as u32, strategy.into()),
+        )
+    }
+
     /// Assuming this amount value has been rounded, this gets the range of values the original,
     /// unrounded amount value could be depending on the rounding strategy used.
     /// Returns the range (min, max) of the possible values.
@@ -134,11 +162,11 @@ impl<'h> Amount<'h> {
                 let plus_minus_error = Decimal::new(5, self.quantity.scale() + 1);
                 (Bound::Included(self - plus_minus_error), Bound::Included(self + plus_minus_error))
             }
-            RoundingStrategy::AlwaysUp => {
+            RoundingStrategy::AwayFromZero => {
                 let plus_minus_error = Decimal::new(1, self.quantity.scale());
                 (Bound::Excluded(self - plus_minus_error), Bound::Included(*self))
             }
-            RoundingStrategy::AlwaysDown => {
+            RoundingStrategy::ToZero => {
                 let plus_minus_error = Decimal::new(1, self.quantity.scale());
                 (Bound::Included(*self), Bound::Excluded(self + plus_minus_error))
             }
@@ -158,6 +186,16 @@ impl<'h> Amount<'h> {
             panic!("Currencies do not match");
         } else {
             Amount::new(self.unit, self.quantity.max(other.quantity))
+        }
+    }
+
+    pub fn sign(&self) -> Sign {
+        if self.quantity.is_zero() {
+            Sign::Zero
+        } else if self.quantity.is_sign_positive() {
+            Sign::Positive
+        } else {
+            Sign::Negative
         }
     }
 
@@ -184,12 +222,12 @@ impl<'h> Amount<'h> {
     }
 
     pub fn format(&self) -> SS {
-        self.unit.format().format(*self)
+        self.unit.format().format(self.quantity, self.unit.code(), self.unit.rounding_strategy())
     }
 
     /// Same as format() but without loss of precision.
     pub fn format_precise(self) -> SS {
-        self.unit.format().format_precise(self)
+        self.unit.format().format_precise(self.quantity, self.unit.code())
     }
 
     /// Splits the amount at `percent`, returning left and right (remainder) parts.
@@ -230,7 +268,7 @@ impl<'h> Amount<'h> {
             handler: &'h mut H,
             thousands_separator: char,
             decimal_separator: char,
-            negative_style: NegativeStyle,
+            negative_style: Option<NegativeStyle>,
             in_quotes: bool,
             // Becomes true when the decimal point is found.
             found_decimal: bool,
@@ -272,21 +310,21 @@ impl<'h> Amount<'h> {
                         }
                         '-' if !self.found_digits
                             && !self.found_sign
-                            && self.negative_style == NegativeStyle::NegativeSign =>
+                            && self.negative_style == Some(NegativeStyle::NegativeSign) =>
                         {
                             self.handler.handle_part(AmountPart::Sign(c));
                             self.found_sign = true;
                         }
                         '(' if !self.found_digits
                             && !self.found_sign
-                            && self.negative_style == NegativeStyle::Brackets =>
+                            && self.negative_style == Some(NegativeStyle::Brackets) =>
                         {
                             self.handler.handle_part(AmountPart::Sign(c));
                             self.found_sign = true;
                         }
                         ')' if self.found_digits
                             && self.found_sign
-                            && self.negative_style == NegativeStyle::Brackets =>
+                            && self.negative_style == Some(NegativeStyle::Brackets) =>
                         {
                             self.handler.handle_part(AmountPart::Sign(c));
                             self.found_sign = false;
@@ -303,13 +341,17 @@ impl<'h> Amount<'h> {
             handler,
             thousands_separator: self.unit.number_format().thousands_separator() as char,
             decimal_separator: self.unit.number_format().decimal_separator() as char,
-            negative_style: self.unit.number_format().negative_style(),
+            negative_style: self
+                .unit
+                .format()
+                .negative_style()
+                .or(self.unit.number_format().negative_style()),
             found_digits: false,
             in_quotes: false,
             found_decimal: false,
             found_sign: false,
         };
-        format.write_amount(*self, &mut parser, None).unwrap();
+        format.write_amount(self.quantity, self.unit.code(), None, &mut parser).unwrap();
     }
 
     pub fn into_cell(self, format: &UnitFormat) -> Box<dyn table2::Cell> {
@@ -469,7 +511,7 @@ impl<'h> Amount<'h> {
             found_decimal: false,
             found_sign: false,
         };
-        write!(&mut counter, "{}", self).unwrap();
+        write!(&mut counter, "{}", self.format_precise()).unwrap();
         (
             counter.prefixed_code_bef_sign,
             if counter.found_sign { 1 } else { 0 },
@@ -523,16 +565,16 @@ impl Hash for Amount<'_> {
 
 impl fmt::Debug for Amount<'_> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", self.unit.format().format_precise(*self))
+        write!(f, "{}", self.format_precise())
     }
 }
 
 impl fmt::Display for Amount<'_> {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         if let Some(width) = f.width() {
-            write!(f, "{:>width$}", self.unit.format().format(*self), width = width)
+            write!(f, "{:>width$}", self.format(), width = width)
         } else {
-            write!(f, "{}", self.unit.format().format(*self))
+            write!(f, "{}", self.format())
         }
     }
 }
@@ -540,7 +582,7 @@ impl fmt::Display for Amount<'_> {
 impl<'h, 'a> From<Amount<'h>> for Cell<'a> {
     fn from(amount: Amount<'h>) -> Self {
         let counts = amount.count_formatted_str_parts();
-        let amount_str = amount.to_string();
+        let amount_str = amount.format_precise().to_string();
 
         // If there is a code part before the amount, group it together with any negative sign
         // that precedes it.
@@ -600,6 +642,10 @@ impl<'h> From<&Amount<'h>> for Yaml {
             Yaml::String(amount.quantity().to_string()),
         );
         hash.insert(Yaml::String("display".to_string()), Yaml::String(amount.format().to_string()));
+        hash.insert(
+            Yaml::String("precise".to_string()),
+            Yaml::String(amount.format_precise().to_string()),
+        );
         Yaml::Hash(hash)
     }
 }
@@ -642,6 +688,12 @@ macro_rules! checked_op {
     ($amount_type:ty, $op_type:tt, $op_method:ident, $dec_op:path) => {
         impl<'h> $op_type<$amount_type> for $amount_type {
             type Output = Amount<'h>;
+            /// Performs a `Decimal` checked operation.
+            ///
+            /// # Precision
+            /// This will not necessarily be an exact operation when working at the boundaries of `Decimal`
+            /// precision. For example, doing a `Decimal::checked_add(0.0539713951605649006026805793, 8.4)` gives
+            /// `8.453971395160564900602680579` (truncated).
             fn $op_method(self, rhs: $amount_type) -> Self::Output {
                 if self.unit != rhs.unit {
                     if !self.unit.is_none() && !rhs.unit.is_none() {
@@ -687,8 +739,8 @@ op!(Amount<'h>, Rem, rem, Decimal::rem);
 op!(&Amount<'h>, Rem, rem, Decimal::rem);
 
 macro_rules! checked_op_assign {
-    ($amount_type:ty, $op_type:tt, $op_method:tt, $dec_op:path) => {
-        impl<'h> $op_type<$amount_type> for Amount<'h> {
+    ($amount_type:ty, $for_type:ty, $op_type:tt, $op_method:tt, $dec_op:path) => {
+        impl<'h> $op_type<$amount_type> for $for_type {
             fn $op_method(&mut self, rhs: $amount_type) {
                 if self.unit != rhs.unit {
                     if !self.unit.is_none() && !rhs.unit.is_none() {
@@ -703,16 +755,22 @@ macro_rules! checked_op_assign {
         }
     };
 }
-checked_op_assign!(Amount<'h>, AddAssign, add_assign, Decimal::checked_add);
-checked_op_assign!(&Amount<'h>, AddAssign, add_assign, Decimal::checked_add);
-checked_op_assign!(Amount<'h>, SubAssign, sub_assign, Decimal::checked_sub);
-checked_op_assign!(&Amount<'h>, SubAssign, sub_assign, Decimal::checked_sub);
-checked_op_assign!(Amount<'h>, MulAssign, mul_assign, Decimal::checked_mul);
-checked_op_assign!(&Amount<'h>, MulAssign, mul_assign, Decimal::checked_mul);
+checked_op_assign!(Amount<'h>, Amount<'h>, AddAssign, add_assign, Decimal::checked_add);
+checked_op_assign!(&Amount<'h>, Amount<'h>, AddAssign, add_assign, Decimal::checked_add);
+checked_op_assign!(Amount<'h>, Amount<'h>, SubAssign, sub_assign, Decimal::checked_sub);
+checked_op_assign!(&Amount<'h>, Amount<'h>, SubAssign, sub_assign, Decimal::checked_sub);
+checked_op_assign!(Amount<'h>, Amount<'h>, MulAssign, mul_assign, Decimal::checked_mul);
+checked_op_assign!(&Amount<'h>, Amount<'h>, MulAssign, mul_assign, Decimal::checked_mul);
+checked_op_assign!(Amount<'h>, &mut Amount<'h>, AddAssign, add_assign, Decimal::checked_add);
+checked_op_assign!(&Amount<'h>, &mut Amount<'h>, AddAssign, add_assign, Decimal::checked_add);
+checked_op_assign!(Amount<'h>, &mut Amount<'h>, SubAssign, sub_assign, Decimal::checked_sub);
+checked_op_assign!(&Amount<'h>, &mut Amount<'h>, SubAssign, sub_assign, Decimal::checked_sub);
+checked_op_assign!(Amount<'h>, &mut Amount<'h>, MulAssign, mul_assign, Decimal::checked_mul);
+checked_op_assign!(&Amount<'h>, &mut Amount<'h>, MulAssign, mul_assign, Decimal::checked_mul);
 
 macro_rules! op_assign {
-    ($amount_type:ty, $op_type:tt, $op_method:tt, $dec_op:path) => {
-        impl<'h> $op_type<$amount_type> for Amount<'h> {
+    ($amount_type:ty, $for_type:ty, $op_type:tt, $op_method:tt, $dec_op:path) => {
+        impl<'h> $op_type<$amount_type> for $for_type {
             fn $op_method(&mut self, rhs: $amount_type) {
                 if self.unit != rhs.unit {
                     if !self.unit.is_none() && !rhs.unit.is_none() {
@@ -727,10 +785,14 @@ macro_rules! op_assign {
         }
     };
 }
-op_assign!(Amount<'h>, DivAssign, div_assign, Decimal::div);
-op_assign!(&Amount<'h>, DivAssign, div_assign, Decimal::div);
-op_assign!(Amount<'h>, RemAssign, rem_assign, Decimal::rem);
-op_assign!(&Amount<'h>, RemAssign, rem_assign, Decimal::rem);
+op_assign!(Amount<'h>, Amount<'h>, DivAssign, div_assign, Decimal::div);
+op_assign!(&Amount<'h>, Amount<'h>, DivAssign, div_assign, Decimal::div);
+op_assign!(Amount<'h>, Amount<'h>, RemAssign, rem_assign, Decimal::rem);
+op_assign!(&Amount<'h>, Amount<'h>, RemAssign, rem_assign, Decimal::rem);
+op_assign!(Amount<'h>, &mut Amount<'h>, DivAssign, div_assign, Decimal::div);
+op_assign!(&Amount<'h>, &mut Amount<'h>, DivAssign, div_assign, Decimal::div);
+op_assign!(Amount<'h>, &mut Amount<'h>, RemAssign, rem_assign, Decimal::rem);
+op_assign!(&Amount<'h>, &mut Amount<'h>, RemAssign, rem_assign, Decimal::rem);
 
 macro_rules! checked_op_decimal {
     ($amount_type:ty, $op_type:tt, $op_method:tt, $op:path, $unit_check:expr) => {
@@ -871,6 +933,13 @@ impl<'h> AmountExpr<'h> {
         let mut expr = self.clone();
         expr.set_amount(amount);
         expr
+    }
+
+    pub fn map<F>(self, f: F) -> AmountExpr<'h>
+    where
+        F: FnOnce(Amount<'h>) -> Amount<'h>,
+    {
+        Self { amount: f(self.amount), ..self }
     }
 
     pub fn write<W: fmt::Write>(&self, w: &mut W, precise: bool) -> fmt::Result {

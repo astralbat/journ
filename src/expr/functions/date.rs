@@ -6,7 +6,7 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::expr::column_value::ColumnValue;
-use crate::expr::context::EvalContext;
+use crate::expr::{Expr, IdentifierContext};
 use chrono::NaiveDate;
 use journ_core::arguments::Arguments;
 use journ_core::date_and_time::JDate;
@@ -15,19 +15,25 @@ use journ_core::error::JournResult;
 use rust_decimal::prelude::ToPrimitive;
 
 /// Constructs a date from year, month, and day arguments.
-pub fn date<'h, 'a, 's>(args: &[ColumnValue<'h>]) -> JournResult<ColumnValue<'h>> {
+pub fn date<'h>(
+    args: &[Expr<'h>],
+    context: &mut dyn IdentifierContext<'h>,
+) -> JournResult<ColumnValue<'h>> {
     if args.len() != 3 {
         return Err(err!("Function 'date' requires three arguments: year, month, day"));
     }
     let year = args[0]
+        .eval(context)?
         .as_number()
         .and_then(|d| d.to_i32())
         .ok_or_else(|| err!("Invalid year argument to function 'date'"))?;
     let month = args[1]
+        .eval(context)?
         .as_number()
         .and_then(|d| d.to_u32())
         .ok_or_else(|| err!("Invalid month argument to function 'date'"))?;
     let day = args[2]
+        .eval(context)?
         .as_number()
         .and_then(|d| d.to_u32())
         .ok_or_else(|| err!("Invalid day argument to function 'date'"))?;

@@ -46,7 +46,6 @@ pub mod metadata;
 pub mod money_util;
 pub mod parsing;
 pub mod posting;
-pub mod postings_aggregation;
 pub mod price;
 pub mod price_db;
 pub mod python;
@@ -57,6 +56,7 @@ pub mod alloc;
 //pub mod apportionment;
 pub mod amounts;
 mod journal_node_segment;
+mod journal_obj;
 pub mod journal_util;
 pub mod module;
 #[cfg(test)]

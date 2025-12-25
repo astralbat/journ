@@ -6,27 +6,24 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::bindings_pyo3::{PyLedgerError, PyLedgerResult};
-use journ_core::journal::Journal as CoreJournal;
 use journ_core::journal_entry::JournalEntry as CoreJournalEntry;
 use journ_core::posting::PostingId;
-use journ_core::valued_amount::Valuation;
+use journ_core::valued_amount::PostingValuation;
 use journ_core::{err, parse, parsing};
 use rust_decimal::Decimal;
 use std::sync::{Arc, Mutex};
 
 #[pyclass(unsendable)]
 pub struct Posting {
-    journal: Arc<Mutex<CoreJournal<'static>>>,
     entry: Arc<Mutex<CoreJournalEntry<'static>>>,
     posting_id: PostingId<'static>,
 }
 impl Posting {
     pub fn new(
-        journal: Arc<Mutex<journ_core::journal::Journal<'static>>>,
         entry: Arc<Mutex<CoreJournalEntry<'static>>>,
         posting_id: PostingId<'static>,
     ) -> Self {
-        Posting { journal, entry, posting_id }
+        Posting { entry, posting_id }
     }
 }
 
@@ -50,19 +47,19 @@ impl Posting {
         let pst = entry.find_posting_mut(self.posting_id).unwrap();
         let unit_value_alloc = crate::bindings_pyo3::ALLOCATOR.alloc(unit_value.to_string());
 
-        let parse_res = parse!(unit_value_alloc, parsing::amount::amount, &mut config).0?.1;
+        let parse_res = parse!(unit_value_alloc, parsing::amount::amount, &mut config)?.1;
 
         if !parse_res.is_positive() {
             return Err(PyLedgerError(err!("Unit value must be positive")));
         }
-        if pst.value_units().find(|u| *u == parse_res.unit()).is_some() {
+        if pst.value_units().any(|u| u == parse_res.unit()) {
             return Err(PyLedgerError(err!(
                 "Valuation already set for unit: {}",
                 parse_res.unit()
             )));
         }
 
-        pst.set_valuation(Valuation::new_unit(parse_res));
+        pst.set_valuation(PostingValuation::new_unit(parse_res));
         Ok(())
     }
 
@@ -72,18 +69,18 @@ impl Posting {
         let pst = entry.find_posting_mut(self.posting_id).unwrap();
         let total_value_alloc = crate::bindings_pyo3::ALLOCATOR.alloc(total_value.to_string());
 
-        let parse_res = parse!(total_value_alloc, parsing::amount::amount, &mut config).0?.1;
+        let parse_res = parse!(total_value_alloc, parsing::amount::amount, &mut config)?.1;
         if !parse_res.is_positive() {
             return Err(PyLedgerError(err!("Total value must be positive")));
         }
-        if pst.value_units().find(|u| *u == parse_res.unit()).is_some() {
+        if pst.value_units().any(|u| u == parse_res.unit()) {
             return Err(PyLedgerError(err!(
                 "Valuation already set for unit: {}",
                 parse_res.unit()
             )));
         }
 
-        pst.set_valuation(Valuation::new_total(parse_res, false));
+        pst.set_valuation(PostingValuation::new_total(parse_res, false));
         Ok(())
     }
 }

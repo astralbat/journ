@@ -9,16 +9,19 @@ use crate::expr::{ColumnValue, GroupKey};
 use journ_core::journal::Journal;
 use journ_core::journal_entry::JournalEntry;
 use journ_core::posting::Posting;
-use smallvec::SmallVec;
 use smartstring::alias::String as SS;
-use std::ascii::AsciiExt;
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::sync::Arc;
 
 pub trait EvalContext<'h> {
     fn journal(&self) -> &Journal<'h>;
 
     fn as_posting_context(&self) -> Option<&PostingContext<'h>> {
+        None
+    }
+
+    fn as_posting_context_mut(&mut self) -> Option<&mut PostingContext<'h>> {
         None
     }
 
@@ -33,14 +36,34 @@ pub trait IdentifierContext<'h>: EvalContext<'h> {
     fn variables_mut(&mut self) -> &mut HashMap<SS, ColumnValue<'h>>;
 
     fn eval_identifier(&self, identifier: &str) -> Option<ColumnValue<'h>> {
-        match self.variables().get(identifier.to_lowercase().as_str()) {
-            Some(v) => Some(v.clone()),
-            None => None,
-        }
+        self.variables().get(identifier.to_lowercase().as_str()).cloned()
     }
 
     fn set_identifier(&mut self, identifier: &str, value: ColumnValue<'h>) {
         self.variables_mut().insert(identifier.to_lowercase().into(), value);
+    }
+
+    fn append_identifier(&mut self, identifier: &str, value: ColumnValue<'h>) {
+        let entry = self.variables_mut().entry(identifier.to_lowercase().into());
+        match entry {
+            Entry::Occupied(mut o) => {
+                let existing = o.get_mut();
+                match existing {
+                    ColumnValue::List(vec) => {
+                        value.as_list().iter().for_each(|v| vec.push(v.clone()));
+                    }
+                    _ => {
+                        let mut vec = Vec::new();
+                        vec.push(existing.clone());
+                        value.as_list().iter().for_each(|v| vec.push(v.clone()));
+                        *existing = ColumnValue::List(vec);
+                    }
+                }
+            }
+            Entry::Vacant(v) => {
+                v.insert(value);
+            }
+        }
     }
 }
 
@@ -61,19 +84,11 @@ impl<'h> LateContext<'h> {
 
         // Make the --group-by aliases available as identifiers in the context. E.g. -o ALIAS
         let aliases_and_values =
-            context.group_key.aliases().map(|(a, v)| (a.clone(), v.clone())).collect::<Vec<_>>();
+            context.group_key.aliases().map(|(a, v)| (a, v.clone())).collect::<Vec<_>>();
         for (alias, val) in aliases_and_values {
             context.set_identifier(alias, val.clone());
         }
         context
-    }
-
-    pub fn group_key(&self) -> &GroupKey<'h> {
-        &self.group_key
-    }
-
-    pub fn aggregate_values(&self) -> &[ColumnValue<'h>] {
-        &self.aggregate_values
     }
 }
 impl<'h> EvalContext<'h> for LateContext<'h> {
@@ -159,6 +174,10 @@ impl<'h> EvalContext<'h> for PostingContext<'h> {
     fn as_posting_context(&self) -> Option<&PostingContext<'h>> {
         Some(self)
     }
+
+    fn as_posting_context_mut(&mut self) -> Option<&mut PostingContext<'h>> {
+        Some(self)
+    }
 }
 
 impl<'h> IdentifierContext<'h> for PostingContext<'h> {
@@ -190,13 +209,11 @@ impl<'h> IdentifierContext<'h> for PostingContext<'h> {
                 self.entry
                     .metadata()
                     .find(|m| m.key() == &identifier[1..])
-                    .and_then(|m| m.value().map(ColumnValue::StringRef))
+                    .and_then(|m| m.value().map(|m| ColumnValue::StringRef(m)))
                     .unwrap_or(ColumnValue::Undefined),
             )
-        } else if let (v) = self.variables().get(identifier.to_lowercase().as_str()) {
-            v.cloned()
         } else {
-            None
+            self.variables.get(identifier.to_lowercase().as_str()).cloned()
         }
     }
 }

@@ -11,7 +11,8 @@ use crate::amount::{Amount, AmountExpr};
 use crate::journal_entry::EntryId;
 use crate::parsing::text_block::TextBlock;
 use crate::unit::Unit;
-use crate::valued_amount::{Valuation, ValuedAmount};
+use crate::valued_amount::{PostingValuation, ValuedAmount};
+use crate::valuer::Valuation;
 use std::cell::Cell;
 use std::fmt;
 use std::sync::{Arc, OnceLock};
@@ -164,33 +165,36 @@ impl<'h> Posting<'h> {
         self.balance_assertion.as_ref().map(|a| **a)
     }
 
-    pub fn valuations(&self) -> impl Iterator<Item = &Valuation<'h>> + Clone {
+    pub fn valuations(&self) -> impl Iterator<Item = Valuation<'h>> {
+        self.valued_amount.valuations()
+    }
+
+    pub fn posting_valuations(&self) -> impl Iterator<Item = &PostingValuation<'h>> + Clone {
         debug_assert!(!self.valued_amount.is_nil(), "Amount not set; set amount first");
 
-        self.valued_amount.valuations()
+        self.valued_amount.posting_valuations()
     }
 
     /// Adds or replaces an existing valuation on this posting with the same unit. The unit of the valuation specified must not
     /// be the same as the amount's unit.
-    pub fn set_valuation(&mut self, val: Valuation<'h>) {
+    pub fn set_valuation(&mut self, val: PostingValuation<'h>) {
         debug_assert!(!self.valued_amount.is_nil(), "Amount not set; set amount first");
-
         self.valued_amount.set_valuation(val)
     }
 
     pub fn value_units(&self) -> impl Iterator<Item = &'h Unit<'h>> + '_ {
         debug_assert!(!self.valued_amount.is_nil(), "Amount not set; set amount first");
 
-        self.valued_amount.valuations().map(|v| v.unit())
+        self.valued_amount.posting_valuations().map(|v| v.unit())
     }
 
     /// Tries to get the amount in the specified unit. This is either going to be the amount
     /// itself, or the unit/total price.
     /// The returned value will be signed according to the amount's sign.
-    pub fn amount_in(&self, in_curr: &'h Unit<'h>) -> Option<Amount<'h>> {
+    pub fn amount_in(&self, in_unit: &'h Unit<'h>) -> Option<Amount<'h>> {
         debug_assert!(!self.valued_amount.is_nil(), "Amount not set; set amount first");
 
-        self.valued_amount.value_in(in_curr)
+        self.valued_amount.value_in(in_unit)
     }
 
     pub fn comment(&self) -> Option<&'h str> {

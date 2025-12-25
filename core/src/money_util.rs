@@ -112,7 +112,7 @@ impl<'h> MoneyPot<'h> {
         assert!(i < n);
 
         let upper_amount_each = (self.value / Decimal::new(n as i64, 0))
-            .rounded_with_strategy(RoundingStrategy::AlwaysUp);
+            .rounded_with_strategy(RoundingStrategy::AwayFromZero);
         let mut taken = self.take_max(upper_amount_each);
         for _ in 1..=i {
             taken = self.take_max(upper_amount_each);

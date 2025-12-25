@@ -15,7 +15,7 @@ use chrono::DateTime;
 use chrono_tz::Tz;
 use env_logger::Builder;
 use journ_core::alloc::HerdAllocator;
-use journ_core::amount::Amount;
+use journ_core::configuration::AlwaysIncluded;
 use journ_core::date_and_time::{DateAndTime, JDateTime, JDateTimeRange};
 use journ_core::err;
 use journ_core::error::JournError;
@@ -24,7 +24,7 @@ use journ_core::module::MODULES;
 use journ_core::parsing::text_block::TextBlock;
 use journ_core::python::mod_ledger;
 use journ_core::reporting::balance::AccountBalances;
-use journ_core::unit::{Unit, UnitFormat};
+use journ_core::unit::{RoundingStrategy, UnitFormat};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyAnyMethods, PyDateTime, PyStringMethods};
@@ -331,7 +331,7 @@ impl Journal {
 
     fn print(&self) -> PyLedgerResult<()> {
         let journal = self.journal.lock().unwrap();
-        journal.root().print(None)?;
+        journal.root().print(&AlwaysIncluded)?;
         Ok(())
     }
 
@@ -340,7 +340,7 @@ impl Journal {
         journal
             .find_node_by_filename(&PathBuf::from(name))
             .ok_or(PyLedgerError(err!("No filename ends with: {}", name)))?
-            .print(None)?;
+            .print(&AlwaysIncluded)?;
         Ok(())
     }
 
@@ -383,6 +383,6 @@ fn format_amount<'py>(
         },
     };
 
-    let formatted = uf.format(Amount::new(&Unit::new(unit), dec));
-    Ok(formatted.to_string())
+    let s = uf.format(dec, unit, RoundingStrategy::default()).to_string();
+    Ok(s)
 }

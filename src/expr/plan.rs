@@ -6,11 +6,9 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::expr::Expr;
-use crate::expr::aggregation::AggState;
 use crate::expr::parser::AggKind;
 use journ_core::err;
 use journ_core::error::JournResult;
-use journ_core::ext::VecLike;
 
 pub struct Plan<'h> {
     column_spec: Vec<Expr<'h>>,
@@ -57,38 +55,8 @@ impl<'h> Plan<'h> {
             Ok(())
         } else {
             self.validate_no_nested_aggregates()?;
-            /*
-            for expr in &self.column_spec {
-                self.validate_expr_is_aggregate(expr)?;
-            }*/
             Ok(())
         }
-    }
-
-    fn validate_expr_is_aggregate(&self, expr: &Expr) -> JournResult<()> {
-        if let Expr::AggFunction { .. } = expr {
-            return Ok(());
-        }
-        for child in expr.children() {
-            self.validate_expr_is_aggregate(child)?;
-
-            if let Expr::Identifier(ident) = child {
-                // Identifiers are permitted if they refer to the alias of another column.
-                if self.column_spec.iter().any(|other_expr| match other_expr {
-                    Expr::Aliased(_, alias) if alias == ident => true,
-                    _ => false,
-                }) {
-                    continue;
-                }
-
-                if !self.group_by.iter().any(|g| g == child) {
-                    return Err(err!(
-                        "Column '{expr}' must appear in the --group-by clause or be used in an aggregate function"
-                    ));
-                }
-            }
-        }
-        Ok(())
     }
 
     fn validate_no_nested_aggregates(&self) -> JournResult<()> {

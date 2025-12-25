@@ -29,7 +29,7 @@ pub struct PythonEnvironment;
 /// is not possible using FromPyObject since it may return a type whose lifetime is bound to the lifetime of the GIL which is dropped
 /// at the end of eval().
 pub trait FromPyObjectOwned: Sized + 'static {
-    fn extract<'py>(ob: PyObject, py: Python<'py>) -> PyResult<Self>;
+    fn extract(ob: PyObject, py: Python) -> PyResult<Self>;
 }
 macro_rules! from_py_object_owned {
     ($type:ty) => {
@@ -173,7 +173,7 @@ impl PythonEnvironment {
         })
     }
 
-    pub fn eval<'py, T>(
+    pub fn eval<T>(
         expr: &str,
         args: Option<HashMap<String, Box<dyn DeferredArg>>>,
         ji: Option<u32>,
@@ -186,7 +186,7 @@ impl PythonEnvironment {
 
         Python::with_gil(|py| {
             let convert_err = |e: PyErr| {
-                err!("Error evaluating python expression: '{}'", expr.to_str().unwrap())
+                err!("Python error evaluating: '{}'", expr.to_str().unwrap())
                     .with_source(pyerr!(py, e))
             };
 

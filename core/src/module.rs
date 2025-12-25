@@ -7,8 +7,8 @@
  */
 use crate::directive::{Directive, DirectiveKind};
 use crate::parsing::JParseResult;
+use crate::parsing::input::TextBlockInput;
 use crate::parsing::parser::JournalParseNode;
-use crate::parsing::text_input::TextBlockInput;
 use std::any::Any;
 use std::fmt::Debug;
 use std::sync::Mutex;

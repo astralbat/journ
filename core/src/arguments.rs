@@ -48,8 +48,8 @@ impl DateTimeArguments {
     pub fn datetime_from_utc(&self, datetime: &NaiveDateTime) -> JDateTime<'_> {
         JDateTime::from_datetime(
             self.timezone.from_utc_datetime(datetime),
-            Some(&self.date_format),
-            Some(&self.time_format),
+            Some(self.date_format),
+            Some(self.time_format),
         )
     }
 }
@@ -126,7 +126,7 @@ impl Arguments {
         self.end = end
     }
 
-    pub fn begin_end_range(&self) -> impl RangeBounds<DateTime<Tz>> {
+    pub fn begin_end_range(&self) -> (Bound<DateTime<Tz>>, Bound<DateTime<Tz>>) {
         let begin = self.begin().map(Bound::Included);
         let end = self.end().map(Bound::Excluded);
         (begin.unwrap_or(Bound::Unbounded), end.unwrap_or(Bound::Unbounded))
@@ -153,14 +153,6 @@ impl Arguments {
         self.real_postings = real_postings
     }
 }
-
-#[derive(Default, Debug)]
-pub struct PrintCommand {
-    pub account_filter: Option<String>,
-    pub print_file: Option<String>,
-}
-
-impl Command for PrintCommand {}
 
 #[derive(Default, Debug)]
 pub struct CsvCommand {

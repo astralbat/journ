@@ -5,8 +5,7 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
-use crate::expr::ColumnValue;
-use crate::expr::context::EvalContext;
+use crate::expr::{ColumnValue, Expr, IdentifierContext};
 use chrono_tz::Tz;
 use journ_core::date_and_time::{DateFormat, TimeFormat};
 use journ_core::err;
@@ -15,55 +14,68 @@ use journ_core::unit::UnitFormat;
 use std::mem;
 use std::str::FromStr;
 
-pub fn text<'h, 'a, 's>(args: &mut [ColumnValue<'h>]) -> JournResult<ColumnValue<'h>> {
-    if args.is_empty() {
+pub fn text<'h>(
+    args: &[Expr<'h>],
+    context: &mut dyn IdentifierContext<'h>,
+) -> JournResult<ColumnValue<'h>> {
+    text_of_values(
+        &mut args.iter().map(|a| a.eval(context)).collect::<Result<Vec<ColumnValue>, _>>()?,
+    )
+}
+
+fn text_of_values<'h>(values: &mut [ColumnValue<'h>]) -> JournResult<ColumnValue<'h>> {
+    if values.is_empty() {
         return Err(err!("Function 'text' requires at least one argument"));
     }
-    let value = mem::take(&mut args[0]);
+    let value = mem::take(&mut values[0]);
 
     if value.is_undefined() {
         return Ok(ColumnValue::Undefined);
     }
 
     match value {
-        ColumnValue::Amount(amount) => match args.len() {
+        ColumnValue::Amount(amount) => match values.len() {
             1 => Ok(ColumnValue::String(amount.format())),
             2 => {
-                let format_value = &args[1];
+                let format_value = &values[1];
                 let format = format_value.as_str().ok_or_else(|| {
                     err!("Function 'text(amount, format)' requires the format argument to be of type `String`")
                 })?;
                 let unit_format = UnitFormat::from_str(format)
                     .map_err(|err| err!("Function 'text' format error: {}", err))?;
-                Ok(ColumnValue::String(unit_format.format(amount)))
+                Ok(ColumnValue::String(unit_format.format(
+                    amount.quantity(),
+                    amount.unit().code(),
+                    amount.unit().rounding_strategy(),
+                )))
             }
             _ => Err(err!("Function 'text(amount [,format])' requires one or two arguments")),
         },
-        ColumnValue::Date(date) => match args.len() {
+        ColumnValue::Date(date) => match values.len() {
             1 => Ok(ColumnValue::String(date.into())),
             2 => {
-                let df = date_format(&args[1], date_usage())?;
+                let df = date_format(&values[1], date_usage())?;
                 Ok(ColumnValue::String(date.with_format(df).into()))
             }
             _ => Err(err!("Function 'text(date [,date_format])' requires one or two arguments")),
         },
-        ColumnValue::Datetime(datetime) => match args.len() {
+        ColumnValue::Datetime(datetime) => match values.len() {
             1 => Ok(ColumnValue::String(datetime.into())),
             2 => {
-                let df = date_format(&args[1], datetime_usage())?;
+                let df = date_format(&values[1], datetime_usage())?;
                 Ok(ColumnValue::String(datetime.with_date_and_time_format(Some(df), None).into()))
             }
             3 => {
-                let df = date_format(&args[1], datetime_usage())?;
-                let tf = time_format(&args[2])?;
+                let df = date_format(&values[1], datetime_usage())?;
+                let tf = time_format(&values[2])?;
                 Ok(ColumnValue::String(
                     datetime.with_date_and_time_format(Some(df), Some(tf)).into(),
                 ))
             }
             4 => {
-                let df = date_format(&args[1], datetime_usage())?;
-                let tf = time_format(&args[2])?;
-                let tz = time_zone(&args[3])?;
+                let df = date_format(&values[1], datetime_usage())?;
+                let tf = time_format(&values[2])?;
+                let tz = time_zone(&values[3])?;
                 let dt_in_tz = datetime.with_timezone(tz);
                 Ok(ColumnValue::String(
                     dt_in_tz.with_date_and_time_format(Some(df), Some(tf)).into(),
@@ -81,8 +93,8 @@ pub fn text<'h, 'a, 's>(args: &mut [ColumnValue<'h>]) -> JournResult<ColumnValue
         ColumnValue::List(l) => Ok(ColumnValue::List(
             l.into_iter()
                 .map(|v| {
-                    args[0] = v;
-                    text(args)
+                    values[0] = v;
+                    text_of_values(values)
                 })
                 .collect::<Result<Vec<_>, _>>()?,
         )),

@@ -13,6 +13,7 @@ use itertools::Itertools;
 use journ_core::arguments::Arguments;
 use journ_core::configuration::Filter;
 use journ_core::date_and_time::JDateTimeRange;
+use journ_core::metadata::Metadata;
 use journ_core::reporting::table::Cell;
 use journ_core::reporting::table::Row;
 use journ_core::reporting::term_style::{Colour, Weight};
@@ -429,7 +430,7 @@ impl<'h> PoolEvent<'h> {
         match &self.event_kind {
             PoolEventKind::PooledDeal(dh) => dh.datetime(),
             PoolEventKind::UnpooledDeal(dh) => dh.datetime(),
-            PoolEventKind::Match(details) => details.sell_holding().datetime(),
+            PoolEventKind::Match(details) => details.originator.datetime(),
             PoolEventKind::Adjustment(adj) => adj.datetime(),
         }
     }
@@ -554,12 +555,14 @@ impl<'h> PoolEvent<'h> {
         }
     }
 
-    pub fn metadata(&self, tag: &str) -> LinkedHashSet<String> {
+    pub fn metadata_by_key(&self, key: &str) -> LinkedHashSet<&Metadata<'h>> {
         match &self.event_kind {
-            PoolEventKind::PooledDeal(dh) => dh.metadata(tag),
-            PoolEventKind::UnpooledDeal(dh) => dh.metadata(tag),
-            PoolEventKind::Match(details) => details.sell_holding().metadata(tag),
-            PoolEventKind::Adjustment(adj) => adj.entry().metadata_tag_values(tag),
+            PoolEventKind::PooledDeal(dh) => dh.metadata_by_key(key),
+            PoolEventKind::UnpooledDeal(dh) => dh.metadata_by_key(key),
+            PoolEventKind::Match(details) => details.sell_holding().metadata_by_key(key),
+            PoolEventKind::Adjustment(adj) => {
+                adj.entry().metadata_by_key(key).into_iter().collect()
+            }
         }
     }
 }
@@ -1067,14 +1070,14 @@ impl<'h, 'e> AggregatedPoolEvent<'h, 'e> {
         }
     }
 
-    pub fn metadata(&self, tag: &str) -> LinkedHashSet<String> {
+    pub fn metadata_by_key(&self, key: &str) -> LinkedHashSet<&Metadata<'h>> {
         match self {
-            AggregatedPoolEvent::One(e) => e.metadata(tag),
+            AggregatedPoolEvent::One(e) => e.metadata_by_key(key),
             AggregatedPoolEvent::Many(es) => {
                 let mut md_vals = LinkedHashSet::new();
-                for vals in es.iter().map(|e| e.metadata(tag)) {
+                for vals in es.iter().map(|e| e.metadata_by_key(key)) {
                     for val in vals {
-                        md_vals.insert_if_absent(val);
+                        md_vals.insert(val);
                     }
                 }
                 md_vals
@@ -1146,7 +1149,13 @@ impl<'h, 'e> AggregatedPoolEvent<'h, 'e> {
                     if total_row {
                         column_data.push(Cell::default())
                     } else {
-                        column_data.push(self.metadata(tag).iter().join(", ").into())
+                        column_data.push(
+                            self.metadata_by_key(tag)
+                                .iter()
+                                .filter_map(|m| m.value())
+                                .join(", ")
+                                .into(),
+                        )
                     }
                 }
             }
@@ -1298,11 +1307,17 @@ impl<'h, 'e> AggregatedPoolEvent<'h, 'e> {
                     }
                 }
                 CapitalGainsColumn::Metadata(tag) => {
-                    let values = self.metadata(tag);
+                    let values = self.metadata_by_key(tag);
                     if !values.is_empty() {
                         map.insert(
                             Yaml::String(format!("+{}", tag)),
-                            Yaml::Array(values.into_iter().map(Yaml::String).collect::<Vec<_>>()),
+                            Yaml::Array(
+                                values
+                                    .into_iter()
+                                    .filter_map(Metadata::value)
+                                    .map(|v| Yaml::String(v.to_string()))
+                                    .collect::<Vec<_>>(),
+                            ),
                         );
                     }
                 }

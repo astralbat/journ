@@ -5,13 +5,14 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
+use crate::module_init::MODULE_NAME;
 use crate::pool_event::{AggregatedPoolEvent, PoolEvent, PoolEventKind};
 use crate::ruleset::{ActionRule, Rule, RuleSet};
 use chrono::{DateTime, Duration};
 use chrono_tz::Tz;
 use journ_core::account::Account;
 use journ_core::arguments::{Command, DateTimeArguments};
-use journ_core::configuration::{AccountFilter, Filter, UnitFilter};
+use journ_core::configuration::{AccountFilter, Configuration, Filter, UnitFilter};
 use journ_core::directive::DirectiveKind;
 use journ_core::err;
 use journ_core::error::JournError;
@@ -38,7 +39,7 @@ pub enum MergeCgtError {
 /// The configuration object for the capital gains tax module. This must have a static lifetime in order to
 /// implement `ModuleConfiguration`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CgtConfiguration {
+pub struct CagConfiguration {
     round_deal_values: Option<bool>,
     assign_expenses: Option<AssignExpenses>,
     pools: Vec<PoolConfiguration>,
@@ -49,7 +50,7 @@ pub struct CgtConfiguration {
     unit_of_account_change: Option<UnitOfAccountChange>,
 }
 
-impl CgtConfiguration {
+impl CagConfiguration {
     pub fn empty() -> Self {
         Self {
             round_deal_values: None,
@@ -60,6 +61,10 @@ impl CgtConfiguration {
             ruleset: None,
             unit_of_account_change: None,
         }
+    }
+
+    pub fn get<'h>(config: &Configuration<'h>) -> Option<&'h CagConfiguration> {
+        config.module_config::<CagConfiguration>(MODULE_NAME)
     }
 
     pub fn round_deal_values(&self) -> bool {
@@ -132,7 +137,7 @@ impl CgtConfiguration {
     }
 
     /// Merge `other` into `self` and return the result. This will not modify `self` or `other`.
-    pub fn merge(&self, other: &CgtConfiguration) -> Result<CgtConfiguration, MergeCgtError> {
+    pub fn merge(&self, other: &CagConfiguration) -> Result<CagConfiguration, MergeCgtError> {
         let mut new_config = self.clone();
         static POOL_ID: AtomicUsize = AtomicUsize::new(1);
 
@@ -141,7 +146,6 @@ impl CgtConfiguration {
         for pool in other.pools.iter() {
             match self_pools.iter_mut().find(|p| *p == pool) {
                 Some(existing_pool) => {
-                    existing_pool.set_unit_of_account_change(pool.unit_of_account_change.clone());
                     if let Some(new_name) = pool.new_name() {
                         existing_pool.set_new_name(new_name.to_string());
                     }
@@ -186,7 +190,7 @@ impl CgtConfiguration {
     }
 }
 
-impl Default for CgtConfiguration {
+impl Default for CagConfiguration {
     fn default() -> Self {
         Self {
             round_deal_values: None,
@@ -200,10 +204,10 @@ impl Default for CgtConfiguration {
     }
 }
 
-impl<'h> PartialEq<DirectiveKind<'h>> for CgtConfiguration {
+impl<'h> PartialEq<DirectiveKind<'h>> for CagConfiguration {
     fn eq(&self, other: &DirectiveKind<'h>) -> bool {
         if let DirectiveKind::Module(module_obj) = other {
-            match module_obj.as_any().downcast_ref::<CgtConfiguration>() {
+            match module_obj.as_any().downcast_ref::<CagConfiguration>() {
                 Some(other) => self == other,
                 None => false,
             }
@@ -213,13 +217,13 @@ impl<'h> PartialEq<DirectiveKind<'h>> for CgtConfiguration {
     }
 }
 
-impl ModuleDirectiveObj for CgtConfiguration {
+impl ModuleDirectiveObj for CagConfiguration {
     fn as_any(&self) -> &dyn Any {
         self
     }
 }
 
-impl ModuleConfiguration for CgtConfiguration {
+impl ModuleConfiguration for CagConfiguration {
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -232,15 +236,15 @@ impl ModuleConfiguration for CgtConfiguration {
     }
 }
 
-impl ModuleConfigurationClone for CgtConfiguration {
+impl ModuleConfigurationClone for CagConfiguration {
     fn clone_box(&self) -> Box<dyn ModuleConfiguration> {
         Box::new(self.clone())
     }
 }
 
-impl ModuleConfigurationEq for CgtConfiguration {
+impl ModuleConfigurationEq for CagConfiguration {
     fn eq(&self, other: &dyn ModuleConfiguration) -> bool {
-        if let Some(other) = other.as_any().downcast_ref::<CgtConfiguration>() {
+        if let Some(other) = other.as_any().downcast_ref::<CagConfiguration>() {
             self == other
         } else {
             false
@@ -623,7 +627,6 @@ pub struct PoolConfiguration {
     id: Option<usize>,
     name: String,
     new_name: Option<String>,
-    unit_of_account_change: Option<UnitOfAccountChange>,
     /// Methods to apply when the pool has a positive balance and a negative balance.
     methods: (MatchMethod, MatchMethod),
     match_condition: Option<Lambda>,
@@ -639,7 +642,6 @@ impl PoolConfiguration {
             methods: Default::default(),
             max_age: Default::default(),
             match_condition: None,
-            unit_of_account_change: None,
         }
     }
 
@@ -667,17 +669,6 @@ impl PoolConfiguration {
 
     pub fn set_new_name(&mut self, name: String) {
         self.new_name = Some(name)
-    }
-
-    pub fn unit_of_account_change(&self) -> Option<&UnitOfAccountChange> {
-        self.unit_of_account_change.as_ref()
-    }
-
-    pub fn set_unit_of_account_change(
-        &mut self,
-        unit_of_account_change: Option<UnitOfAccountChange>,
-    ) {
-        self.unit_of_account_change = unit_of_account_change
     }
 
     pub fn methods(&self) -> (MatchMethod, MatchMethod) {
@@ -720,7 +711,6 @@ impl Default for PoolConfiguration {
             methods: Default::default(),
             max_age: Default::default(),
             match_condition: None,
-            unit_of_account_change: None,
         }
     }
 }

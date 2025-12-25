@@ -14,14 +14,15 @@ use crate::pool::PoolBalance;
 use chrono::DateTime;
 use chrono_tz::Tz;
 use journ_core::alloc::HerdAllocator;
-use journ_core::amount::{Amount, Quantity};
+use journ_core::amount::{Amount, AmountExpr, Quantity};
 use journ_core::configuration::Configuration;
 use journ_core::date_and_time::{JDateTime, JDateTimeRange};
 use journ_core::err;
 use journ_core::error::{JournError, JournResult};
 use journ_core::ext::NumExt;
-use journ_core::unit::{RoundingStrategy, Unit};
-use journ_core::valued_amount::{Valuation, ValuedAmount};
+use journ_core::metadata::Metadata;
+use journ_core::unit::Unit;
+use journ_core::valued_amount::{PostingValuation, ValuedAmount};
 use journ_core::valuer::{SystemValuer, Valuer};
 use linked_hash_set::LinkedHashSet;
 use log::trace;
@@ -38,7 +39,6 @@ use yaml_rust::Yaml;
 /// A DealHolding can never be empty; it will always have at least one deal, which itself may be zero.
 #[derive(Clone, PartialEq, Eq)]
 pub enum DealHolding<'h> {
-    //Single(Deal<'h>),
     Group(DealGroup<'h>),
     Sequence(SequenceDealHolding<'h>),
     Average(AverageDealHolding<'h>),
@@ -55,16 +55,6 @@ impl<'h> DealHolding<'h> {
             Average(ah) => ah.total(),
         }
     }
-
-    /*
-    fn abs_total(&self) -> Amount<'h> {
-        match self {
-            //Single(deal) => deal.total().amount().abs(),
-            Group(group) => group.total().amount().abs(),
-            Sequence(seq) => seq.abs_total(),
-            Average(avg) => avg.total().amount().abs(),
-        }
-    }*/
 
     /// Gets the deal totals without expenses.
     pub fn total_before_expenses(&self) -> ValuedAmount<'h> {
@@ -94,26 +84,6 @@ impl<'h> DealHolding<'h> {
         }
     }
 
-    /*
-    pub fn first_deal<'a>(&'a self) -> &'a Deal<'h> {
-        let root = self.root_parent();
-        match root {
-            Single(deal) => deal,
-            Sequence(seq) => seq.sequence.front().unwrap().first_deal(),
-            _ => panic!("Expect root parent to be a single deal"),
-        }
-    }*/
-
-    /*
-    pub fn first_deal_mut<'a>(&'a mut self) -> Option<&'a mut Deal<'h>> {
-        match self {
-            Single(deal) => Some(deal),
-            Group(_group) => self.root_parent().first_deal_mut(),
-            Sequence(seq) => seq.sequence.front_mut().unwrap().first_deal_mut(),
-            Average(_) => self.root_parent().first_deal_mut(),
-        }
-    }*/
-
     pub fn last_deal<'a>(&'a self) -> Option<&'a Deal<'h>> {
         match self {
             //Single(deal) => Some(deal),
@@ -123,22 +93,6 @@ impl<'h> DealHolding<'h> {
         }
     }
 
-    /*
-    pub fn deal(&self, i: usize) -> Option<&Deal<'h>> {
-        match self {
-            Single(deal) => {
-                if i == 0 {
-                    Some(deal)
-                } else {
-                    None
-                }
-            }
-            Group(group) => panic!("Cannot get deal from a deal group"),
-            Sequence(seq) => seq.sequence.get(i).and_then(|dh| dh.deal(i)),
-            Average(_) => panic!("Cannot get deal from an average holding"),
-        }
-    }*/
-
     pub fn deal_iter(&self) -> Box<dyn Iterator<Item = &Deal<'h>> + '_> {
         match self {
             //Single(deal) => Box::new(iter::once(deal)),
@@ -147,16 +101,6 @@ impl<'h> DealHolding<'h> {
             Average(_avg) => Box::new(iter::empty()),
         }
     }
-
-    /*
-    pub fn deal_iter_mut(&mut self) -> Box<dyn Iterator<Item = &mut Deal<'h>> + '_> {
-        match self {
-            Single(deal) => Box::new(std::iter::once(deal)),
-            Group(group) => Box::new(std::iter::empty()),
-            Sequence(seq) => Box::new(seq.sequence.iter_mut().flat_map(|dh| dh.deal_iter_mut())),
-            Average(_) => Box::new(std::iter::empty()),
-        }
-    }*/
 
     /// Gets the origin of the deals within the holding. The origin is not necessarily an original deal from
     /// a journal entry, only the set of split parents of the deals contained within.
@@ -185,16 +129,6 @@ impl<'h> DealHolding<'h> {
         }
     }
 
-    /*
-    pub fn adjustments(&self) -> impl Iterator<Item = &Adjustment<'h>> + '_ {
-        match self {
-            //Single(deal) => deal.adjustments(),
-            Group(group) => group.adjustments(),
-            Sequence(seq) => seq.adjustments(),
-            Average(avg) => &avg.adjustments,
-        }
-    }*/
-
     /// Gets the total explicit taxable gain of all the deals in the holding, if any of them
     /// has an explicitly set taxable gain.
     pub fn explicit_taxable_gain(&self) -> Option<ValuedAmount<'h>> {
@@ -208,72 +142,40 @@ impl<'h> DealHolding<'h> {
         }
     }
 
-    pub fn set_unit_of_account(
+    pub fn set_value_on_date(
         &mut self,
         uoa: &'h Unit<'h>,
-        config_and_value_date: Option<(&Configuration<'h>, DateTime<Tz>)>,
+        config: &Configuration<'h>,
+        date: DateTime<Tz>,
     ) -> Result<(), JournError> {
         match self {
-            /*Single(deal) => match config_and_value_date {
-                Some((config, date)) => {
-                    deal.set_unit_of_account_with_value_date(uoa, config, date)?
-                }
-                None => deal.set_unit_of_account(uoa)?,
-            },*/
-            Group(group) => group.set_unit_of_account(uoa, config_and_value_date)?,
-            Sequence(seq) => seq.set_unit_of_account(uoa, config_and_value_date)?,
-            Average(avg) => avg.set_unit_of_account(uoa, config_and_value_date)?,
+            Group(group) => group.set_value_on_date(uoa, config, date),
+            Sequence(seq) => seq.set_value_on_date(uoa, config, date),
+            Average(avg) => avg.set_value_on_date(uoa, config, date),
+        }
+    }
+
+    pub fn ensure_valued(&mut self, uoa: &'h Unit<'h>) -> Result<(), JournError> {
+        match self {
+            Group(group) => group.ensure_valued(uoa)?,
+            Sequence(seq) => seq.ensure_valued(uoa)?,
+            Average(avg) => avg.ensure_valued(uoa)?,
         }
         Ok(())
     }
-
-    /*
-    pub fn push_deal(&mut self, deal: Deal<'h>) {
-        let holding = mem::replace(self, Single(Deal::zero(deal.unit(), deal.entry())));
-
-        *self = match holding {
-            Single(d) => {
-                let allocator = d.allocator();
-                let split_parent = d.split_parent().cloned();
-                Sequence(SequenceDealHolding::from_iterator(
-                    [Single(d), Single(deal)],
-                    split_parent.map(|p| Box::new_in(p, allocator)),
-                    allocator,
-                ))
-            }
-            Group(g) => {
-                let allocator = g.allocator();
-                let split_parent = g.split_parent().cloned();
-                Sequence(SequenceDealHolding::from_iterator(
-                    [Group(g), Single(deal)],
-                    split_parent.map(|p| Box::new_in(p, allocator)),
-                    allocator,
-                ))
-            }
-            Sequence(mut seq) => {
-                seq.insert(deal);
-                Sequence(seq)
-            }
-            Average(avg) => {
-                let allocator = avg.valued_amount.allocator().unwrap();
-                let split_parent = avg.split_parent().cloned();
-                Sequence(SequenceDealHolding::from_iterator(
-                    [Average(avg), Single(deal)],
-                    split_parent.map(|p| Box::new_in(p, allocator)),
-                    allocator,
-                ))
-            }
-        };
-    }*/
 
     /// Pushes a deal on to the holding.
     pub fn push_group(&mut self, group: DealGroup<'h>) {
         let holding = mem::replace(
             self,
-            Average(AverageDealHolding::from(&Deal::zero(
-                group.unit(),
-                group.entries().next().unwrap(),
-            ))),
+            Average(AverageDealHolding::new(
+                group.entries().next().unwrap().date_and_time().datetime_range(),
+                ValuedAmount::new_in(
+                    AmountExpr::from(group.unit().with_quantity(0)),
+                    group.entries().next().unwrap().config().allocator(),
+                ),
+                ValuedAmount::nil(),
+            )),
         );
 
         *self = match holding {
@@ -309,35 +211,23 @@ impl<'h> DealHolding<'h> {
         self,
         split_amount: Quantity,
         method: MatchMethod,
-    ) -> Result<(DealHolding<'h>, Option<DealHolding<'h>>), DealHolding<'h>> {
+    ) -> Result<(DealHolding<'h>, Option<DealHolding<'h>>), Box<DealHolding<'h>>> {
         match self {
             /*Single(deal) => deal
             .split_max(split_amount)
             .map(|(l, r)| (Single(l), r.map(Single)))
             .map_err(Single),*/
-            Group(group) => {
-                group.split_max(split_amount).map(|(l, r)| (Group(l), r.map(Group))).map_err(Group)
+            Group(group) => group
+                .split_max(split_amount)
+                .map(|(l, r)| (Group(l), r.map(Group)))
+                .map_err(|e| Box::new(Group(*e))),
+            Sequence(seq_holding) => {
+                seq_holding.split_max(split_amount, method).map_err(|e| Box::new(Sequence(e)))
             }
-            Sequence(seq_holding) => seq_holding.split_max(split_amount, method).map_err(Sequence),
-            Average(avg_holding) => {
-                avg_holding
-                    .split_max(split_amount)
-                    .map(|(l, r)| (Average(l), r.map(Average)))
-                    .map_err(Average)
-                /*
-                match method {
-                MatchMethod::Average => avg_holding.split_max(split_amount),
-                MatchMethod::Fifo | MatchMethod::Lifo => {
-                    let allocator = avg_holding.valued_amount.allocator().unwrap();
-                    let split_parent = avg_holding.split_parent().cloned();
-                    let seq_holding = SequenceDealHolding::from_iterator(
-                        [Average(avg_holding)],
-                        split_parent.map(|p| Box::new_in(p, allocator)),
-                        allocator,
-                    );
-                    Self::split_max(Sequence(seq_holding), split_amount, method)
-                }*/
-            }
+            Average(avg_holding) => avg_holding
+                .split_max(split_amount)
+                .map(|(l, r)| (Average(l), r.map(Average)))
+                .map_err(|e| Box::new(Average(e))),
         }
     }
 
@@ -380,36 +270,6 @@ impl<'h> DealHolding<'h> {
         }
     }
 
-    /*
-    pub fn extract_first(self) -> (DealHolding<'h>, Option<DealHolding<'h>>) {
-        match self {
-            Single(deal) => (Single(deal), None),
-            Sequence(seq) => {
-                let (extracted, new_seq) = seq.extract_first();
-                (extracted, new_seq.map(Sequence))
-            }
-            Adjusted(adj) => {
-                let (extracted, rem_adj) = adj.extract_first();
-                (extracted, rem_adj.map(Adjusted))
-            }
-            Average(avg) => (Average(avg), None),
-        }
-    }*/
-
-    /*
-    /// Removes all inner holding leaves in ascending date order.
-    pub fn extract_all(self) -> impl Iterator<Item = DealHolding<'h>> {
-        let mut remaining_dh = Some(self);
-        std::iter::from_fn(move || match remaining_dh.take() {
-            Some(dh) => {
-                let (extracted, remainder) = dh.extract_first();
-                remaining_dh = remainder;
-                Some(extracted)
-            }
-            None => None,
-        })
-    }*/
-
     pub fn description(&self) -> LinkedHashSet<&'h str> {
         match self {
             /*Single(deal) => {
@@ -423,15 +283,14 @@ impl<'h> DealHolding<'h> {
         }
     }
 
-    pub fn metadata(&self, tag: &str) -> LinkedHashSet<String> {
+    pub fn metadata_by_key(&self, key: &str) -> LinkedHashSet<&Metadata<'h>> {
         match self {
-            //Single(deal) => deal.entry().metadata_tag_values(tag),
-            Group(group) => group.metadata(tag),
+            Group(group) => group.metadata_by_key(key),
             Sequence(seq) => {
                 let mut tag_vals = LinkedHashSet::new();
                 for dh in &seq.sequence {
-                    for val in dh.metadata(tag) {
-                        tag_vals.insert_if_absent(val);
+                    for val in dh.metadata_by_key(key) {
+                        tag_vals.insert(val);
                     }
                 }
                 tag_vals
@@ -449,22 +308,6 @@ impl<'h> DealHolding<'h> {
         }
     }
 }
-
-/*
-impl<'h> TryFrom<DealHolding<'h>> for Vec<DealingEvent<'h>> {
-    type Error = JournError;
-
-    fn try_from(value: DealHolding<'h>) -> Result<Self, Self::Error> {
-        match value {
-            Single(deal) => Ok(vec![DealingEvent::Deal(deal)]),
-            Sequence(seq_holding) => seq_holding.try_into(),
-            Average(_) => {
-                Err(err!("Cannot convert an average holding back into dealing events"))
-            }
-            Adjusted(adj_holding) => adj_holding.try_into(),
-        }
-    }
-}*/
 
 impl Debug for DealHolding<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -608,37 +451,34 @@ impl<'h> SequenceDealHolding<'h> {
         self.sequence.iter().map(|dh| dh.expenses()).sum::<Option<ValuedAmount<'h>>>().unwrap()
     }
 
-    /*
-    pub fn adjustments(&self) -> impl Iterator<Item = &Adjustment<'h>> + '_ {
-        self.sequence.iter().flat_map(|dh| dh.adjustments())
-    }*/
-
-    /*
-    fn abs_total(&self) -> Amount<'h> {
-        let mut total = self.sequence.iter().next().unwrap().unit().with_quantity(0);
-        for dh in &self.sequence {
-            total += dh.abs_total();
-        }
-        total
-    }*/
-
+    /// Calculates the balance.
+    ///
     fn calc_balance(
         sequence: &VecDeque<DealHolding<'h>, &'h HerdAllocator<'h>>,
     ) -> PoolBalance<'h> {
         let mut total = sequence.iter().next().unwrap().total().clone();
         for bal in sequence.iter().skip(1).map(|dh| dh.total()) {
-            total += &bal;
+            total += bal;
         }
         total
     }
 
-    pub fn set_unit_of_account(
+    pub fn set_value_on_date(
         &mut self,
         uoa: &'h Unit<'h>,
-        config_and_value_date: Option<(&Configuration<'h>, DateTime<Tz>)>,
+        config: &Configuration<'h>,
+        date: DateTime<Tz>,
     ) -> Result<(), JournError> {
         for dh in self.sequence.iter_mut() {
-            dh.set_unit_of_account(uoa, config_and_value_date)?
+            dh.set_value_on_date(uoa, config, date)?
+        }
+        self.balance = Self::calc_balance(&self.sequence);
+        Ok(())
+    }
+
+    pub fn ensure_valued(&mut self, uoa: &'h Unit<'h>) -> Result<(), JournError> {
+        for dh in self.sequence.iter_mut() {
+            dh.ensure_valued(uoa)?
         }
         self.balance = Self::calc_balance(&self.sequence);
         Ok(())
@@ -703,7 +543,7 @@ impl<'h> SequenceDealHolding<'h> {
                     };
                 }
                 Err(holding) => {
-                    self.sequence.insert(i, holding);
+                    self.sequence.insert(i, *holding);
                     if reverse {
                         if i == 0 {
                             break;
@@ -732,8 +572,9 @@ impl<'h> SequenceDealHolding<'h> {
     /// holdings are still eligible for matching. The alternative would be to convert the entire
     /// sequence in to some kind of Average holding which may not be desired.
     ///
-    /// The mini adjustments are calculated proportionally, and in such a way that their sum total will equal exactly
-    /// the original adjustment.
+    /// The mini adjustments are calculated proportionally, and in such a way that their sum total will equal approximately
+    /// the original adjustment. See the `balance` function for precision.
+    ///
     /// Furthermore, the mini adjustments are rounded so that when they are matched, there are no odd
     /// fractions lying about. This could potentially be changed in the future to depend on the `round_deals`
     /// parameter if there is a case for not rounding.
@@ -747,10 +588,9 @@ impl<'h> SequenceDealHolding<'h> {
 
         let self_total = self.total().clone();
         let seq_len = self.sequence.len();
-        let bal_before = self.balance.clone();
         // Keep track of a remainder after applying each mini adjustment. We'll apply this to the last element.
         let mut rem_adj = orig_adj.clone();
-        let mut rem_amount_adjustments = rem_adj.amount_adjustments().iter().cloned().collect();
+        let mut rem_amount_adjustments = rem_adj.amount_adjustments().to_vec();
         for (i, dh) in self.sequence.iter_mut().enumerate() {
             if i == seq_len - 1 {
                 rem_adj.set_amount_adjustments(rem_amount_adjustments);
@@ -759,8 +599,7 @@ impl<'h> SequenceDealHolding<'h> {
             } else {
                 // Create the mini adjustment for this holding
                 let mut mini_adj_amount_adjustments = vec![];
-                let mut sign_positive = true;
-                for (j, amount_adj) in orig_adj.amount_adjustments().iter().cloned().enumerate() {
+                for amount_adj in orig_adj.amount_adjustments().iter().cloned() {
                     if matches!(amount_adj, AmountAdjustment::Scale(_)) {
                         mini_adj_amount_adjustments.push(amount_adj.clone());
                         continue;
@@ -778,36 +617,40 @@ impl<'h> SequenceDealHolding<'h> {
                         // holding. This is important as subsequent adjustments need to match on the same sign which is an implied
                         // requirement for ValuedAmounts. In certain edge cases, the rounding might change the sign, so here we try
                         // different rounding strategies to ensure the sign is maintained.
-                        let adj_amount_rounded = adj_amount_unrounded.rounded();
-                        let mut adj_amount = if j == 0 {
-                            sign_positive = (dh_amount_total + adj_amount_rounded).is_positive();
-                            adj_amount_rounded
-                        } else {
-                            if (dh_amount_total + adj_amount_rounded).is_positive() != sign_positive
-                            {
-                                if (dh_amount_total
-                                    + adj_amount_unrounded
-                                        .rounded_with_strategy(RoundingStrategy::AlwaysUp))
-                                .is_positive()
-                                    != sign_positive
-                                {
-                                    adj_amount_unrounded
-                                        .rounded_with_strategy(RoundingStrategy::AlwaysDown)
-                                } else {
-                                    adj_amount_unrounded
-                                        .rounded_with_strategy(RoundingStrategy::AlwaysUp)
-                                }
-                            } else {
-                                adj_amount_rounded
+                        // We round to the same number of decimal places as the holding's amount. This is important to ensure that
+                        // the sign stays consistent.
+                        let adj_amount_rounded =
+                            adj_amount_unrounded.rounded_dec_places(dh_amount_total.scale() as u8);
+
+                        /*
+                        if j == 0 {
+                            primary_amount_is_positive =
+                                (dh_amount_total + adj_amount_rounded).is_positive();
+                            primary_amount_is_zero =
+                                (dh_amount_total + adj_amount_rounded).is_zero();
+                        } else if primary_amount_is_zero {
+                            while (dh_amount_total + adj_amount_rounded) < 0 {
+                                adj_amount_rounded += Decimal::new(1, dh_amount_total.scale());
                             }
-                        };
+                            while (dh_amount_total + adj_amount_rounded) > 0 {
+                                adj_amount_rounded -= Decimal::new(1, dh_amount_total.scale());
+                            }
+                        } else if primary_amount_is_positive {
+                            while (dh_amount_total + adj_amount_rounded) < 0 {
+                                adj_amount_rounded += Decimal::new(1, dh_amount_total.scale());
+                            }
+                        } else {
+                            while (dh_amount_total + adj_amount_rounded) > 0 {
+                                adj_amount_rounded -= Decimal::new(1, dh_amount_total.scale());
+                            }
+                        }*/
                         // We force some imprecision here to _try_ to give wiggle room so that the mini adjustments
                         // can be added precisely with `Amount::add_precise`. If we don't do this, we may fail on the post-condition assertion.
-                        if adj_amount.scale() > 18 {
-                            adj_amount = adj_amount.rounded_dec_places(18);
-                        }
+                        //if adj_amount_rounded.scale() > 18 {
+                        //    adj_amount_rounded = adj_amount_rounded.rounded_dec_places(18);
+                        //}
 
-                        let (left, _right) = amount_adj.split(adj_amount.quantity());
+                        let (left, _right) = amount_adj.split(adj_amount_rounded.quantity());
                         mini_adj_amount_adjustments.push(left.clone());
                         rem_amount_adjustments.push(left.inverse());
                     }
@@ -823,43 +666,7 @@ impl<'h> SequenceDealHolding<'h> {
         }
         self.balance = Self::calc_balance(&self.sequence);
 
-        // Check the post-condition; the sum total of all mini-adjustments (the balance) should equal the original adjustment.
-        let mut adjusted_va = bal_before.into_valued_amount();
-        orig_adj.apply(&mut adjusted_va)?;
-        assert_eq!(
-            &adjusted_va,
-            self.balance.valued_amount(),
-            "The sum total of all mini adjustments should equal the original adjustment"
-        );
-
         Ok(())
-
-        /*
-
-        // Use the abs total. This ensures accuracy when splitting the adjustment.
-        let mut curr_abs_total = self.abs_total().quantity();
-        let len = self.sequence.len() as i64;
-        for dh in &mut self.sequence {
-            let (adj_l, adj_r) = if curr_abs_total.is_zero() {
-                adj.split(Decimal::one() / Decimal::new(len, 6))
-            } else {
-                adj.split(dh.abs_total().quantity() / curr_abs_total)
-            };
-            debug!("Adj L: {:?},\nAdj R: {:?}", adj_l, adj_r);
-            adj = adj_r;
-            curr_abs_total -= dh.abs_total().quantity();
-
-            match dh {
-                //Single(deal) => deal.add_adjustment(adj_l.clone())?,
-                Group(group) => group.add_adjustment(adj_l)?,
-                Sequence(seq) => seq.add_adjustment(adj_l)?,
-                Average(avg) => avg.add_adjustment(adj_l)?,
-            };
-            self.oldest = self.oldest.min(dh.datetime().start());
-            self.newest = self.newest.max(dh.datetime().end());
-        }
-        self.balance = Self::calc_balance(&self.sequence);
-        Ok(())*/
     }
 
     pub fn extract(self, group_id: DealId<'h>) -> Result<(DealGroup<'h>, Option<Self>), Self> {
@@ -931,6 +738,21 @@ pub struct AverageDealHolding<'h> {
 }
 
 impl<'h> AverageDealHolding<'h> {
+    pub fn new(
+        datetime: JDateTimeRange<'h>,
+        valued_amount: ValuedAmount<'h>,
+        expenses: ValuedAmount<'h>,
+    ) -> Self {
+        let mut holding = Self {
+            datetime,
+            valued_amount: valued_amount.clone(),
+            expenses,
+            balance: PoolBalance::new(valued_amount),
+        };
+        holding.balance = holding.calculate_balance();
+        holding
+    }
+
     pub fn allocator(&self) -> &'h HerdAllocator<'h> {
         self.valued_amount.allocator().unwrap()
     }
@@ -950,40 +772,36 @@ impl<'h> AverageDealHolding<'h> {
         PoolBalance::new(total)
     }
 
-    pub fn set_unit_of_account(
+    pub fn set_value_on_date(
         &mut self,
         uoa: &'h Unit<'h>,
-        config_and_value_date: Option<(&Configuration<'h>, DateTime<Tz>)>,
+        config: &Configuration<'h>,
+        date: DateTime<Tz>,
     ) -> Result<(), JournError> {
-        match config_and_value_date {
-            Some((config, date)) => {
-                match SystemValuer::on_date(
-                    config.clone(),
-                    JDateTime::from_datetime(
-                        date,
-                        Some(config.date_format()),
-                        Some(config.time_format()),
-                    ),
-                )
-                .value(self.valued_amount.amount(), uoa)?
-                {
-                    Some(val) => {
-                        self.valued_amount
-                            .set_valuation(Valuation::new_total(val.rounded(), false));
-                    }
-                    None => {
-                        self.valued_amount.value_in(uoa).ok_or_else(|| {
-                            err!("Unable to adjust unit of account. Unable to value holding")
-                        })?;
-                    }
-                }
+        match SystemValuer::on_date(
+            config.clone(),
+            JDateTime::from_datetime(date, Some(config.date_format()), Some(config.time_format())),
+        )
+        .value(uoa, self.valued_amount.amount())
+        {
+            Ok(mut val) => {
+                val.rounded();
+                self.valued_amount.set_valuation(PostingValuation::new_total(*val, false));
             }
-            None => {
-                self.valued_amount.value_in(uoa).ok_or_else(|| {
-                    err!("Unable to adjust unit of account for an average holding without revaluing first")
-                })?;
+            Err(e) => {
+                self.valued_amount.value_in(uoa).ok_or_else(
+                    || err!(e; "Unable to adjust unit of account. Unable to value holding"),
+                )?;
             }
         }
+        self.balance = self.calculate_balance();
+        Ok(())
+    }
+
+    pub fn ensure_valued(&mut self, uoa: &'h Unit<'h>) -> Result<(), JournError> {
+        self.valued_amount.value_in(uoa).ok_or_else(|| {
+            err!("Unable to adjust unit of account for an average holding without revaluing first")
+        })?;
         self.balance = self.calculate_balance();
         Ok(())
     }
@@ -1004,9 +822,10 @@ impl<'h> AverageDealHolding<'h> {
         &mut self,
         valuer: &mut V,
         quote_unit: &'h Unit<'h>,
+        round_vals: bool,
     ) -> JournResult<()> {
-        self.valued_amount.value_with(valuer, quote_unit)?;
-        self.expenses.value_with(valuer, quote_unit)?;
+        self.valued_amount.value_with(quote_unit, valuer, round_vals)?;
+        self.expenses.value_with(quote_unit, valuer, round_vals)?;
         self.balance = self.calculate_balance();
         Ok(())
     }
@@ -1015,11 +834,12 @@ impl<'h> AverageDealHolding<'h> {
         &mut self,
         in_unit: &'h Unit<'h>,
         valuer: &mut V,
+        round_vals: bool,
     ) -> JournResult<()> {
         self.valued_amount
-            .value_in_or_value_with(in_unit, valuer)
-            .and_then(|_| self.expenses.value_in_or_value_with(in_unit, valuer))?
-            .ok_or_else(|| err!("Unable to value holding"))?;
+            .value_in_or_value_with(in_unit, valuer, round_vals)
+            .and_then(|_| self.expenses.value_in_or_value_with(in_unit, valuer, round_vals))
+            .map_err(|e| err!(e; "Unable to value holding"))?;
         self.balance = self.calculate_balance();
         Ok(())
     }
@@ -1055,11 +875,7 @@ impl<'h> AverageDealHolding<'h> {
         // If the main expense amount is 0, but there are non-zero values, then remove the main amount.
         for exp in [&mut left_exp, &mut right_exp] {
             let unit = if exp.amount().is_zero() {
-                if let Some(amount) = exp.totalled_valuations().find(|v| !v.is_zero()) {
-                    Some(amount.unit())
-                } else {
-                    None
-                }
+                exp.valuations().find(|v| !v.is_zero()).map(|v| v.unit())
             } else {
                 None
             };
@@ -1103,9 +919,55 @@ impl<'h> AverageDealHolding<'h> {
         Ok(())
     }
 
+    /// The adjustment is applied to both the valued amount and any expenses.
     pub fn add_adjustment(&mut self, adj: Adjustment<'h>) -> JournResult<()> {
-        adj.apply(&mut self.valued_amount)?;
+        // Get the % of each (total) expense component over the balance.
+        let mut exp_percents: Vec<_> = if !self.expenses.is_zero() {
+            self.expenses
+                .all_valuations()
+                .map(|v| {
+                    (
+                        v.value().scale(),
+                        if v.is_total() {
+                            PostingValuation::new_total(
+                                v.value()
+                                    / self.balance.valued_amount().value_in(v.unit()).unwrap(),
+                                v.is_elided(),
+                            )
+                        } else {
+                            v
+                        },
+                    )
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        // Apply the adjustment across the balance of the valued amount and expenses.
+        let mut bal = self.balance.valued_amount().clone();
+        adj.apply(&mut bal)?;
+
+        // Split out the valued amount and expenses back from the balance
+        for (scale, exp_value) in exp_percents.iter_mut() {
+            if exp_value.is_total() {
+                *exp_value = PostingValuation::new_total(
+                    (exp_value.value() * bal.value_in(exp_value.unit()).unwrap())
+                        .rounded_dec_places(*scale as u8),
+                    exp_value.is_elided(),
+                );
+            }
+        }
+        self.expenses = ValuedAmount::from_valuations(
+            exp_percents.into_iter().map(|(_, v)| v),
+            self.allocator(),
+        );
+        self.valued_amount = bal.clone();
+        self.valued_amount.sub_from(&self.expenses);
+
+        // Update the balance again as normal.
         self.balance = self.calculate_balance();
+        assert_eq!(&bal, self.balance.valued_amount(), "Sanity check failed");
         Ok(())
     }
 }
@@ -1130,7 +992,7 @@ impl<'h> From<&Deal<'h>> for AverageDealHolding<'h> {
     fn from(deal: &Deal<'h>) -> Self {
         let mut valued_amount = deal.valued_amount().clone();
         // Deal holdings don't work with unit valuations.
-        valued_amount.to_totalled_valuations();
+        valued_amount.make_all_valuations_total();
         Self {
             valued_amount,
             expenses: deal.expenses().clone(),

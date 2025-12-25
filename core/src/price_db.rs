@@ -72,12 +72,11 @@ impl<'h> PriceDatabase<'h> {
         let closest = self.closest_by_key(time, |price| {
             price.base_unit() == base_curr && price.quote_unit() == quote_curr
         });
-        if let Some(closest) = closest.as_ref() {
-            if within_seconds >= 0
-                && (closest.datetime().datetime() - time).num_seconds().abs() > within_seconds
-            {
-                return None;
-            }
+        if let Some(closest) = closest.as_ref()
+            && within_seconds >= 0
+            && (closest.datetime().datetime() - time).num_seconds().abs() > within_seconds
+        {
+            return None;
         }
         closest
     }

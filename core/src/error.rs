@@ -8,8 +8,8 @@
 use crate::arguments::Arguments;
 use crate::parsing::text_block::TextBlock;
 use crate::parsing::util::interim_space;
-use crate::reporting::table::row::Row;
 use crate::reporting::table::Table;
+use crate::reporting::table::row::Row;
 use crate::reporting::table::{Alignment, Cell};
 use crate::reporting::term_style::{Colour, Style};
 use std::any::Any;
@@ -93,16 +93,16 @@ impl JournError {
         if let Some(err) = self.msg.downcast_ref::<E>() {
             return Some(err);
         }
-        if let Some(source) = &self.source {
-            if let Some(err) = source.downcast_ref::<E>() {
-                return Some(err);
-            }
+        if let Some(source) = &self.source
+            && let Some(err) = source.downcast_ref::<E>()
+        {
+            return Some(err);
         }
 
-        if let Some(je) = self.msg.downcast_ref::<JournError>() {
-            if let Some(found) = je.find::<E>() {
-                return Some(found);
-            }
+        if let Some(je) = self.msg.downcast_ref::<JournError>()
+            && let Some(found) = je.find::<E>()
+        {
+            return Some(found);
         }
         if let Some(je) = self.source.as_ref().and_then(|s| s.downcast_ref::<JournError>()) {
             return je.find::<E>();
@@ -216,6 +216,18 @@ impl fmt::Display for JournError {
     }
 }
 
+impl From<&'static str> for JournError {
+    fn from(value: &'static str) -> Self {
+        Self::new(value)
+    }
+}
+
+impl From<String> for JournError {
+    fn from(value: String) -> Self {
+        Self::new(value)
+    }
+}
+
 impl From<JournErrors> for JournError {
     fn from(value: JournErrors) -> Self {
         Self::new(value)
@@ -225,7 +237,7 @@ impl From<JournErrors> for JournError {
 impl From<(&TextBlock<'_>, &'static str)> for BlockContextError {
     fn from((block, ctx): (&TextBlock<'_>, &'static str)) -> Self {
         let context = BlockContext::from(block);
-        BlockContextError::new(context, ctx.to_string())
+        BlockContextError::new(context, ctx)
     }
 }
 
@@ -369,11 +381,7 @@ impl BlockContext {
             s.push(':');
             s.push_str(&col.to_string());
         }
-        if s.is_empty() {
-            None
-        } else {
-            Some(s)
-        }
+        if s.is_empty() { None } else { Some(s) }
     }
 
     pub fn clear_highlights(&mut self) {
@@ -517,11 +525,11 @@ impl From<&TextBlock<'_>> for BlockContext {
 #[derive(Debug)]
 pub struct BlockContextError {
     context: BlockContext,
-    message: String,
+    message: JournError,
 }
 impl BlockContextError {
-    pub fn new(context: BlockContext, message: String) -> Self {
-        Self { context, message }
+    pub fn new<E: Into<JournError>>(context: BlockContext, message: E) -> Self {
+        Self { context, message: message.into() }
     }
 
     pub fn context_mut(&mut self) -> &mut BlockContext {
@@ -553,10 +561,10 @@ macro_rules! err {
 
 pub mod parsing {
     use crate::error::JournError;
-    use crate::parsing::text_input::TextInput;
     use crate::parsing::IParseResult;
-    use nom::error::{ContextError, ErrorKind, FromExternalError};
+    use crate::parsing::input::TextInput;
     use nom::Err as NomErr;
+    use nom::error::{ContextError, ErrorKind, FromExternalError};
     use nom::{IResult, Parser};
     use std::error::Error;
     use std::fmt;

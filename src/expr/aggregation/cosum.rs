@@ -6,7 +6,7 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::expr::aggregation::AggState;
-use crate::expr::context::{EvalContext, IdentifierContext, PostingContext};
+use crate::expr::context::IdentifierContext;
 use crate::expr::{ColumnValue, Expr};
 use journ_core::amount::Amount;
 use journ_core::configuration::{AccountFilter, Filter};
@@ -62,7 +62,7 @@ impl<'h, 'a> AggState<'h> for CoSum<'h> {
     fn merge(&mut self, other: &dyn AggState<'h>) -> JournResult<()> {
         let b = other.finalize();
 
-        b.as_list().iter().try_fold(&mut self.totals, |mut acc, v| {
+        b.as_list().iter().try_fold(&mut self.totals, |acc, v| {
             let amount =
                 v.as_amount().ok_or_else(|| err!("CoSum() can only sum `Amount` types"))?;
             if !amount.is_nil() {

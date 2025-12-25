@@ -5,23 +5,17 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
-use journ_core::account::Account;
-use journ_core::date_and_time::JDate;
-use std::fmt;
+use crate::parsing::input::TextBlockInput;
+use crate::parsing::parser::JournalParseNode;
 
-/// Represents single item in a grouped report.
-pub enum GroupKey<'h, 'a> {
-    Date(JDate<'h>),
-    Account(&'a Account<'h>),
-    Description(&'a str),
+pub trait NodeInput<'h, 's, 'e, 'p> {
+    fn parse_node(&self) -> &'p JournalParseNode<'h, 's, 'e>;
 }
 
-impl fmt::Display for GroupKey<'_, '_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            GroupKey::Date(date) => write!(f, "Date={}", date),
-            GroupKey::Account(account) => write!(f, "Account={}", account),
-            GroupKey::Description(desc) => write!(f, "Description={}", desc),
-        }
+impl<'h, 's, 'e, 'p> NodeInput<'h, 's, 'e, 'p>
+    for TextBlockInput<'h, &'p JournalParseNode<'h, 's, 'e>>
+{
+    fn parse_node(&self) -> &'p JournalParseNode<'h, 's, 'e> {
+        self.inner.extra
     }
 }

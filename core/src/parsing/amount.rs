@@ -8,12 +8,11 @@
 use crate::amount::{Amount, AmountExpr};
 use crate::error::parsing::{IErrorMsg, IParseError, tag_err};
 use crate::ext::StrExt;
-use crate::parsing::text_input::{ConfigInput, TextInput};
+use crate::parsing::input::{ConfigInput, TextInput};
 use crate::parsing::util::recognize_rtrim;
 use crate::parsing::{IParseResult, util};
 use crate::unit::{
-    CodeFormat, CodePosition, DEFAULT_UNIT_FORMAT, NegativePosition, NegativeStyle, NumberFormat,
-    Unit, UnitFormat,
+    CodeFormat, CodePosition, DEFAULT_UNIT_FORMAT, NegativeStyle, NumberFormat, Unit, UnitFormat,
 };
 use nom::Parser;
 use nom::branch::{alt, permutation};
@@ -49,7 +48,13 @@ pub fn unit<'h, I: TextInput<'h>>(input: I) -> IParseResult<'h, I, &'h str> {
 
     let (rem, unit_code) = context(
         "Unable to read unit",
-        map(preceded(space0, alt((unquoted, util::double_quoted))), |out: I| out.text()),
+        map(
+            preceded(
+                space0,
+                alt((unquoted, verify(util::double_quoted, |code: &I| code.input_len() > 0))),
+            ),
+            |out: I| out.text(),
+        ),
     )(input)?;
     Ok((rem, unit_code))
 }
@@ -65,6 +70,9 @@ pub fn pos_decimal<'h, I: TextInput<'h>>(input: I) -> IParseResult<'h, I, &'h st
                     break;
                 }
             }
+        }
+        if last_digit == 0 {
+            return Err(nom::Err::Error(IParseError::new(IErrorMsg::NUMBER, input)));
         }
         take(last_digit)(input)
     };
@@ -213,6 +221,8 @@ pub fn unit_format<'h, I: TextInput<'h>>(
         };
 
         let (input, code_position, unit_s, decimal_s) = {
+            // If the negative was on the unit format, it cannot appear again on the decimal format. We enforce
+            // that by parsing the pos_decimal_format in that case.
             let decimal_format_fn = if neg_preceded { pos_decimal_format } else { decimal_format };
             match pair(unit, space0)(input.clone()) {
                 Ok((input, (unit_s, padding))) => {
@@ -238,23 +248,20 @@ pub fn unit_format<'h, I: TextInput<'h>>(
             }
         };
 
-        let negative_position = {
+        let negative_style = {
             if neg_preceded
                 && mem::discriminant(&CodePosition::PaddedLeft(SS::new()))
                     == mem::discriminant(&code_position)
             {
-                NegativePosition::CodeAdjacent
+                neg_style
             } else if decimal_s.starts_with('-') || decimal_s.starts_with('(') {
-                NegativePosition::QuantityAdjacent
+                None
             } else {
-                DEFAULT_UNIT_FORMAT.negative_position()
+                DEFAULT_UNIT_FORMAT.negative_style()
             }
         };
 
-        let mut number_format = NumberFormat::parse(decimal_s, definitive);
-        if let Some(neg_style) = neg_style {
-            number_format.set_negative_style(neg_style)
-        }
+        let number_format = NumberFormat::parse(decimal_s, definitive);
 
         let code_format = if definitive {
             match unit_s {
@@ -270,7 +277,7 @@ pub fn unit_format<'h, I: TextInput<'h>>(
         };
 
         let unit_format =
-            UnitFormat::new(number_format, code_format, code_position, negative_position);
+            UnitFormat::new(number_format, code_format, code_position, negative_style);
         Ok((input, unit_format))
     }
 }

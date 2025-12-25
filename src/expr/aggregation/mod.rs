@@ -11,6 +11,7 @@ mod max;
 mod min;
 mod sum;
 mod sumif;
+mod unique;
 
 pub use agg_state::*;
 pub use cosum::*;
@@ -18,3 +19,4 @@ pub use max::*;
 pub use min::*;
 pub use sum::*;
 pub use sumif::*;
+pub use unique::*;

@@ -8,7 +8,7 @@
 use crate::error::JournError;
 use crate::error::parsing::{IErrorMsg, IParseError, tag_err};
 use crate::ext::StrExt;
-use crate::parsing::text_input::TextInput;
+use crate::parsing::input::TextInput;
 use crate::parsing::{IParseResult, JParseResult};
 use nom::Finish;
 use nom::branch::alt;
@@ -90,6 +90,8 @@ pub const E_UNTERMINATED_QUOTES: &str = "Unterminated \"";
 /// Parses a double quoted string that starts and ends with ", stripping them from the output.
 /// Double quotes inside the string may be escaped by doubling ("") them.
 /// The string must stay on the same line.
+///
+/// The output returned may be empty.
 pub fn double_quoted<'h, I: TextInput<'h>>(input: I) -> IParseResult<'h, I, I> {
     let escape_quotes = |input: I| {
         let mut iter = input.text().chars();

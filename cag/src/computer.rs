@@ -6,10 +6,11 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::capital_gains::CapitalGains;
-use crate::cgt_configuration::{CagCommand, CgtConfiguration};
+use crate::cg_flows::CgFlows;
+use crate::cgt_configuration::{CagCommand, CagConfiguration};
 use crate::cgt_journal_entry::CapitalGainsMetadataAccess;
 use crate::deal::Deal;
-use crate::deal_group::{DealGroup, DealGroupCriteria};
+use crate::deal_group::{DealGroup, DealGroupCriteria, PushError};
 use crate::dealing_event::DealingEvent;
 use crate::expenses::EntryExpenses;
 use crate::mod_cgt;
@@ -27,7 +28,6 @@ use journ_core::journal_entry::JournalEntry;
 use journ_core::journal_entry_flow::Flow;
 use journ_core::parsing::text_block::TextBlock;
 use journ_core::unit::Unit;
-use journ_core::valued_amount::ValuedAmount;
 use journ_core::valuer::ValueResult;
 use journ_core::{err, match_map, valuer};
 use log::info;
@@ -45,21 +45,18 @@ lazy_static! {
         "CGT Year End Carried Forward".to_string();
 }
 
-pub struct CapitalGainsComputer {
+pub struct CapitalGainsComputer<'h> {
     #[allow(dead_code)]
     warnings: Vec<JournError>,
-    args: &'static Arguments,
+    args: &'h Arguments,
 }
 
-impl CapitalGainsComputer {
-    pub fn new(args: &'static Arguments) -> Self {
+impl<'h> CapitalGainsComputer<'h> {
+    pub fn new(args: &'h Arguments) -> Self {
         Self { args, warnings: vec![] }
     }
 
-    pub fn compute_gains<'h>(
-        &mut self,
-        journal: &Journal<'h>,
-    ) -> Result<CapitalGains<'h>, JournError> {
+    pub fn compute_gains(&mut self, journal: &Journal<'h>) -> Result<CapitalGains<'h>, JournError> {
         let cmd = self.args.cast_cmd::<CagCommand>().unwrap();
         mod_cgt::register()?;
 
@@ -69,7 +66,13 @@ impl CapitalGainsComputer {
             for entry in journal.entry_range(self.args.begin_end_range()) {
                 for pst in entry.postings() {
                     if cmd.account_filter().is_included(pst.account()) {
-                        units.insert(pst.amount().unit());
+                        // Prefer the journal config for the unit over the posting's.
+                        units.insert(
+                            journal
+                                .config()
+                                .get_unit(pst.amount().unit().code())
+                                .unwrap_or_else(|| pst.amount().unit()),
+                        );
                     }
                 }
             }
@@ -81,33 +84,13 @@ impl CapitalGainsComputer {
         included_units.retain(|c| cmd.unit_filter().is_included(*c));
         info!("Included units for CAG: {:?}", included_units);
 
-        // Find a global default unit of account. What is set in the configuration is preferred, but if that is not set,
-        // then we will scan the journal for the first valuation.
-        let mut default_unit_of_account = None;
-        if let Some(config) = journal.config().module_config::<CgtConfiguration>(MODULE_NAME) {
-            if let Some(uoac) = config.unit_of_account_change() {
-                default_unit_of_account =
-                    Some(journal.config().get_unit(uoac.unit_of_account()).unwrap())
-            }
-        }
-        if default_unit_of_account.is_none() {
-            'outer: for entry in journal.entry_range(self.args.begin_end_range()) {
-                for flow in entry.flows().net_equity() {
-                    if let Some(val) = flow.valued_amount().valuations().next() {
-                        default_unit_of_account = Some(val.unit());
-                        break 'outer;
-                    }
-                }
-            }
-        }
-        if default_unit_of_account.is_none() {
-            return Err(err!(
-                "No default unit of account detected. Set one explicitly with:\ncapitalgains unitofaccount <unit>"
-            ));
-        }
+        let initial_unit_of_account = CapitalGainsComputer::initial_unit_of_account(journal)?;
 
-        let mut pool_manager =
-            PoolManager::new(default_unit_of_account.unwrap(), journal.allocator());
+        // TODO
+        // We have a singleton PoolManager, but different entries in different files may have their
+        // own view on capitalgains configuration, requiring in effect, a tree of pool managers.
+        let mut pool_manager = PoolManager::new(initial_unit_of_account, journal.allocator());
+
         let unit_filter = Box::new(move |unit: &Unit<'h>| included_units.contains(&unit));
         pool_manager.set_unit_filter(unit_filter.clone());
         let mut pool_events = vec![];
@@ -125,9 +108,7 @@ impl CapitalGainsComputer {
             pool_manager.update_configuration(entry.config()).map_err(entry_err)?;
 
             let events = self
-                .scan_entry(entry, &unit_filter, |deal_group: &DealGroup<'h>| {
-                    pool_manager.initial_unit_of_account(deal_group)
-                })
+                .scan_entry(entry, &unit_filter, pool_manager.unit_of_account())
                 .map_err(entry_err)?;
             pool_events.extend(queue.add_events(events, &mut pool_manager)?);
         }
@@ -143,7 +124,7 @@ impl CapitalGainsComputer {
         pool_events.retain(|e| from_to_range.contains(&e.deal_datetime().start().datetime()));
 
         let cg = CapitalGains::new(
-            Configuration::clone(&journal.config()),
+            Configuration::clone(journal.config()),
             pool_events,
             pool_manager.pools().iter().map(|p| (p.name(), p.balances().collect())).collect(),
         );
@@ -154,11 +135,11 @@ impl CapitalGainsComputer {
     /// provided via Metadata. The latter overrides the former.
     ///
     /// The `assumed_uoa` is used as the quote unit for valuations. It is based on the first pool the deal _could_ be pushed to.
-    fn scan_entry<'h, 'u>(
+    fn scan_entry<'u>(
         &mut self,
         entry: &'h JournalEntry<'h>,
         unit_filter: impl Filter<Unit<'h>> + Copy,
-        initial_uoa: impl Fn(&DealGroup<'h>) -> &'h Unit<'h> + Copy,
+        unit_of_account: &'h Unit<'h>,
     ) -> Result<Vec<DealingEvent<'h>>, JournError>
     where
         'h: 'u,
@@ -175,206 +156,127 @@ impl CapitalGainsComputer {
                 .collect());
         }
 
-        //let cgt_config =
-        //    entry.config().as_herd_ref().module_config::<CgtConfiguration>(MODULE_NAME).unwrap();
-        //let mut deals = vec![];
         let mut writeable_entry = Cow::Borrowed(entry);
-        //let mut expense_vals_sum;
-        //let mut included_net_equity_vals;
-        //let mut net_equity_flows;
-        //let equity_normalised_weights;
-        //let mut uoa;
-        //let mut net_equity_flows_without_uoa;
 
-        valuer::exec_optimistic(&mut writeable_entry, |valued_entry| {
-            let mut neq_flows_and_metadata =
-                Self::scan_net_equity_flows(valued_entry, entry, unit_filter, initial_uoa)?;
+        let round_values = entry
+            .config()
+            .module_config::<CagConfiguration>(MODULE_NAME)
+            .unwrap()
+            .round_deal_values();
+        valuer::exec_optimistic(&mut writeable_entry, round_values, |valued_entry| {
+            let mut deals = Self::scan_net_equity_flows(valued_entry, entry)?;
+
+            // Ensure included deals are valued in the uoa
+            for deal in deals.iter_mut().filter(|d| unit_filter.is_included(d.unit())) {
+                if let Err(_e) = deal.ensure_valued(unit_of_account, round_values) {
+                    return ValueResult::ValuationNeeded(deal.unit(), unit_of_account);
+                }
+            }
 
             // There are no other net equity flows of interest - either because they have been
             // explicitly specified in metadata, they are deemed to be a UOA, or haven't been included
             // in the unit_filter.
-            if neq_flows_and_metadata.neq_flows.is_none() {
-                return ValueResult::Ok(neq_flows_and_metadata.take_metadata_events());
+            if deals.iter().all(|d| d.is_required()) {
+                return ValueResult::Ok(
+                    deals
+                        .into_iter()
+                        .filter(|d| unit_filter.is_included(d.unit()))
+                        .map(DealingEvent::Deal)
+                        .collect(),
+                );
             }
 
-            let neq_flows = neq_flows_and_metadata.neq_flows.unwrap();
+            let implied_deals = deals.iter().filter(|d| !d.is_required());
+            let implied_deals_no_uoa = implied_deals.filter(|d| d.unit() != unit_of_account);
             let expenses_division = EntryExpenses::scan_and_divide(
-                &valued_entry,
-                neq_flows.uoa,
-                neq_flows.all_flows_no_uoa(),
+                valued_entry,
+                unit_of_account,
+                implied_deals_no_uoa.clone().map(|d| d.valued_amount()),
             )?;
 
-            let mut deals = neq_flows_and_metadata.metadata_events;
-            for (i, net_equity_flow) in neq_flows.included_flows() {
-                /*
-                let mut expenses = if expense_vals_sum.amount() > 0 {
-                    expense_vals_sum.split_weighted(equity_normalised_weights.as_ref().unwrap(), i)
-                } else {
-                    ValuedAmount::nil()
-                };*/
+            for (i, deal) in deals
+                .iter_mut()
+                .filter(|d| !d.is_required())
+                .filter(|d| d.unit() != unit_of_account)
+                .enumerate()
+                .filter(|(_, d)| unit_filter.is_included(d.unit()))
+            {
                 let mut expenses = expenses_division.get_expenses(i);
-                expenses = expenses.without_unit(net_equity_flow.unit());
+                expenses = expenses.without_unit(deal.unit());
 
-                let deal = Deal::new(None, entry, net_equity_flow.clone(), expenses, None, false);
-                deals.push(DealingEvent::Deal(deal));
+                deal.add_expenses(expenses);
             }
-            ValueResult::Ok(deals)
+            ValueResult::Ok(
+                deals
+                    .into_iter()
+                    .filter(|d| d.unit() != unit_of_account || d.is_required())
+                    .filter(|d| unit_filter.is_included(d.unit()))
+                    .map(DealingEvent::Deal)
+                    .collect(),
+            )
         })
         .map(Ok)?
-
-        /*
-        'restart: loop {
-            //writeable_entry.derive_valuations()?;
-            let flows = Some(writeable_entry.flows());
-            net_equity_flows = flows.as_ref().unwrap().net_equity().collect::<Vec<_>>();
-
-            // These are the units we're dealing in. This still includes the UOA as we can't be sure what it is
-            // until the deal is pushed to a pool.
-            let units = net_equity_flows
-                .iter()
-                .map(|f| f.unit())
-                .chain(cg_metadata.all_deals().filter(|d| d.is_required()).map(|d| d.unit()))
-                .filter(|u| unit_filter.is_included(*u))
-                .collect::<HashSet<_>>();
-
-            included_net_equity_vals = vec![];
-            let mut first_uoa = None;
-            for unit in units.iter().copied() {
-                // If there are any explicit deals, we don't need to scan for implicit ones. Save time and any
-                // valuations we don't need right now.
-                let metadata_deals = cg_metadata.deals(unit);
-                if metadata_deals.iter().any(|d| d.is_required()) {
-                    for deal in metadata_deals
-                        .iter()
-                        .filter(|d| d.is_required())
-                        .filter(|d| !d.total().is_zero())
-                    {
-                        deals.push(DealingEvent::Deal(deal.clone()));
-                    }
-                    continue;
-                }
-
-                let net_equity_flow = net_equity_flows
-                    .iter()
-                    .find(|flow| flow.valued_amount().amount().unit() == unit)
-                    .unwrap();
-                let dummy_deal = Deal::zero(net_equity_flow.unit(), entry);
-                // Don't include this flow if it's would-be UOA is the same as its unit. E.g. a € transaction
-                // can't be added to a pool whose unit of account is also €.
-                let initial_uoa =
-                    initial_uoa(&DealGroup::new(DealGroupCriteria::Single, dummy_deal));
-                if initial_uoa != unit {
-                    included_net_equity_vals.push(net_equity_flow.valued_amount());
-                    first_uoa = Some(initial_uoa);
-                }
-            }
-            if included_net_equity_vals.is_empty() {
-                return Ok(deals);
-            }
-
-            uoa = first_uoa.unwrap();
-            net_equity_flows_without_uoa = || {
-                net_equity_flows.iter().filter(|flow| flow.unit() != uoa).map(Flow::valued_amount)
-            };
-
-            // First check that the net equity flows are valued in the uoa
-            for val in net_equity_flows_without_uoa().filter(|f| units.contains(f.unit())) {
-                if val.value_in(uoa).is_none() {
-                    valuer::value_with_entry_and_write(&mut writeable_entry, val.unit(), uoa)?;
-                    continue 'restart;
-                }
-            }
-            break;
-        }*/
-
-        /*b
-        let expenses = EntryExpenses::scan(&mut writeable_entry, uoa)?;
-        let expenses_division = expenses.divide_between(net_equity_flows_without_uoa())?;*/
-
-        /*
-            expense_vals_sum = Self::expenses_sum(&mut writeable_entry, uoa)?;
-
-            // If we have some expenses, we are going to need to divide them amongst the deals we intend to include.
-            // We do this by normalising the group of `included_net_equity_vals`. If we can't normalise them, it means they
-            // do not share a common unit, and so we force a valuation using `first_uoa`.
-            equity_normalised_weights = if expense_vals_sum.amount() > 0 {
-                let nil_amount = ValuedAmount::nil();
-                let has_disposal = net_equity_flows_without_uoa().any(|f| f.amount().is_negative());
-                let has_acquisition =
-                    net_equity_flows_without_uoa().any(|f| f.amount().is_positive());
-                let equity_flows =
-                    net_equity_flows_without_uoa().map(|f| match cgt_config.assign_expenses() {
-                        AssignExpenses::PreferAcquisition if has_acquisition => {
-                            if f.amount().is_positive() {
-                                f
-                            } else {
-                                &nil_amount
-                            }
-                        }
-                        AssignExpenses::PreferDisposal if has_disposal => {
-                            if f.amount().is_negative() {
-                                f
-                            } else {
-                                &nil_amount
-                            }
-                        }
-                        _ => f,
-                    });
-                let weights = ValuedAmount::into_normalized_weights(equity_flows);
-                if weights.is_none() {
-                    for val in net_equity_flows_without_uoa() {
-                        if val.value_in(uoa).is_none() {
-                            valuer::value_with_entry_and_write(
-                                &mut writeable_entry,
-                                val.amount().unit(),
-                                uoa,
-                            )?;
-                        }
-                    }
-                    continue 'restart;
-                } else {
-                    weights
-                }
-            } else {
-                None
-            };
-            break;
-        }*/
-
-        /*
-        // Now we have the normalised weights, we can create the deals.
-        // Filter after enumeration to ensure the `ith` element maps to `equity_normalised_weights[i]`.
-        for (i, net_equity_flow) in net_equity_flows_without_uoa()
-            .enumerate()
-            .filter(|(_, f)| included_net_equity_vals.iter().any(|v| v.unit() == f.unit()))
-        {
-            /*
-            let mut expenses = if expense_vals_sum.amount() > 0 {
-                expense_vals_sum.split_weighted(equity_normalised_weights.as_ref().unwrap(), i)
-            } else {
-                ValuedAmount::nil()
-            };*/
-            let mut expenses = expenses_division.get_expenses(i);
-            expenses = expenses.without_unit(net_equity_flow.unit());
-
-            let deal = Deal::new(None, entry, net_equity_flow.clone(), expenses, None, false);
-            deals.push(DealingEvent::Deal(deal));
-        }
-        Ok(deals)*/
     }
 
-    fn scan_net_equity_flows<'a, 'h, 'u>(
+    /// Scans the `valued_entry/existing_entry` for deals both explicit and implicit.
+    ///
+    /// Explicit deals override implicit ones for any particular unit.
+    ///
+    /// Only deals for included units according to `unit_filter` are returned.
+    fn scan_net_equity_flows<'a, 'u>(
+        valued_entry: &'a JournalEntry<'h>,
+        existing_entry: &'h JournalEntry<'h>,
+    ) -> JournResult<SmallVec<[Deal<'h>; 4]>> {
+        let mut deals = smallvec![];
+
+        let cg_flows = CgFlows::new(valued_entry.flows());
+        let cg_metadata = existing_entry.cg_metadata()?;
+
+        // All the units we're dealing with
+        #[allow(clippy::mutable_key_type)]
+        let units = cg_flows
+            .iter()
+            .map(Flow::unit)
+            .chain(cg_metadata.all_deals().map(Deal::unit))
+            //.filter(|u| unit_filter.is_included(*u))
+            .collect::<HashSet<_>>();
+
+        for unit in units {
+            // Explicit deals override implicit for a particular unit
+            let explicit_deals = cg_metadata.deals(unit);
+            if !explicit_deals.is_empty() {
+                for deal in explicit_deals.into_iter().filter(|d| !d.total().is_zero()) {
+                    deals.push(deal);
+                }
+                continue;
+            }
+
+            // Add implicit deals
+            let unit_flows = cg_flows.by_unit(unit);
+            deals.append(&mut unit_flows.create_deals(existing_entry)?);
+        }
+
+        Ok(deals)
+    }
+
+    /*
+    fn scan_net_equity_flows<'a, 'u>(
         valued_entry: &'a JournalEntry<'h>,
         existing_entry: &'h JournalEntry<'h>,
         unit_filter: impl Filter<Unit<'h>>,
         initial_uoa: impl Fn(&DealGroup<'h>) -> &'h Unit<'h>,
     ) -> ValueResult<'h, NetEquityFlowsAndMetadataEvents<'h>> {
-        let flows = Some(valued_entry.flows());
-        let net_equity_flows = flows.as_ref().unwrap().net_equity().collect::<Vec<_>>();
+        let mut net_equity_flows = valued_entry
+            .flows()
+            .net_equity()
+            .filter(|flow| !flow.account_root().map(|f| f.has_tag("CAG-Exempt")).unwrap_or(false))
+            .collect::<SmallVec<[_; 4]>>();
+        net_equity_flows.reduce_down_by_account_type();
         let cg_metadata = existing_entry.cg_metadata()?;
 
         // These are the units we're dealing in. This still includes the UOA as we can't be sure what it is
         // until the deal is pushed to a pool.
+        #[allow(clippy::mutable_key_type)]
         let units = net_equity_flows
             .iter()
             .map(|f| f.unit())
@@ -433,87 +335,40 @@ impl CapitalGainsComputer {
         }
         ValueResult::Ok(NetEquityFlowsAndMetadataEvents {
             neq_flows: Some(NetEquityFlows {
-                flows: flows.unwrap().net_equity().map(Flow::into_valued_amount).collect(),
+                flows: net_equity_flows.into_iter().map(Flow::into_valued_amount).collect(),
                 included_units: units_to_scan,
                 uoa,
             }),
             metadata_events,
         })
-    }
+    }*/
 
-    /*
-    /// Get the sum of all expenses in the entry. Expenses are those postings whose accounts are tagged with
-    /// `CGT-Expense`. This will initially attempt to sum those `ValuedAmounts` which may fail if they do
-    /// not share a common unit. In this case, we force a valuation using `value_unit`.
-    ///
-    /// The expenses returned will be valued in the `value_unit`, or at least one other unit. Otherwise,
-    /// a valuation in the `value_unit` will be forced.
-    fn expenses_sum<'a, 'h>(
-        entry: &'a mut JournalEntry<'h>,
-        value_unit: &'h Unit<'h>,
-    ) -> JournResult<ValuedAmount<'h>> {
-        const ALLOWABLE_EXPENSE_TAG: &str = "CAG-DealExpense";
+    /// Gets the initial unit of account for the first entry to be processed.
+    fn initial_unit_of_account(journal: &Journal<'h>) -> JournResult<&'h Unit<'h>> {
+        let mut unit_of_account = None;
 
-        'restart: loop {
-            let expense_vals_sum = entry
-                .postings()
-                .filter(|p| p.account().has_tag(ALLOWABLE_EXPENSE_TAG))
-                .map(Posting::valued_amount)
-                .sum::<Option<ValuedAmount<'h>>>();
-            match expense_vals_sum {
-                Some(val) if val.is_nil() => break 'restart Ok(val),
-                Some(val) if val.units().count() == 1 && val.value_in(value_unit).is_none() => {
-                    valuer::value_with_entry_and_write(entry, val.unit(), value_unit)?;
-                    continue 'restart;
-                }
-                Some(val) => break 'restart Ok(val),
-                None => {
-                    let expense_vals: Vec<_> = entry
-                        .postings()
-                        .filter(|p| p.account().has_tag(ALLOWABLE_EXPENSE_TAG))
-                        .map(Posting::valued_amount)
-                        .cloned()
-                        .collect();
-
-                    for val in expense_vals {
-                        let base_unit = val.unit();
-                        if val.value_in(value_unit).is_none() {
-                            valuer::value_with_entry_and_write(entry, base_unit, value_unit)?;
-                        }
+        let entries = journal.entry_range(Arguments::get().begin_end_range());
+        if let Some(entry) = entries.clone().next() {
+            let cag_config = CagConfiguration::get(entry.config());
+            if let Some(cag_config) = cag_config
+                && let Some(uoac) = cag_config.unit_of_account_change()
+            {
+                unit_of_account = journal.config().get_unit(uoac.unit_of_account());
+            }
+        }
+        if unit_of_account.is_none() {
+            'outer: for entry in entries {
+                for pst in entry.postings() {
+                    if let Some(val) = pst.valuations().next() {
+                        unit_of_account = Some(val.unit());
+                        break 'outer;
                     }
-                    continue 'restart;
                 }
             }
         }
-    }*/
-}
-
-struct NetEquityFlows<'h> {
-    flows: SmallVec<[ValuedAmount<'h>; 4]>,
-    included_units: SmallVec<[&'h Unit<'h>; 4]>,
-    uoa: &'h Unit<'h>,
-}
-
-impl<'h> NetEquityFlows<'h> {
-    pub fn all_flows_no_uoa(&self) -> impl Iterator<Item = &ValuedAmount<'h>> + Clone + '_ {
-        self.flows.iter().filter(move |f| f.unit() != self.uoa)
-    }
-
-    pub fn included_flows(&self) -> impl Iterator<Item = (usize, &ValuedAmount<'h>)> + '_ {
-        self.all_flows_no_uoa()
-            .enumerate()
-            .filter(move |(_, f)| self.included_units.iter().any(|u| *u == f.unit()))
-    }
-}
-
-struct NetEquityFlowsAndMetadataEvents<'h> {
-    neq_flows: Option<NetEquityFlows<'h>>,
-    metadata_events: Vec<DealingEvent<'h>>,
-}
-
-impl<'h> NetEquityFlowsAndMetadataEvents<'h> {
-    pub fn take_metadata_events(&mut self) -> Vec<DealingEvent<'h>> {
-        std::mem::take(&mut self.metadata_events)
+        unit_of_account.ok_or_else(|| err!(
+            "No default unit of account detected. Set one explicitly with:\ncapitalgains unitofaccount <unit>"
+        ))
     }
 }
 
@@ -543,14 +398,20 @@ impl<'h> DealingEventQueue<'h> {
                         let mut flush_to_offset = None;
                         // For all candidate groups
                         for (i, group) in self.events.iter_mut().enumerate().filter_map(|(i, e)| match_map!(e, DealingEvent::Group(g) if g.unit() == deal_unit => (i, g))) {
-                            if let Err(rejected_deal) = group.try_push(deal) {
-                                // All groups to i inclusive are complete and can be flushed.
-                                if group.is_complete(rejected_deal.datetime()) {
-                                    flush_to_offset = Some(i);
+                            match group.try_push(deal) {
+                                Err(PushError::CriteriaMismatch(rejected_deal)) => {
+                                    // All groups to i inclusive are complete and can be flushed.
+                                    if group.is_complete(rejected_deal.datetime()) {
+                                        flush_to_offset = Some(i);
+                                    }
+                                    deal = rejected_deal;
                                 }
-                                deal = rejected_deal;
-                            } else {
-                                break 'outer flush_to_offset;
+                                Err(PushError::EvalError(e)) => {
+                                    return Err(e);
+                                }
+                                Ok(_) => {
+                                    break 'outer flush_to_offset;
+                                }
                             }
                         }
                         self.push_back_deal(deal);

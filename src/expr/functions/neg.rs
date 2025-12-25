@@ -5,17 +5,18 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
-use crate::expr::ColumnValue;
-use crate::expr::context::EvalContext;
+use crate::expr::{ColumnValue, Expr, IdentifierContext};
 use journ_core::err;
 use journ_core::error::JournResult;
-use std::mem;
 
-pub fn neg<'h, 'a>(args: &mut [ColumnValue<'h>]) -> JournResult<ColumnValue<'h>> {
+pub fn neg<'h>(
+    args: &[Expr<'h>],
+    context: &mut dyn IdentifierContext<'h>,
+) -> JournResult<ColumnValue<'h>> {
     if args.len() != 1 {
         return Err(err!("Function '-' requires one argument"));
     }
-    match mem::take(&mut args[0]) {
+    match args[0].eval(context)? {
         ColumnValue::Amount(amount) => Ok(ColumnValue::Amount(-amount)),
         ColumnValue::List(mut values) => {
             for amt in &mut values {
