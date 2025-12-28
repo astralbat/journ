@@ -7,7 +7,6 @@
  */
 use crate::account::Account;
 use crate::alloc::HerdAllocator;
-use crate::arguments::Arguments;
 use crate::date_and_time::{
     DEFAULT_DATE_FORMAT, DEFAULT_NUMBER_FORMAT, DEFAULT_TIME_FORMAT, DateFormat, TimeFormat,
 };
@@ -58,7 +57,6 @@ struct BaseConfiguration<'h> {
     /// The version sequence of the `Configuration`. The version changes whenever the `BaseConfiguration`
     /// changes _and_ it is in use elsewhere (`Configuration::clone`).
     parent: Option<Arc<BaseConfiguration<'h>>>,
-    args: &'h Arguments,
     version: ConfigurationVersion<'h>,
     date_format: &'h DateFormat<'h>,
     time_format: &'h TimeFormat<'h>,
@@ -75,13 +73,11 @@ struct BaseConfiguration<'h> {
 impl<'h> BaseConfiguration<'h> {
     fn new(
         parent: Option<Arc<BaseConfiguration<'h>>>,
-        args: &'h Arguments,
         allocator: &'h HerdAllocator<'h>,
         node_id: &'h NodeId<'h>,
     ) -> Self {
         let mut bc = Self {
             parent,
-            args,
             number_format: DEFAULT_NUMBER_FORMAT.deref(),
             date_format: DEFAULT_DATE_FORMAT.deref(),
             time_format: DEFAULT_TIME_FORMAT.deref(),
@@ -108,7 +104,6 @@ impl<'h> BaseConfiguration<'h> {
         if Arc::strong_count(self) > 1 {
             let new_base = Self {
                 parent: self.parent.clone(),
-                args: self.args,
                 version: ConfigurationVersion::next(self.version),
                 date_format: self.date_format,
                 time_format: self.time_format,
@@ -299,18 +294,8 @@ pub struct Configuration<'h> {
 }
 
 impl<'h> Configuration<'h> {
-    /// Initializes the configuration from the arguments passed.  This is a more useful and natural way to initialize
-    /// the starting `Configuration` values, rather than simply relying on defaults. As an example, a date format argument
-    /// specifies the output date format used for reporting, but this should also be the initial date format to expect
-    /// for `JournalEntries`.
-    ///
-    /// This should attempt to behave using the principle of 'least surprise' to the user.
-    pub fn from_args(
-        args: &'h Arguments,
-        allocator: &'h HerdAllocator<'h>,
-        node_id: &'h NodeId<'h>,
-    ) -> Self {
-        Self { base_config: Arc::new(BaseConfiguration::new(None, args, allocator, node_id)) }
+    pub fn new(allocator: &'h HerdAllocator<'h>, node_id: &'h NodeId<'h>) -> Self {
+        Self { base_config: Arc::new(BaseConfiguration::new(None, allocator, node_id)) }
     }
 
     /// Creates a new `Configuration` that is a branch of the current one. The new configuration
@@ -328,7 +313,6 @@ impl<'h> Configuration<'h> {
         Configuration {
             base_config: Arc::new(BaseConfiguration {
                 parent: Some(parent),
-                args: self.base_config.args,
                 version: if self.base_config.version.node_id == node_id {
                     self.base_config.version
                 } else {
@@ -345,10 +329,6 @@ impl<'h> Configuration<'h> {
                 herd_allocator: self.base_config.herd_allocator,
             }),
         }
-    }
-
-    pub fn args(&self) -> &'h Arguments {
-        self.base_config.args
     }
 
     pub fn version(&self) -> ConfigurationVersion<'h> {
@@ -501,7 +481,6 @@ impl<'h> Configuration<'h> {
         base_config.timezone = config.timezone();
         base_config.number_format = config.number_format();
         base_config.default_unit = config.default_unit();
-        base_config.args = config.args();
         for (k, v) in config.base_config.units.iter() {
             base_config.units.insert(k.clone(), *v);
         }

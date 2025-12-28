@@ -6,18 +6,18 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::adjustment::Adjustment;
-use crate::cgt_configuration::{CagCommand, CagConfiguration};
+use crate::cgt_configuration::CagConfiguration;
 use crate::deal_holding::DealHolding;
 use crate::module_init::MODULE_NAME;
 use crate::pool::PoolBalance;
 use journ_core::alloc::HerdAllocator;
 use journ_core::amount::AmountExpr;
-use journ_core::arguments::Arguments;
 use journ_core::date_and_time::JDateTimeRange;
 use journ_core::error::JournResult;
 use journ_core::journal_entry::{EntryId, JournalEntry};
 use journ_core::journal_entry_flow::Flow;
 use journ_core::metadata::Metadata;
+use journ_core::reporting::command::arguments::Cmd;
 use journ_core::reporting::table;
 use journ_core::unit::Unit;
 use journ_core::valued_amount::ValuedAmount;
@@ -135,11 +135,9 @@ impl<'h> Deal<'h> {
 
         // Base the datetime of the deal on the argument's timezone rather than the entry's. This
         // allows us to compare deals effectively and prepare the deal for reporting.
-        let args = Arguments::get();
-        let datetime = entry
-            .date_and_time()
-            .datetime_range()
-            .convert_datetime_range(&args.cast_cmd::<CagCommand>().unwrap().datetime_args);
+        let cmd = Cmd::get();
+        let datetime =
+            entry.date_and_time().datetime_range().convert_datetime_range(cmd.datetime_fmt_cmd());
 
         let round_deals = entry
             .config()

@@ -9,10 +9,9 @@ use crate::adjustment::Adjustment;
 use crate::cgt_configuration::{CagConfiguration, MatchMethod};
 use crate::deal::DealId;
 use crate::deal_group::DealGroup;
-use crate::deal_holding::DealHolding;
 use crate::module_init::MODULE_NAME;
 use crate::pool::Pool;
-use crate::pool_event::{PoolEvent, PoolEventKind};
+use crate::pool_event::PoolEvent;
 use crate::ruleset::{ActionRule, AgeUnit, Condition, Rule};
 use chrono::{LocalResult, TimeZone};
 use journ_core::alloc::HerdAllocator;
@@ -23,7 +22,6 @@ use journ_core::error::{BlockContextError, JournError, JournResult};
 use journ_core::journal_entry::JournalEntry;
 use journ_core::parsing::text_block::TextBlock;
 use journ_core::unit::Unit;
-use log::debug;
 use std::collections::HashMap;
 
 pub struct PoolManager<'h> {
@@ -111,20 +109,27 @@ impl<'h, 'u> PoolManager<'h> {
                         unit,
                         pool.current_method(unit),
                     ) {
-                        let bal_before = pool.balance(pse.deal_unit);
+                        //let bal_before = pool.balance(pse.deal_unit);
                         if let Some(group) = pool.extract(pse.deal_id, pse.deal_unit) {
-                            let pe = PoolEvent::new(
+                            /*let pe = PoolEvent::new(
                                 pool.name(),
                                 JDateTimeRange::new(pse.datetime, None),
                                 PoolEventKind::UnpooledDeal(DealHolding::Group(group.clone())),
                                 bal_before,
                                 pool.balance(pse.deal_unit),
-                            );
-                            debug!("{}", pe);
-                            pool_events.push(pe);
+                            );*/
+                            //debug!("{}", pe);
+                            //pool_events.push(pe);
                             self.apply_deal_rules(
                                 group,
                                 JDateTimeRange::new(pse.datetime, None),
+                                Some(
+                                    self.pools
+                                        .iter()
+                                        .find(|p| p.id() == pse.pool_id)
+                                        .unwrap()
+                                        .name(),
+                                ),
                                 &mut pool_events,
                             )?;
                         }
@@ -143,7 +148,7 @@ impl<'h, 'u> PoolManager<'h> {
         let datetime = group.datetime();
         let mut pool_events = vec![];
         pool_events.extend(self.progress_deals(datetime)?);
-        self.apply_deal_rules(group, datetime, &mut pool_events)?;
+        self.apply_deal_rules(group, datetime, None, &mut pool_events)?;
         Ok(pool_events)
     }
 
@@ -172,6 +177,7 @@ impl<'h, 'u> PoolManager<'h> {
         &mut self,
         mut group: DealGroup<'h>,
         event_datetime: JDateTimeRange<'h>,
+        from_pool: Option<&'h str>,
         events: &mut Vec<PoolEvent<'h>>,
     ) -> JournResult<()> {
         loop {
@@ -214,13 +220,13 @@ impl<'h, 'u> PoolManager<'h> {
                         // Stop processing rules when we pool (terminal action).
                         return match until_condition {
                             Condition::False => {
-                                events.push(pool.push(group, event_datetime)?);
+                                events.push(pool.push(group, event_datetime, from_pool)?);
                                 Ok(())
                             }
                             Condition::Age(age, age_unit) => {
                                 let datetime = group.datetime();
                                 let deal_unit = group.unit();
-                                events.push(pool.push(group, event_datetime)?);
+                                events.push(pool.push(group, event_datetime, from_pool)?);
 
                                 let future_date = match age_unit {
                                     AgeUnit::Days => {

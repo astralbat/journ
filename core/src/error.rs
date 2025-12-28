@@ -5,9 +5,9 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
-use crate::arguments::Arguments;
 use crate::parsing::text_block::TextBlock;
 use crate::parsing::util::interim_space;
+use crate::reporting::command::arguments::Cmd;
 use crate::reporting::table::Table;
 use crate::reporting::table::row::Row;
 use crate::reporting::table::{Alignment, Cell};
@@ -313,7 +313,7 @@ impl BlockContextLine {
 
 impl From<&BlockContextLine> for Row<'static> {
     fn from(value: &BlockContextLine) -> Self {
-        let highlight_style = if Arguments::get().print_std_err_in_color() {
+        let highlight_style = if Cmd::args().print_std_err_in_color() {
             Style::default().with_fg(Colour::Red)
         } else {
             Style::default()
@@ -792,13 +792,6 @@ pub mod parsing {
             self.input.into_err(self.msg)
         }
     }
-
-    /*
-    impl<'h, I: TextInput<'h>> From<IParseError<I>> for Box<dyn ErrorMsg> {
-        fn from(value: IParseError<I>) -> Self {
-            value.into_err().msg
-        }
-    }*/
 
     impl<'h, I: TextInput<'h>> From<IParseError<I>> for JournError {
         fn from(value: IParseError<I>) -> Self {

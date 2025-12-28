@@ -9,7 +9,7 @@ use crate::account::Account;
 use crate::alloc::HerdAllocator;
 use crate::amount::Amount;
 use crate::configuration::Configuration;
-use crate::date_and_time::{DateAndTime, JDate};
+use crate::date_and_time::{DateAndTime, JDate, JDateTime};
 use crate::error::{BlockContext, BlockContextError, JournError, JournResult};
 use crate::ext::{RangeBoundsExt, StrExt};
 use crate::journal_entry_flow::{Flow, Flows};
@@ -17,6 +17,7 @@ use crate::journal_node::{FIRST_NODE_ID, LAST_NODE_ID, NodeId};
 use crate::metadata::Metadata;
 use crate::parsing::text_block::TextBlock;
 use crate::posting::{Posting, PostingId};
+use crate::reporting::command::arguments::Cmd;
 use crate::unit::Unit;
 use crate::{err, match_map};
 use chrono::{
@@ -53,7 +54,7 @@ pub struct EntryDateId<'h> {
 }
 
 impl<'h> EntryDateId<'h> {
-    pub fn date_range<R: RangeBounds<DateTime<Tz>>>(range: R) -> Range<EntryDateId<'h>> {
+    pub fn date_range<R: RangeBounds<JDateTime<'h>>>(range: R) -> Range<EntryDateId<'h>> {
         let start = match range.start_bound() {
             Bound::Included(date) => date.naive_utc(),
             Bound::Excluded(date) => date.add(Duration::seconds(1)).naive_utc(),
@@ -219,7 +220,7 @@ impl<'h> JournalEntry<'h> {
             pst.set_entry_id(id);
         }
 
-        self.date_id = Some(EntryId::as_date_id(self, self.config.args().aux_date()));
+        self.date_id = Some(EntryId::as_date_id(self, Cmd::args().aux_date()));
     }
 
     pub fn date_id(&self) -> u64 {

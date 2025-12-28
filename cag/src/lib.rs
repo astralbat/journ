@@ -26,6 +26,7 @@ pub mod module_init;
 pub mod pool;
 mod pool_event;
 mod pool_manager;
+mod report;
 pub mod ruleset;
 mod test_util;
 

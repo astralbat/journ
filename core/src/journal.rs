@@ -6,8 +6,8 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::alloc::HerdAllocator;
-use crate::arguments::Arguments;
 use crate::configuration::Configuration;
+use crate::date_and_time::JDateTime;
 use crate::directive::DirectiveKind;
 use crate::err;
 use crate::error::{BlockContext, BlockContextError, JournErrors, JournResult};
@@ -18,8 +18,7 @@ use crate::parsing::parser::JournalParseNode;
 use crate::parsing::text_block::TextBlock;
 use crate::python::mod_ledger::PythonLedgerModule;
 use crate::reporting::balance::AccountBalances;
-use chrono::DateTime;
-use chrono_tz::Tz;
+use crate::reporting::command::arguments::Arguments;
 use nom_locate::LocatedSpan;
 use normalize_path::NormalizePath;
 use std::collections::BTreeMap;
@@ -35,14 +34,13 @@ pub struct Journal<'h> {
 
 impl<'h> Journal<'h> {
     pub fn parse(
-        args: &'static Arguments,
+        args: &Arguments,
         filename: &'h Path,
         text_block: TextBlock<'h>,
         allocator: &'h HerdAllocator<'h>,
     ) -> JournResult<Journal<'h>> {
-        let short_args = allocator.alloc(args);
         let node_id = allocator.alloc(NodeId::new_root());
-        let config = Configuration::from_args(short_args, allocator, node_id);
+        let config = Configuration::new(allocator, node_id);
         let allocated_block = allocator.alloc(text_block);
         let node = allocator.alloc(JournalNode::new(
             None,
@@ -113,8 +111,7 @@ impl<'h> Journal<'h> {
 
         // Create a combined configuration that follows all branch paths in order,
         // applying all configuration items in order.
-        let combined_config =
-            allocator.alloc(Configuration::from_args(Arguments::get(), allocator, root.id()));
+        let combined_config = allocator.alloc(Configuration::new(allocator, root.id()));
         let mut segment = Some(*root.segments().first().unwrap());
         while let Some(seg) = segment {
             combined_config.merge_config(seg.config());
@@ -170,14 +167,14 @@ impl<'h> Journal<'h> {
         range: R,
     ) -> impl DoubleEndedIterator<Item = &'h JournalEntry<'h>> + Clone + 'a
     where
-        R: RangeBounds<DateTime<Tz>>,
+        R: RangeBounds<JDateTime<'a>>,
     {
         let range = EntryDateId::date_range(range);
         self.entries.range(range).map(|e| e.1.1)
     }
 
     /// Searches for an entry whose start date and description match those specified
-    pub fn contains_entry(&self, start_date: DateTime<Tz>, description: &str) -> bool {
+    pub fn contains_entry(&self, start_date: JDateTime<'h>, description: &str) -> bool {
         for entry in self.entry_range(&start_date..=&start_date) {
             if entry.description() == description {
                 return true;
@@ -194,7 +191,7 @@ impl<'h> Journal<'h> {
     ) -> impl Iterator<Item = &'h JournalEntry<'h>> + 'a
     where
         'b: 'a,
-        R: RangeBounds<DateTime<Tz>>,
+        R: RangeBounds<JDateTime<'a>>,
     {
         self.entry_range(datetime_range).filter(move |e| e.description() == description)
     }

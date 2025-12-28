@@ -10,9 +10,7 @@ use crate::pool_event::{AggregatedPoolEvent, PoolEvent, PoolEventKind};
 use crate::ruleset::{ActionRule, Rule, RuleSet};
 use chrono::{DateTime, Duration};
 use chrono_tz::Tz;
-use journ_core::account::Account;
-use journ_core::arguments::{Command, DateTimeArguments};
-use journ_core::configuration::{AccountFilter, Configuration, Filter, UnitFilter};
+use journ_core::configuration::{Configuration, Filter};
 use journ_core::directive::DirectiveKind;
 use journ_core::err;
 use journ_core::error::JournError;
@@ -21,9 +19,8 @@ use journ_core::module::{
     ModuleConfiguration, ModuleConfigurationClone, ModuleConfigurationEq, ModuleDirectiveObj,
 };
 use journ_core::python::lambda::Lambda;
-use journ_core::unit::Unit;
 use std::any::Any;
-use std::ops::{Bound, Deref, RangeBounds};
+use std::ops::Deref;
 use std::str::FromStr;
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -415,72 +412,6 @@ impl FromStr for CapitalGainsColumn {
     }
 }
 
-#[derive(Default, Debug)]
-pub struct CagCommand {
-    pub datetime_args: DateTimeArguments,
-    pub account_filter: Vec<String>,
-    pub unit_filter: Vec<String>,
-    pub event_filter: Vec<EventPattern>,
-    pub group_by: Vec<CapitalGainsGroupBy>,
-    pub group_deals_by_date: bool,
-    pub show_group: bool,
-    pub order_by: Vec<CapitalGainsOrderBy>,
-    pub disposed_mode: bool,
-    pub output_csv: bool,
-    pub output_yaml: bool,
-    pub show_time: bool,
-    pub write_valuations: bool,
-    pub write_metadata: bool,
-    pub columns: Vec<CapitalGainsColumn>,
-    pub from: Option<DateTime<Tz>>,
-    pub to: Option<DateTime<Tz>>,
-}
-
-impl CagCommand {
-    pub fn account_filter(&self) -> impl for<'h> Filter<Account<'h>> + '_ {
-        AccountFilter::new(self.account_filter.iter())
-    }
-
-    pub fn set_account_filter(&mut self, account_filter: Vec<String>) {
-        self.account_filter = account_filter;
-    }
-
-    pub fn unit_filter(&self) -> impl for<'h> Filter<Unit<'h>> + '_ {
-        UnitFilter::new(self.unit_filter.iter())
-    }
-
-    pub fn set_unit_filter(&mut self, units: Vec<String>) {
-        self.unit_filter = units;
-    }
-
-    pub fn event_filter(&self) -> EventFilter<'_> {
-        EventFilter(&self.event_filter)
-    }
-
-    pub fn set_event_filter(&mut self, event_filter: Vec<EventPattern>) {
-        self.event_filter = event_filter;
-    }
-
-    pub fn output_yaml(&self) -> bool {
-        self.output_yaml
-    }
-
-    pub fn set_output_yaml(&mut self, output_yaml: bool) {
-        self.output_yaml = output_yaml;
-    }
-
-    pub fn from_to_range(&self) -> impl RangeBounds<DateTime<Tz>> {
-        match (self.from, self.to) {
-            (Some(from), Some(to)) => (Bound::Included(from), Bound::Excluded(to)),
-            (Some(from), None) => (Bound::Included(from), Bound::Unbounded),
-            (None, Some(to)) => (Bound::Unbounded, Bound::Excluded(to)),
-            (None, None) => (Bound::Unbounded, Bound::Unbounded),
-        }
-    }
-}
-
-impl Command for CagCommand {}
-
 /// A filter that only includes events that matches any of the strings within.
 ///
 /// Strings may take the format:
@@ -529,7 +460,7 @@ impl Deref for EventPattern {
 }
 
 #[derive(Debug, Clone)]
-pub struct EventFilter<'a>(&'a Vec<EventPattern>);
+pub struct EventFilter<'a>(pub &'a Vec<EventPattern>);
 
 impl<'a, 'h> Filter<PoolEvent<'h>> for EventFilter<'_> {
     fn is_included(&self, event: &PoolEvent<'h>) -> bool {
@@ -544,7 +475,7 @@ impl<'a, 'h> Filter<PoolEvent<'h>> for EventFilter<'_> {
                 s.deref() == "pooled"
                     || s.starts_with("pooled ") && s.split_whitespace().nth(1) == Some(&lower_name)
             }),
-            PoolEventKind::UnpooledDeal(..) => self.0.iter().any(|s| {
+            PoolEventKind::MovedDeal(..) => self.0.iter().any(|s| {
                 s.deref() == "unpooled"
                     || s.starts_with("unpooled ")
                         && s.split_whitespace().nth(1) == Some(&lower_name)

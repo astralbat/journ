@@ -10,8 +10,6 @@
 #![feature(bool_to_result)]
 
 mod bal;
-mod cag;
-mod expr;
 mod print;
 mod reg;
 
@@ -20,26 +18,24 @@ extern crate chrono;
 extern crate log;
 extern crate core;
 
-use crate::bal::BalArguments;
-use crate::cag::CagArguments;
-use crate::print::PrintArguments;
-use crate::reg::RegArguments;
 use bumpalo_herd::Herd;
 use chrono_tz::Tz;
 use clap::{Parser, Subcommand};
 
+use crate::bal::cmd_line::BalArguments;
+use crate::print::cmd_line::PrintArguments;
+use crate::reg::cmd_line::RegArguments;
 use env_logger::fmt::style::{AnsiColor, Color, RgbColor, Style};
 use env_logger::{Builder, Env};
 use journ_core::alloc::HerdAllocator;
-use journ_core::arguments::{Arguments, Command, DateTimeArguments};
-use journ_core::date_and_time::{
-    DEFAULT_DATE_FORMAT, DEFAULT_TIME_FORMAT, DateFormat, JDateTime, TimeFormat,
-};
-use journ_core::error::{BlockContextError, JournError, JournResult};
+use journ_core::date_and_time::{DateFormat, TimeFormat};
+use journ_core::error::JournResult;
 use journ_core::journal::Journal;
-use journ_core::module::MODULES;
+use journ_core::module::{MODULES, Module};
 use journ_core::parsing::text_block::TextBlock;
 use journ_core::python::environment::PythonEnvironment;
+use journ_core::reporting::command::arguments::{Arguments, Cmd, DateTimeFormatCommand};
+use journ_core::reporting::command::{ExecCommand, IntoExecCommand, print_jerror};
 use journ_core::{err, parsing};
 use num_format::{SystemLocale, ToFormattedString};
 use std::env;
@@ -69,10 +65,6 @@ struct MainArguments {
         help = "Sets the journal file to parse"
     )]
     file: String,
-    #[arg(short = 'b', long = "begin", value_name = "BEGIN_DATE", help = "The date to begin")]
-    begin: Option<String>,
-    #[arg(short = 'e', long = "end", value_name = "END_DATE", help = "The date to end")]
-    end: Option<String>,
     #[arg(
         long = "aux-date",
         help = "Use auxiliary date on postings instead as if it were the primary date"
@@ -107,45 +99,40 @@ enum CommandArguments {
     Print(PrintArguments),
     Bal(BalArguments),
     Reg(RegArguments),
-    Cag(CagArguments),
+    #[command(external_subcommand)]
+    Module(Vec<String>),
 }
 
 impl CommandArguments {
-    pub fn exec<'j, 'h: 'j>(
-        self,
-        journ: &'j mut Journal<'j>,
-        args: &'h Arguments,
-    ) -> JournResult<()> {
+    pub fn exec<'j, 'h: 'j>(self, journ: &'j mut Journal<'j>, args: &Arguments) -> JournResult<()> {
         match self {
             CommandArguments::Print(print_args) => {
-                args.set_cmd(print_args.into_exec_cmd(journ)?).execute(journ, args)
+                Cmd::set(Box::new(print_args.into_exec_cmd(journ, args)?)).execute(journ)
             }
             CommandArguments::Bal(bal_args) => {
-                args.set_cmd(bal_args.into_exec_cmd(journ)?).execute(journ, args)
+                Cmd::set(Box::new(bal_args.into_exec_cmd(journ, args)?)).execute(journ)
             }
             CommandArguments::Reg(reg_args) => {
-                args.set_cmd(reg_args.into_exec_cmd(journ)?).execute(journ, args)
+                Cmd::set(Box::new(reg_args.into_exec_cmd(journ, args)?)).execute(journ)
             }
-            CommandArguments::Cag(cag_args) => {
-                args.set_cmd(cag_args.into_exec_cmd(journ)?).execute(journ, args)
+            CommandArguments::Module(module_args) => {
+                match MODULES
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter_map(Module::command)
+                    .find(|c| c.name() == module_args[0])
+                {
+                    Some(command) => {
+                        let cmd: &dyn ExecCommand =
+                            Cmd::set(command.create(journ, args, &module_args[1..])?);
+                        cmd.execute(journ)
+                    }
+                    None => Err(err!("Unknown command: '{}'", module_args[0])),
+                }
             }
         }
     }
-}
-
-/// Used to create a command from command arguments.
-pub trait IntoExecCommand {
-    type Command: ExecCommand;
-
-    fn into_exec_cmd(self, journ: &Journal) -> JournResult<Self::Command>;
-}
-
-pub trait ExecCommand: Command {
-    fn execute<'j, 'h: 'j>(
-        &'h self,
-        journ: &'j mut Journal<'j>,
-        args: &'h Arguments,
-    ) -> JournResult<()>;
 }
 
 fn main() {
@@ -185,19 +172,18 @@ fn main() {
     MODULES.lock().unwrap().push(journ_cag::module_init::initialize());
 
     let main_args = MainArguments::parse();
-    let mut args = Arguments::default();
-
-    // Initialise the configuration. This is done after parsing the journal so that the price
-    // database can search/update currencies.
-    args.set_aux_date(main_args.aux_date);
-    args.set_real_postings(main_args.real_postings);
-    args.set_color(main_args.color);
-    args.set_no_color(main_args.no_color);
-    args.datetime_args.date_format =
-        main_args.datetime_args.date_format.unwrap_or(&DEFAULT_DATE_FORMAT);
-    args.datetime_args.time_format =
-        main_args.datetime_args.time_format.unwrap_or(&DEFAULT_TIME_FORMAT);
-    args.datetime_args.timezone = main_args.datetime_args.timezone.unwrap_or(Tz::UTC);
+    let args = Arguments {
+        datetime_cmd: DateTimeFormatCommand::new(
+            main_args.datetime_args.date_format,
+            main_args.datetime_args.time_format,
+            main_args.datetime_args.timezone,
+        ),
+        aux_date: main_args.aux_date,
+        real_postings: main_args.real_postings,
+        color: main_args.color,
+        no_color: main_args.no_color,
+    };
+    let args = Cmd::set_args(args);
 
     // The filename must be in utf-8.
     let file_path = PathBuf::from(main_args.file);
@@ -209,40 +195,11 @@ fn main() {
         }
     }
 
-    let df = &args.datetime_args.date_format;
-    let tf = &args.datetime_args.time_format;
-    let tz = args.datetime_args.timezone;
-    let begin = if let Some(begin) = main_args.begin {
-        match JDateTime::parse(df, tf, tz)(begin.as_str()) {
-            Ok((_, date)) => Some(date.datetime()),
-            Err(e) => {
-                print_jerror(err!(e.to_string()));
-                exit(1)
-            }
-        }
-    } else {
-        None
-    };
-    let end = if let Some(end) = main_args.end {
-        match JDateTime::parse(df, tf, tz)(end.as_str()) {
-            Ok((_, date)) => Some(date.datetime()),
-            Err(e) => {
-                print_jerror(err!(e.to_string()));
-                exit(1)
-            }
-        }
-    } else {
-        None
-    };
-    args.set_begin(begin);
-    args.set_end(end);
-    let args = Arguments::set(args);
-
     let herd = Herd::new();
     let herd_allocator = herd.get().alloc(HerdAllocator::new(&herd));
-    let mut journ = parse(&file_path, herd_allocator);
+    let mut journ = parse(&file_path, args, herd_allocator);
     // Execute the command
-    if let Err(e) = main_args.command.exec(&mut journ, args) {
+    if let Err(e) = main_args.command.exec(&mut journ, &args) {
         print_jerror(e);
         exit(1)
     }
@@ -250,9 +207,12 @@ fn main() {
 }
 
 /// Parse the ledger
-fn parse<'h>(file_path: &Path, herd_allocator: &'h HerdAllocator<'h>) -> Journal<'h> {
+fn parse<'h>(
+    file_path: &Path,
+    args: &Arguments,
+    herd_allocator: &'h HerdAllocator<'h>,
+) -> Journal<'h> {
     let now = SystemTime::now();
-    let args = Arguments::get();
     let file_name = herd_allocator.alloc(PathBuf::from(file_path.file_name().unwrap()));
     PythonEnvironment::startup();
     match TextBlock::from_file(file_name.as_path(), herd_allocator, None)
@@ -283,13 +243,6 @@ fn parse<'h>(file_path: &Path, herd_allocator: &'h HerdAllocator<'h>) -> Journal
     }
 }
 
-fn print_jerror(mut e: JournError) {
-    e.prune_except_last::<BlockContextError>();
-
-    eprint!("{}:", env::args().next().unwrap(),);
-    eprintln!(" {}", e);
-}
-
 /// Used to flatten an argument that may be specified as zero or more comma separated value
 /// strings.
 /// This expands them to a single list for consistent processing.
@@ -299,25 +252,4 @@ pub fn flatten_csv(field: &Vec<String>) -> Vec<String> {
         flattened.extend(parsing::util::separated_fields(',', f).map(|s| s.to_string()));
     }
     flattened
-}
-
-/// Converts date and time arguments to a `DateTimeArguments` struct.
-/// Uses the root configuration for fallback if the arguments are not specified.
-pub fn read_date_time_args(journ: &Journal) -> JournResult<DateTimeArguments> {
-    let config = journ.config();
-    let mut dt_args = DateTimeArguments::default();
-    let main_args = MainArguments::parse();
-    dt_args.date_format = match main_args.datetime_args.date_format {
-        Some(df) => df,
-        None => config.date_format().clone().into_owned(),
-    };
-    dt_args.time_format = match main_args.datetime_args.time_format {
-        Some(tf) => tf,
-        None => config.time_format().clone().into_owned(),
-    };
-    dt_args.timezone = match main_args.datetime_args.timezone {
-        Some(tz) => tz,
-        None => config.timezone(),
-    };
-    Ok(dt_args)
 }

@@ -6,14 +6,15 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::adjustment::Adjustment;
-use crate::cgt_configuration::{CagCommand, CapitalGainsColumn, EventFilter, MatchMethod};
+use crate::cgt_configuration::{CapitalGainsColumn, EventFilter, MatchMethod};
 use crate::deal_holding::{AbsDealHolding, DealHolding};
 use crate::pool::PoolBalance;
+use crate::report::command::CagCommand;
 use itertools::Itertools;
-use journ_core::arguments::Arguments;
 use journ_core::configuration::Filter;
 use journ_core::date_and_time::JDateTimeRange;
 use journ_core::metadata::Metadata;
+use journ_core::reporting::command::arguments::Cmd;
 use journ_core::reporting::table::Cell;
 use journ_core::reporting::table::Row;
 use journ_core::reporting::term_style::{Colour, Weight};
@@ -192,8 +193,8 @@ pub enum PoolEventKind<'h> {
     Adjustment(Adjustment<'h>),
     /// A deal was added to the pool
     PooledDeal(DealHolding<'h>),
-    /// A deal was extracted from the pool
-    UnpooledDeal(DealHolding<'h>),
+    /// A deal was moved from the specified pool name
+    MovedDeal(DealHolding<'h>, &'h str),
     /// An acquisition was matched against a disposal
     Match(MatchDetails<'h>),
 }
@@ -205,7 +206,7 @@ impl fmt::Display for PoolEventKind<'_> {
                 let rem = if dh.split_parent().is_some() { "(remainder) " } else { "" };
                 write!(f, "Pooled {}{}", rem, dh.total())
             }
-            PoolEventKind::UnpooledDeal(dh) => write!(f, "Unpooled {}", dh.total()),
+            PoolEventKind::MovedDeal(dh, from) => write!(f, "Moved {} from {from}", dh.total()),
             PoolEventKind::Match(details) => {
                 write!(
                     f,
@@ -230,7 +231,7 @@ macro_rules! impl_from_kind_for_cell {
                     PoolEventKind::PooledDeal(dh) => {
                         [Cell::from(&"Pooled "), dh.total().clone().into()].into()
                     }
-                    PoolEventKind::UnpooledDeal(dh) => {
+                    PoolEventKind::MovedDeal(dh, ..) => {
                         [Cell::from(&"Unpooled "), dh.total().clone().into()].into()
                     }
                     PoolEventKind::Match(details) => [
@@ -266,7 +267,7 @@ impl<'h> From<&PoolEventKind<'h>> for Yaml {
                 map.insert(Yaml::String("Pooled".to_string()), Yaml::Hash(pooled_map));
                 Yaml::Hash(map)
             }
-            PoolEventKind::UnpooledDeal(dh) => {
+            PoolEventKind::MovedDeal(dh, _) => {
                 let mut map = Hash::new();
                 map.insert(Yaml::String("type".to_string()), Yaml::String("Unpooled".to_string()));
                 let mut unpooled_map = Hash::new();
@@ -323,7 +324,7 @@ impl Ord for PoolEventKind<'_> {
             match kind {
                 PoolEventKind::Adjustment(_) => 0,
                 PoolEventKind::PooledDeal(_) => 1,
-                PoolEventKind::UnpooledDeal(_) => 2,
+                PoolEventKind::MovedDeal(..) => 2,
                 PoolEventKind::Match(_) => 3,
             }
         }
@@ -342,11 +343,17 @@ impl<'h> Add for PoolEventKind<'h> {
                 }
                 (self_deal + rhs_deal).ok().map(PoolEventKind::PooledDeal)
             }
-            (PoolEventKind::UnpooledDeal(self_deal), PoolEventKind::UnpooledDeal(rhs_deal)) => {
+            (
+                PoolEventKind::MovedDeal(self_deal, self_from),
+                PoolEventKind::MovedDeal(rhs_deal, rhs_from),
+            ) => {
                 if self_deal.unit() != rhs_deal.unit() {
                     return None;
                 }
-                (self_deal + rhs_deal).ok().map(PoolEventKind::UnpooledDeal)
+                if self_from != rhs_from {
+                    return None;
+                }
+                (self_deal + rhs_deal).ok().map(|acc| PoolEventKind::MovedDeal(acc, self_from))
             }
             (PoolEventKind::Match(self_match), PoolEventKind::Match(rhs_match)) => {
                 if self_match.target().unit() != rhs_match.target().unit() {
@@ -397,7 +404,7 @@ impl<'h> PoolEvent<'h> {
     pub fn unit(&self) -> &'h Unit<'h> {
         match &self.event_kind {
             PoolEventKind::PooledDeal(dh) => dh.unit(),
-            PoolEventKind::UnpooledDeal(dh) => dh.unit(),
+            PoolEventKind::MovedDeal(dh, _) => dh.unit(),
             PoolEventKind::Match(details) => details.originator().unit(),
             PoolEventKind::Adjustment(adj) => adj.unit(),
         }
@@ -429,7 +436,7 @@ impl<'h> PoolEvent<'h> {
     pub fn deal_datetime(&self) -> JDateTimeRange<'h> {
         match &self.event_kind {
             PoolEventKind::PooledDeal(dh) => dh.datetime(),
-            PoolEventKind::UnpooledDeal(dh) => dh.datetime(),
+            PoolEventKind::MovedDeal(dh, _) => dh.datetime(),
             PoolEventKind::Match(details) => details.originator.datetime(),
             PoolEventKind::Adjustment(adj) => adj.datetime(),
         }
@@ -545,7 +552,7 @@ impl<'h> PoolEvent<'h> {
     pub fn description(&self) -> LinkedHashSet<&'h str> {
         match &self.event_kind {
             PoolEventKind::PooledDeal(dh) => dh.description(),
-            PoolEventKind::UnpooledDeal(dh) => dh.description(),
+            PoolEventKind::MovedDeal(dh, _) => dh.description(),
             PoolEventKind::Match(details) => details.originator().description(),
             PoolEventKind::Adjustment(adj) => {
                 let mut desc = LinkedHashSet::new();
@@ -558,7 +565,7 @@ impl<'h> PoolEvent<'h> {
     pub fn metadata_by_key(&self, key: &str) -> LinkedHashSet<&Metadata<'h>> {
         match &self.event_kind {
             PoolEventKind::PooledDeal(dh) => dh.metadata_by_key(key),
-            PoolEventKind::UnpooledDeal(dh) => dh.metadata_by_key(key),
+            PoolEventKind::MovedDeal(dh, _) => dh.metadata_by_key(key),
             PoolEventKind::Match(details) => details.sell_holding().metadata_by_key(key),
             PoolEventKind::Adjustment(adj) => {
                 adj.entry().metadata_by_key(key).into_iter().collect()
@@ -744,11 +751,22 @@ impl<'h> Add<Self> for PoolEvent<'h> {
                     }
                 }
             }
-            (PoolEventKind::UnpooledDeal(self_deal), PoolEventKind::UnpooledDeal(rhs_deal)) => {
-                match self_deal + rhs_deal {
-                    Ok(deal) => Ok(PoolEventKind::UnpooledDeal(deal)),
-                    Err((l_dh, r_dh)) => {
-                        Err((PoolEventKind::UnpooledDeal(l_dh), PoolEventKind::UnpooledDeal(r_dh)))
+            (
+                PoolEventKind::MovedDeal(self_deal, self_from),
+                PoolEventKind::MovedDeal(rhs_deal, rhs_from),
+            ) => {
+                if self_from != rhs_from {
+                    Err((
+                        PoolEventKind::MovedDeal(self_deal, self_from),
+                        PoolEventKind::MovedDeal(rhs_deal, rhs_from),
+                    ))
+                } else {
+                    match self_deal + rhs_deal {
+                        Ok(deal) => Ok(PoolEventKind::MovedDeal(deal, self_from)),
+                        Err((l_dh, r_dh)) => Err((
+                            PoolEventKind::MovedDeal(l_dh, self_from),
+                            PoolEventKind::MovedDeal(r_dh, rhs_from),
+                        )),
                     }
                 }
             }
@@ -1103,13 +1121,14 @@ impl<'h, 'e> AggregatedPoolEvent<'h, 'e> {
     }
 
     pub fn as_table_rows(&self, include_sub_events: bool, total_row: bool) -> Vec<Row<'_>> {
-        let cag = Arguments::get().cast_cmd::<CagCommand>().unwrap();
+        let cag = Cmd::cast::<CagCommand>();
         let mut event_date = self.event_datetime();
         //event_date.with_brief_format(true);
         let mut deal_date = self.deal_datetime();
         if cag.show_time {
-            event_date = event_date.with_time_format(&cag.datetime_args.time_format);
-            deal_date = deal_date.with_time_format(&cag.datetime_args.time_format);
+            event_date =
+                event_date.with_time_format(&cag.datetime_fmt_cmd.time_format_or_default());
+            deal_date = deal_date.with_time_format(&cag.datetime_fmt_cmd.time_format_or_default());
         } else {
             event_date = event_date.without_time();
             deal_date = deal_date.without_time();
@@ -1162,22 +1181,22 @@ impl<'h, 'e> AggregatedPoolEvent<'h, 'e> {
         }
 
         let mut rows = vec![Row::from(column_data)];
-        if let AggregatedPoolEvent::Many(es) = self {
-            if include_sub_events {
-                for e in es {
-                    let mut inner_rows = e.as_table_rows(include_sub_events, total_row);
-                    inner_rows.first_mut().iter_mut().for_each(|r| {
-                        r.set_weight(Weight::Faint);
-                    });
-                    rows.extend(inner_rows);
-                }
+        if let AggregatedPoolEvent::Many(es) = self
+            && include_sub_events
+        {
+            for e in es {
+                let mut inner_rows = e.as_table_rows(include_sub_events, total_row);
+                inner_rows.first_mut().iter_mut().for_each(|r| {
+                    r.set_weight(Weight::Faint);
+                });
+                rows.extend(inner_rows);
             }
         }
         rows
     }
 
     pub fn as_yaml(&self, render_children: bool) -> Yaml {
-        let cmd = Arguments::get().cast_cmd::<CagCommand>().unwrap();
+        let cmd = Cmd::cast::<CagCommand>();
         let unit = self.unit();
         let event_datetime = self.event_datetime();
         let deal_datetime = self.deal_datetime();
@@ -1223,8 +1242,8 @@ impl<'h, 'e> AggregatedPoolEvent<'h, 'e> {
                             map.insert(Yaml::String("pooled".to_string()), dh.into());
                             "pooled"
                         }
-                        PoolEventKind::UnpooledDeal(dh) => {
-                            map.insert(Yaml::String("unpooled".to_string()), dh.into());
+                        PoolEventKind::MovedDeal(dh, _) => {
+                            map.insert(Yaml::String("moved".to_string()), dh.into());
                             "unpooled"
                         }
                         PoolEventKind::Match(details) => {

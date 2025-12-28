@@ -6,10 +6,7 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::ExecCommand;
-use crate::expr::parser::parse_plan;
-use crate::expr::{ColumnValue, GroupKey, GroupState, LateContext, PostingContext, TotalContext};
 use journ_core::account::Account;
-use journ_core::arguments::{Arguments, Command};
 use journ_core::configuration::{AccountFilter, DescriptionFilter, FileFilter, Filter, UnitFilter};
 use journ_core::err;
 use journ_core::error::JournResult;
@@ -17,6 +14,12 @@ use journ_core::journal::Journal;
 use journ_core::journal_entry::JournalEntry;
 use journ_core::journal_node::JournalNode;
 use journ_core::posting::Posting;
+use journ_core::reporting::command::arguments::{Cmd, Command, DateTimeFormatCommand};
+use journ_core::reporting::command::cmd_line::BeginAndEndCommand;
+use journ_core::reporting::expr::parser::parse_plan;
+use journ_core::reporting::expr::{
+    ColumnValue, GroupKey, GroupState, LateContext, PostingContext, TotalContext,
+};
 use journ_core::reporting::table2::{CellRef, StyledCell};
 use journ_core::reporting::term_style::{Style, Weight};
 use journ_core::unit::Unit;
@@ -25,17 +28,19 @@ use std::collections::{BTreeMap, HashMap};
 
 #[derive(Default, Debug)]
 pub struct BalCommand {
-    file_filter: Vec<String>,
+    pub(super) datetime_fmt_cmd: DateTimeFormatCommand,
+    pub(super) begin_and_end_cmd: BeginAndEndCommand,
+    pub(super) file_filter: Vec<String>,
     /// Each inner Vec is a partition
-    account_filter: Vec<Vec<String>>,
-    unit_filter: Vec<Vec<String>>,
-    description_filter: Vec<String>,
-    write_csv: bool,
-    no_header: bool,
-    no_total: bool,
-    show_zeros: bool,
-    group_by: String,
-    column_spec: String,
+    pub(super) account_filter: Vec<Vec<String>>,
+    pub(super) unit_filter: Vec<Vec<String>>,
+    pub(super) description_filter: Vec<String>,
+    pub(super) write_csv: bool,
+    pub(super) no_header: bool,
+    pub(super) no_total: bool,
+    pub(super) show_zeros: bool,
+    pub(super) group_by: String,
+    pub(super) column_spec: String,
 }
 
 impl BalCommand {
@@ -112,14 +117,14 @@ impl BalCommand {
         'j: 'a,
     {
         move || {
-            let args = Arguments::get();
+            let cmd: &BalCommand = Cmd::cast();
             let description_filter = self.description_filter();
             let file_filter = self.file_filter();
             let unit_filter = self.unit_filter();
             let account_filter = self.account_filter();
             Box::new(
                 journ
-                    .entry_range(args.begin_end_range())
+                    .entry_range(cmd.begin_and_end_cmd.begin_end_range())
                     .filter(move |e| description_filter.is_included(e.description()))
                     .filter(move |e| {
                         file_filter
@@ -133,19 +138,23 @@ impl BalCommand {
     }
 }
 
-impl Command for BalCommand {}
+impl Command for BalCommand {
+    fn datetime_fmt_cmd(&self) -> &DateTimeFormatCommand {
+        &self.datetime_fmt_cmd
+    }
+
+    fn begin_and_end_cmd(&self) -> &BeginAndEndCommand {
+        &self.begin_and_end_cmd
+    }
+}
 
 impl ExecCommand for BalCommand {
-    fn execute<'j, 'h: 'j>(
-        &'h self,
-        journ: &'j mut Journal<'j>,
-        args: &Arguments,
-    ) -> JournResult<()> {
+    fn execute<'j, 'h: 'j>(&'h self, journ: &'j mut Journal<'j>) -> JournResult<()> {
         let config = journ.config();
         let plan = parse_plan(self.column_spec(), Some(self.group_by()))?;
 
         let mut table = journ_core::reporting::table2::Table::default();
-        table.set_color(table.color() && !args.no_color);
+        table.set_color(table.color() && !Cmd::args().no_color);
         // Heading Row
         if !self.no_header {
             let heading_style = Style::default().with_weight(Weight::Bold);

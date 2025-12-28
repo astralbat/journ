@@ -8,6 +8,8 @@
 use std::fmt;
 
 pub mod balance;
+pub mod command;
+pub mod expr;
 pub mod table;
 pub mod table2;
 pub mod term_style;

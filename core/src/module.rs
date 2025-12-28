@@ -6,9 +6,13 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::directive::{Directive, DirectiveKind};
+use crate::error::JournResult;
+use crate::journal::Journal;
 use crate::parsing::JParseResult;
 use crate::parsing::input::TextBlockInput;
 use crate::parsing::parser::JournalParseNode;
+use crate::reporting::command::ExecCommand;
+use crate::reporting::command::arguments::Arguments;
 use std::any::Any;
 use std::fmt::Debug;
 use std::sync::Mutex;
@@ -17,6 +21,7 @@ pub struct Module {
     name: &'static str,
     directives: Vec<Box<dyn ModuleDirective>>,
     default_config: Option<&'static dyn ModuleConfiguration>,
+    command: Option<Box<dyn ModuleCommand>>,
 }
 
 pub static MODULES: Mutex<Vec<Module>> = Mutex::new(vec![]);
@@ -27,7 +32,7 @@ impl Module {
     }
 
     pub fn new(name: &'static str) -> Self {
-        Self { name, directives: vec![], default_config: None }
+        Self { name, directives: vec![], default_config: None, command: None }
     }
 
     pub fn name(&self) -> &'static str {
@@ -48,6 +53,14 @@ impl Module {
 
     pub fn add_directive(&mut self, dir: Box<dyn ModuleDirective>) {
         self.directives.push(dir);
+    }
+
+    pub fn command(&self) -> Option<&dyn ModuleCommand> {
+        self.command.as_deref()
+    }
+
+    pub fn set_command(&mut self, cmd: Box<dyn ModuleCommand>) {
+        self.command = Some(cmd);
     }
 }
 
@@ -87,4 +100,15 @@ pub trait ModuleDirective: Send {
     where
         'h: 'e,
         'e: 's;
+}
+
+pub trait ModuleCommand: Send {
+    fn name(&self) -> &'static str;
+
+    fn create(
+        &self,
+        journal: &Journal,
+        args: &Arguments,
+        command_args: &[String],
+    ) -> JournResult<Box<dyn ExecCommand>>;
 }

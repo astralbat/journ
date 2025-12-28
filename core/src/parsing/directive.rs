@@ -23,7 +23,7 @@ use crate::parsing::{IParseResult, entry};
 use crate::parsing::{JParseResult, util};
 use crate::price::Price;
 use crate::unit::Unit;
-use crate::{err, match_block, match_blocks, parsing};
+use crate::{err, match_blocks, parsing};
 use chrono_tz::Tz;
 use nom::branch::alt;
 use nom::character::complete::{space0, space1};

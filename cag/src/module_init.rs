@@ -8,11 +8,13 @@
 use crate::cgt_configuration::UnitOfAccountChange;
 use crate::cgt_configuration::{AssignExpenses, MatchMethod};
 use crate::cgt_configuration::{CagConfiguration, PoolConfiguration};
+use crate::report::command::CagCommand;
 use crate::ruleset;
 use chrono_tz::Tz;
 use journ_core::directive::{Directive, DirectiveKind};
 use journ_core::error::parsing::IErrorMsg;
 use journ_core::error::parsing::promote;
+use journ_core::match_blocks;
 use journ_core::module::{Module, ModuleDirective, ModuleDirectiveInput};
 use journ_core::parsing::JParseResult;
 use journ_core::parsing::input::{BlockInput, ConfigInput, LocatedInput, TextInput};
@@ -20,7 +22,6 @@ use journ_core::parsing::util::rest_line1;
 use journ_core::parsing::util::{line_value, param_value};
 use journ_core::parsing::{amount, entry};
 use journ_core::unit::Unit;
-use journ_core::{err, match_blocks};
 use nom::combinator::{map, rest};
 use std::str::FromStr;
 use std::sync::LazyLock;
@@ -33,6 +34,7 @@ pub fn initialize() -> Module {
     let mut module = Module::new(MODULE_NAME);
     module.add_directive(Box::new(CgtDirective));
     module.set_default_config(&*DEFAULT_CGT_CONFIG);
+    module.set_command(Box::new(CagCommand::default()));
     module
 }
 

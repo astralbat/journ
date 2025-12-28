@@ -6,23 +6,24 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::adjustment::Adjustment;
-use crate::cgt_configuration::{CagCommand, CagConfiguration};
+use crate::cgt_configuration::CagConfiguration;
 use crate::deal::{Deal, DealId};
 use crate::deal_holding::AverageDealHolding;
 use crate::module_init::MODULE_NAME;
 use crate::pool::PoolBalance;
+use crate::report::command::CagCommand;
 use crate::ruleset::{AgeUnit, Condition, DealKind, Rule};
 use chrono::{DateTime, Duration, NaiveDate};
 use chrono_tz::Tz;
 use journ_core::alloc::HerdAllocator;
 use journ_core::amount::{Amount, Quantity};
-use journ_core::arguments::Arguments;
 use journ_core::configuration::Configuration;
 use journ_core::date_and_time::{JDateTime, JDateTimeRange};
 use journ_core::err;
 use journ_core::error::{JournError, JournResult};
 use journ_core::journal_entry::JournalEntry;
 use journ_core::metadata::Metadata;
+use journ_core::reporting::command::arguments::Cmd;
 use journ_core::unit::Unit;
 use journ_core::valued_amount::ValuedAmount;
 use journ_core::valuer::{SystemValuer, Valuation, ValuationError, Valuer};
@@ -446,7 +447,8 @@ pub enum DealGroupCriteria {
 }
 impl DealGroupCriteria {
     pub fn same_day_same_sign(deal: &Deal) -> Self {
-        let tz = Arguments::get().cast_cmd::<CagCommand>().unwrap().datetime_args.timezone;
+        // It is important to make sure the timezone is consistent
+        let tz = Cmd::cast::<CagCommand>().datetime_fmt_cmd.timezone_or_default();
         let deal_date = deal.datetime().start().datetime().with_timezone(&tz).date_naive();
         DealGroupCriteria::SameDaySameSign(deal_date, deal.total().amount().is_positive())
     }
@@ -455,7 +457,7 @@ impl DealGroupCriteria {
     pub fn matches(&self, deal: &Deal) -> bool {
         match self {
             DealGroupCriteria::SameDaySameSign(date, sign) => {
-                let tz = Arguments::get().cast_cmd::<CagCommand>().unwrap().datetime_args.timezone;
+                let tz = Cmd::cast::<CagCommand>().datetime_fmt_cmd.timezone_or_default();
                 let deal_date = deal.datetime().start().datetime().with_timezone(&tz).date_naive();
                 deal_date == *date && deal.total().amount().is_positive() == *sign
             }
@@ -466,7 +468,7 @@ impl DealGroupCriteria {
     pub fn is_complete(&self, datetime: JDateTimeRange) -> bool {
         match self {
             DealGroupCriteria::SameDaySameSign(date, _) => {
-                let tz = Arguments::get().cast_cmd::<CagCommand>().unwrap().datetime_args.timezone;
+                let tz = Cmd::cast::<CagCommand>().datetime_fmt_cmd.timezone_or_default();
                 let date_rhs = datetime.start().datetime().with_timezone(&tz).date_naive();
                 date_rhs > *date
             }

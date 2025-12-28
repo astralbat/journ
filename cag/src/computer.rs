@@ -7,7 +7,7 @@
  */
 use crate::capital_gains::CapitalGains;
 use crate::cg_flows::CgFlows;
-use crate::cgt_configuration::{CagCommand, CagConfiguration};
+use crate::cgt_configuration::CagConfiguration;
 use crate::cgt_journal_entry::CapitalGainsMetadataAccess;
 use crate::deal::Deal;
 use crate::deal_group::{DealGroup, DealGroupCriteria, PushError};
@@ -17,8 +17,8 @@ use crate::mod_cgt;
 use crate::module_init::MODULE_NAME;
 use crate::pool_event::PoolEvent;
 use crate::pool_manager::PoolManager;
+use crate::report::command::CagCommand;
 use chrono::Utc;
-use journ_core::arguments::Arguments;
 use journ_core::configuration::{Configuration, Filter};
 use journ_core::date_and_time::JDateTimeRange;
 use journ_core::error::JournResult;
@@ -27,6 +27,7 @@ use journ_core::journal::Journal;
 use journ_core::journal_entry::JournalEntry;
 use journ_core::journal_entry_flow::Flow;
 use journ_core::parsing::text_block::TextBlock;
+use journ_core::reporting::command::arguments::Cmd;
 use journ_core::unit::Unit;
 use journ_core::valuer::ValueResult;
 use journ_core::{err, match_map, valuer};
@@ -45,25 +46,24 @@ lazy_static! {
         "CGT Year End Carried Forward".to_string();
 }
 
-pub struct CapitalGainsComputer<'h> {
+pub struct CapitalGainsComputer {
     #[allow(dead_code)]
     warnings: Vec<JournError>,
-    args: &'h Arguments,
 }
 
-impl<'h> CapitalGainsComputer<'h> {
-    pub fn new(args: &'h Arguments) -> Self {
-        Self { args, warnings: vec![] }
+impl<'h> CapitalGainsComputer {
+    pub fn new() -> Self {
+        Self { warnings: vec![] }
     }
 
     pub fn compute_gains(&mut self, journal: &Journal<'h>) -> Result<CapitalGains<'h>, JournError> {
-        let cmd = self.args.cast_cmd::<CagCommand>().unwrap();
+        let cmd = Cmd::cast::<CagCommand>();
         mod_cgt::register()?;
 
         // Use the account filter to decide which currencies we're going to calculate on.
         let mut included_units: Vec<&'h Unit<'h>> = {
             let mut units = HashSet::new();
-            for entry in journal.entry_range(self.args.begin_end_range()) {
+            for entry in journal.entry_range(cmd.begin_and_end_cmd.begin_end_range()) {
                 for pst in entry.postings() {
                     if cmd.account_filter().is_included(pst.account()) {
                         // Prefer the journal config for the unit over the posting's.
@@ -95,7 +95,10 @@ impl<'h> CapitalGainsComputer<'h> {
         pool_manager.set_unit_filter(unit_filter.clone());
         let mut pool_events = vec![];
         let mut queue = DealingEventQueue::new();
-        for entry in journal.entry_range(self.args.begin_end_range()) {
+
+        // We scan all entries with capital gains as not doing so will change
+        // the result completely.
+        for entry in journal.entry_range(..) {
             let entry_err = |e: JournError| {
                 let entry_text = entry.to_string();
                 let tb = entry
@@ -115,13 +118,13 @@ impl<'h> CapitalGainsComputer<'h> {
         pool_events.extend(queue.flush_all(&mut pool_manager)?);
 
         pool_events.extend(pool_manager.progress_deals(JDateTimeRange::new(
-            cmd.datetime_args.datetime_from_utc(&Utc::now().naive_utc()),
+            cmd.datetime_fmt_cmd.datetime_from_utc(&Utc::now().naive_utc()),
             None,
         ))?);
 
         // Now report on only those events in the full date range asked for.
-        let from_to_range = cmd.from_to_range();
-        pool_events.retain(|e| from_to_range.contains(&e.deal_datetime().start().datetime()));
+        let from_to_range = cmd.begin_and_end_cmd.begin_end_range();
+        pool_events.retain(|e| from_to_range.contains(&e.deal_datetime().start()));
 
         let cg = CapitalGains::new(
             Configuration::clone(journal.config()),
@@ -347,7 +350,7 @@ impl<'h> CapitalGainsComputer<'h> {
     fn initial_unit_of_account(journal: &Journal<'h>) -> JournResult<&'h Unit<'h>> {
         let mut unit_of_account = None;
 
-        let entries = journal.entry_range(Arguments::get().begin_end_range());
+        let entries = journal.entry_range(..);
         if let Some(entry) = entries.clone().next() {
             let cag_config = CagConfiguration::get(entry.config());
             if let Some(cag_config) = cag_config
@@ -428,7 +431,7 @@ impl<'h> DealingEventQueue<'h> {
     }
 
     fn push_back_deal(&mut self, deal: Deal<'h>) {
-        let cmd = Arguments::get().cast_cmd::<CagCommand>().unwrap();
+        let cmd = Cmd::cast::<CagCommand>();
         let criteria = if cmd.group_deals_by_date {
             DealGroupCriteria::same_day_same_sign(&deal)
         } else {

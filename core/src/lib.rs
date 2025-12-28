@@ -32,7 +32,6 @@ extern crate core;
 
 pub mod account;
 pub mod amount;
-pub mod arguments;
 pub mod configuration;
 pub mod date_and_time;
 pub mod directive;

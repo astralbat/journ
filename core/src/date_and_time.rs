@@ -5,18 +5,18 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
-use crate::arguments::DateTimeArguments;
 use crate::error::parsing::IParseError;
 use crate::error::{JournError, JournResult};
 use crate::ext::RangeBoundsExt;
 use crate::parsing::input::TextInput;
 use crate::parsing::{IParseResult, JParseResult};
+use crate::reporting::command::arguments::DateTimeFormatCommand;
 use crate::reporting::table::{Cell, WrapPolicy};
 use crate::reporting::table2;
 use crate::reporting::table2::fmt::CellFormatter;
 use crate::reporting::table2::{CellWidth, ColumnWidth};
 use crate::unit::NumberFormat;
-use crate::{err, match_parser, match_parsers};
+use crate::{err, match_parsers};
 use chrono::format::{DelayedFormat, Fixed, Item, Numeric, Pad, Parsed, parse};
 use chrono::{
     DateTime, Datelike, Duration, LocalResult, Months, NaiveDate, NaiveDateTime, NaiveTime,
@@ -584,8 +584,8 @@ impl table2::Cell for JDateTime<'_> {
     }
 }
 
-impl PartialEq for JDateTime<'_> {
-    fn eq(&self, other: &Self) -> bool {
+impl<'a, 'b> PartialEq<JDateTime<'b>> for JDateTime<'a> {
+    fn eq(&self, other: &JDateTime<'b>) -> bool {
         self.datetime == other.datetime
     }
 }
@@ -810,9 +810,12 @@ impl<'h> JDateTimeRange<'h> {
     ///
     /// # Examples
     /// * 2000-06-01 BST -> 2000-05-31 23:00:00..2000-06-01 23:00:00 UTC
-    pub fn convert_datetime_range(&self, dt_args: &'h DateTimeArguments) -> JDateTimeRange<'h> {
-        let new_start_time =
-            dt_args.timezone.from_utc_datetime(&self.start().datetime().naive_utc());
+    pub fn convert_datetime_range(&self, dt_cmd: &'h DateTimeFormatCommand) -> JDateTimeRange<'h> {
+        let df = dt_cmd.date_format_or_default();
+        let tf = dt_cmd.time_format_or_default();
+        let tz = dt_cmd.timezone_or_default();
+
+        let new_start_time = tz.from_utc_datetime(&self.start().datetime().naive_utc());
         // Use a time format if the range has one or if the time is not midnight.
         let use_start_tf = self.start().time_format().is_some()
             || new_start_time.hour() != 0
@@ -820,11 +823,11 @@ impl<'h> JDateTimeRange<'h> {
             || new_start_time.second() != 0;
         let start = JDateTime::from_datetime(
             new_start_time,
-            Some(&dt_args.date_format),
-            if use_start_tf { Some(&dt_args.time_format) } else { None },
+            Some(df),
+            if use_start_tf { Some(tf) } else { None },
         );
 
-        let new_end_time = dt_args.timezone.from_utc_datetime(&self.end().datetime().naive_utc());
+        let new_end_time = tz.from_utc_datetime(&self.end().datetime().naive_utc());
         let use_end_df = self.end_opt().and_then(|e| e.date_format()).is_some()
             || new_end_time.day() != new_start_time.day();
         let use_end_tf = self.end_opt().and_then(|e| e.time_format()).is_some()
@@ -833,8 +836,8 @@ impl<'h> JDateTimeRange<'h> {
             || new_end_time.second() != 0;
         let implied_end = JDateTime::from_datetime(
             new_end_time,
-            if use_end_df { Some(&dt_args.date_format) } else { None },
-            if use_end_tf { Some(&dt_args.time_format) } else { None },
+            if use_end_df { Some(df) } else { None },
+            if use_end_tf { Some(tf) } else { None },
         );
         if self.end_opt().is_some() {
             JDateTimeRange::new(start, Some(implied_end))
@@ -943,6 +946,10 @@ impl<'h> DateAndTime<'h> {
 
     pub fn datetime_range(&self) -> JDateTimeRange<'h> {
         self.datetime_range
+    }
+
+    pub fn from(&self) -> JDateTime<'h> {
+        self.datetime_range.start
     }
 
     pub fn datetime_from(&self) -> DateTime<Tz> {

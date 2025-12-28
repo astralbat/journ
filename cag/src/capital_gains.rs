@@ -5,16 +5,15 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
-use crate::cgt_configuration::{
-    CagCommand, CapitalGainsColumn, CapitalGainsGroupBy, CapitalGainsOrderBy,
-};
+use crate::cgt_configuration::{CapitalGainsColumn, CapitalGainsGroupBy, CapitalGainsOrderBy};
 use crate::pool::PoolBalance;
 use crate::pool_event::{AggregatedPoolEvent, PoolEvent};
+use crate::report::command::CagCommand;
 use chrono_tz::OffsetName;
 use itertools::Itertools;
-use journ_core::arguments::Arguments;
 use journ_core::configuration::Configuration;
 use journ_core::date_and_time::JDateTime;
+use journ_core::reporting::command::arguments::Cmd;
 use journ_core::reporting::table::Cell;
 use journ_core::reporting::table::{Row, Table};
 use journ_core::unit::Unit;
@@ -62,7 +61,7 @@ impl<'h> CapitalGains<'h> {
     }*/
 
     pub fn write_table<W: fmt::Write>(&self, writer: &mut W) -> fmt::Result {
-        let cag = Arguments::get().cast_cmd::<CagCommand>().unwrap();
+        let cag = Cmd::cast::<CagCommand>();
         let mut aggregated_events = self.events.iter().map(AggregatedPoolEvent::from).collect();
         combine_events(&mut aggregated_events, &cag.group_by);
         let filtered_and_grouped_events =
@@ -202,7 +201,7 @@ impl<'h> CapitalGains<'h> {
 
 impl<'h> fmt::Display for CapitalGains<'h> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let cmd = Arguments::get().cast_cmd::<CagCommand>().unwrap();
+        let cmd = Cmd::cast::<CagCommand>();
         if cmd.output_yaml() {
             let mut emitter = YamlEmitter::new(f);
             emitter.dump(&Yaml::from(self)).map_err(|_| fmt::Error)
@@ -214,7 +213,7 @@ impl<'h> fmt::Display for CapitalGains<'h> {
 
 impl<'h> From<&CapitalGains<'h>> for Yaml {
     fn from(value: &CapitalGains<'h>) -> Self {
-        let cag = Arguments::get().cast_cmd::<CagCommand>().unwrap();
+        let cag = Cmd::cast::<CagCommand>();
         let mut map = Hash::new();
         let mut units = BTreeSet::new();
         //let mut events_yaml = vec![];
@@ -272,7 +271,7 @@ impl<'h> From<&CapitalGains<'h>> for Yaml {
 fn filtered_events<'h, 'e>(
     events: Vec<AggregatedPoolEvent<'h, 'e>>,
 ) -> Vec<AggregatedPoolEvent<'h, 'e>> {
-    let cmd = Arguments::get().cast_cmd::<CagCommand>().unwrap();
+    let cmd = Cmd::cast::<CagCommand>();
     let event_filter = cmd.event_filter();
 
     // Filter the events based on what the user has asked for
@@ -282,7 +281,7 @@ fn filtered_events<'h, 'e>(
 fn ordered_events<'h, 'e>(
     mut events: Vec<AggregatedPoolEvent<'h, 'e>>,
 ) -> Vec<AggregatedPoolEvent<'h, 'e>> {
-    let cmd = Arguments::get().cast_cmd::<CagCommand>().unwrap();
+    let cmd = Cmd::cast::<CagCommand>();
     for order_by in cmd.order_by.iter().rev() {
         match order_by {
             CapitalGainsOrderBy::EventDate => {

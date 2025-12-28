@@ -167,6 +167,7 @@ impl<'h> Pool<'h> {
         &mut self,
         mut group: DealGroup<'h>,
         event_datetime: JDateTimeRange<'h>,
+        from_pool: Option<&'h str>,
     ) -> JournResult<PoolEvent<'h>> {
         // Ensure that incoming deals can be valued in the pool's unit of account
         group.ensure_valued(self.unit_of_account)?;
@@ -183,7 +184,10 @@ impl<'h> Pool<'h> {
         let event = PoolEvent::new(
             self.name,
             event_datetime,
-            PoolEventKind::PooledDeal(DealHolding::Group(group)),
+            match from_pool {
+                Some(pool) => PoolEventKind::MovedDeal(DealHolding::Group(group), pool),
+                None => PoolEventKind::PooledDeal(DealHolding::Group(group)),
+            },
             bal_before,
             self.holdings
                 .get(deal_unit)

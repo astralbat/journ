@@ -6,48 +6,63 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::ExecCommand;
-use chrono::DateTime;
-use chrono_tz::Tz;
-use journ_core::arguments::{Arguments, Command};
 use journ_core::configuration::{AccountFilter, Filter};
+use journ_core::date_and_time::JDateTime;
 use journ_core::directive::{Directive, DirectiveKind};
 use journ_core::error::JournResult;
 use journ_core::journal::Journal;
 use journ_core::journal_entry::JournalEntry;
 use journ_core::journal_node::JournalNode;
-use std::ops::{Bound, RangeBounds};
+use journ_core::reporting::command::arguments::{Command, DateTimeFormatCommand};
+use journ_core::reporting::command::cmd_line::BeginAndEndCommand;
+use std::ops::RangeBounds;
 use std::path::Path;
 use std::process::exit;
 
 #[derive(Default, Debug)]
 pub struct PrintCommand {
-    accounts: Vec<String>,
-    print_file: Option<String>,
+    pub(super) datetime_fmt_cmd: DateTimeFormatCommand,
+    pub(super) begin_and_end_cmd: BeginAndEndCommand,
+    pub(super) accounts: Vec<String>,
+    pub(super) print_file: Option<String>,
 }
 
-impl Command for PrintCommand {}
+impl Command for PrintCommand {
+    fn datetime_fmt_cmd(&self) -> &DateTimeFormatCommand {
+        &self.datetime_fmt_cmd
+    }
 
-struct DatetimeEntryFilter<R: RangeBounds<DateTime<Tz>>> {
+    fn begin_and_end_cmd(&self) -> &BeginAndEndCommand {
+        &self.begin_and_end_cmd
+    }
+}
+
+struct DatetimeEntryFilter<R> {
     range: R,
 }
-impl<R: RangeBounds<DateTime<Tz>>> Filter<JournalEntry<'_>> for DatetimeEntryFilter<R> {
-    fn is_included(&self, entry: &JournalEntry<'_>) -> bool {
-        self.range.contains(&entry.date_and_time().datetime_from())
+impl<'a, R> Filter<JournalEntry<'a>> for DatetimeEntryFilter<R>
+where
+    R: RangeBounds<JDateTime<'a>>,
+{
+    fn is_included(&self, entry: &JournalEntry<'a>) -> bool {
+        self.range.contains(&entry.date_and_time().from())
     }
 }
 
 impl PrintCommand {
-    pub fn set_accounts(&mut self, accounts: Vec<String>) {
-        self.accounts = accounts;
-    }
-
-    fn create_dir_filter(&self, args: &Arguments) -> impl for<'h> Filter<Directive<'h>> {
-        struct DirFilter {
+    fn create_dir_filter<'a, R>(&self, datetime_range: R) -> impl Filter<Directive<'a>>
+    where
+        R: RangeBounds<JDateTime<'a>>,
+    {
+        struct DirFilter<R> {
             account_filter: AccountFilter,
-            datetime_filter: DatetimeEntryFilter<(Bound<DateTime<Tz>>, Bound<DateTime<Tz>>)>,
+            datetime_filter: DatetimeEntryFilter<R>,
         }
-        impl<'h> Filter<Directive<'h>> for DirFilter {
-            fn is_included(&self, item: &Directive<'h>) -> bool {
+        impl<'d, R> Filter<Directive<'d>> for DirFilter<R>
+        where
+            R: RangeBounds<JDateTime<'d>>,
+        {
+            fn is_included(&self, item: &Directive<'d>) -> bool {
                 if let DirectiveKind::Entry(je) = item.kind() {
                     self.datetime_filter.is_included(je)
                         && je.postings().any(|p| self.account_filter.is_included(p.account()))
@@ -59,18 +74,14 @@ impl PrintCommand {
 
         DirFilter {
             account_filter: AccountFilter::new(self.accounts.iter()),
-            datetime_filter: DatetimeEntryFilter { range: args.begin_end_range() },
+            datetime_filter: DatetimeEntryFilter { range: datetime_range },
         }
     }
 }
 
 impl ExecCommand for PrintCommand {
-    fn execute<'j, 'h: 'j>(
-        &self,
-        journ: &'j mut Journal<'j>,
-        args: &'h Arguments,
-    ) -> JournResult<()> {
-        let dir_filter = self.create_dir_filter(args);
+    fn execute<'j, 'h: 'j>(&self, journ: &'j mut Journal<'j>) -> JournResult<()> {
+        let dir_filter = self.create_dir_filter(self.begin_and_end_cmd.begin_end_range());
         match self.print_file.as_ref().map(|s| s.to_string()) {
             Some(pf) => match journ.find_node_by_filename(Path::new(&pf)) {
                 Some(jf) => jf.print(&dir_filter)?,

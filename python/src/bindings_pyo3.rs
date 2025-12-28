@@ -123,8 +123,9 @@ impl Journal {
     #[new]
     fn new(filename: &str) -> PyLedgerResult<Self> {
         //let allocator = HerdAllocator::new(&HERD);
-        let args =
-            journ_core::arguments::Arguments::set(journ_core::arguments::Arguments::default());
+        let args = journ_core::reporting::command::arguments::Arguments::set(
+            journ_core::reporting::command::arguments::Arguments::default(),
+        );
         let filename = &**ALLOCATOR.alloc(PathBuf::from(filename));
 
         if MODULES.lock().unwrap().is_empty() {

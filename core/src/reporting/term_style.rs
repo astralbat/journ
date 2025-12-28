@@ -5,7 +5,7 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
-use crate::arguments::Arguments;
+use crate::reporting::command::arguments::Cmd;
 use std::cell::RefCell;
 use std::fmt;
 use std::fmt::Write;
@@ -316,7 +316,7 @@ impl Style {
         CURR_STYLE.with(|curr_style| {
             let mut curr = curr_style.borrow_mut();
             if *curr != Some(*self) {
-                if Arguments::get().print_std_out_in_color() {
+                if Cmd::args().print_std_out_in_color() {
                     self.start(w)?;
                 }
                 *curr = Some(*self);
@@ -349,7 +349,7 @@ pub struct StyledItem<D> {
 
 impl<D: fmt::Display> fmt::Display for StyledItem<D> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        if Arguments::get().print_std_out_in_color() {
+        if Cmd::args().print_std_out_in_color() {
             self.style.start(f)?;
             write!(f, "{}", self.item)?;
             Style::reset(f)

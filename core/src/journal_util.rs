@@ -44,7 +44,7 @@ macro_rules! val {
 macro_rules! journ {
     ($text:expr) => {{
         match $crate::journal::Journal::parse(
-            &mut $crate::arguments::Arguments::default(),
+            &mut $crate::reporting::command::arguments::Arguments::default(),
             $crate::parsing::text_block::TextBlock::from($text),
             $crate::alloc::ThreadAllocator::new(&$crate::alloc::HERD),
         ) {
@@ -64,8 +64,7 @@ macro_rules! config {
             .get()
             .alloc($crate::alloc::HerdAllocator::new(&$crate::alloc::HERD));
         let node_id = allocator.alloc($crate::journal_node::NodeId::new_root());
-        let args = allocator.alloc($crate::arguments::Arguments::default());
-        $crate::configuration::Configuration::from_args(args, allocator, node_id)
+        $crate::configuration::Configuration::new(allocator, node_id)
     }};
     ($text:expr) => {{
         let journ = journ!($text);
