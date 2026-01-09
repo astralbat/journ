@@ -6,15 +6,15 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::amount::Amount;
-use crate::date_and_time::{DateFormat, JDateTime, TimeFormat};
+use crate::configuration::Configuration;
+use crate::datetime::JDateTime;
 use crate::parsing;
 use crate::unit::Unit;
-use chrono_tz::Tz;
-use std::{cmp, fmt};
+use std::{cmp, io};
 
 #[derive(Debug, Clone)]
 pub struct Price<'h> {
-    datetime: JDateTime<'h>,
+    datetime: JDateTime,
     base_unit: &'h Unit<'h>,
     price: Amount<'h>,
     /// Comma separated list of sources.
@@ -23,7 +23,7 @@ pub struct Price<'h> {
 
 impl<'h> Price<'h> {
     pub fn new(
-        datetime: JDateTime<'h>,
+        datetime: JDateTime,
         base_unit: &'h Unit<'h>,
         price: Amount<'h>,
         sources: Option<&'h str>,
@@ -31,20 +31,8 @@ impl<'h> Price<'h> {
         Price { datetime, base_unit, price, sources }
     }
 
-    pub fn datetime(&self) -> JDateTime<'h> {
+    pub fn datetime(&self) -> JDateTime {
         self.datetime
-    }
-
-    pub fn set_date_format(&mut self, date_format: &'h DateFormat<'h>) {
-        self.datetime = self.datetime.with_date_format(date_format);
-    }
-
-    pub fn set_time_format(&mut self, time_format: &'h TimeFormat<'h>) {
-        self.datetime = self.datetime.with_time_format(time_format);
-    }
-
-    pub fn set_timezone(&mut self, timezone: Tz) {
-        self.datetime = self.datetime.with_timezone(timezone);
     }
 
     pub fn base_unit(&self) -> &'h Unit<'h> {
@@ -94,14 +82,36 @@ impl<'h> Price<'h> {
             self.sources,
         )
     }
+
+    pub fn write<W: io::Write>(
+        &self,
+        writer: &mut W,
+        config: &Configuration<'h>,
+    ) -> io::Result<()> {
+        let dtf = config.datetime_format();
+        let tz = config.timezone();
+        write!(
+            writer,
+            "P {} \"{}\" {}",
+            self.datetime.with_timezone(tz).format(dtf),
+            self.base_unit.code(),
+            self.price.format_precise()
+        )?;
+        if let Some(sources) = self.sources {
+            write!(writer, " {}", sources)?;
+        }
+        Ok(())
+    }
 }
 
+/*
 impl fmt::Display for Price<'_> {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        //let dtf = Cmd::get().datetime_fmt_cmd().datetime_format_or_default();
         write!(
             f,
             "P {} \"{}\" {}",
-            self.datetime,
+            self.datetime.format(dtf),
             self.base_unit.code(),
             self.price.format_precise()
         )?;
@@ -110,7 +120,7 @@ impl fmt::Display for Price<'_> {
         }
         Ok(())
     }
-}
+}*/
 
 impl PartialEq for Price<'_> {
     fn eq(&self, other: &Self) -> bool {

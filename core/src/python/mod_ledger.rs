@@ -7,7 +7,7 @@
  */
 use crate::amount::Amount;
 use crate::configuration::Configuration;
-use crate::date_and_time::JDateTime;
+use crate::datetime::{DateTimePrecision, JDateTime};
 use crate::error::JournResult;
 use crate::ext::StrExt;
 use crate::price::Price;
@@ -128,7 +128,7 @@ fn price_db_lookup<'py>(
     bc: &str,
     qc: &str,
     dt: PyObject,
-    within_seconds: i64,
+    within_seconds: usize,
 ) -> PyResult<Option<Py<PyPrice>>> {
     let globals = mod_ledger
         .py()
@@ -144,7 +144,10 @@ fn price_db_lookup<'py>(
             let base_curr = Unit::new(bc.intern());
             let quote_curr = Unit::new(qc.intern());
             let found_price = price_db.get_closest(
-                Tz::UTC.timestamp_opt(datetime, 0).unwrap(),
+                JDateTime::new(
+                    Tz::UTC.timestamp_opt(datetime, 0).unwrap(),
+                    DateTimePrecision::Second,
+                ),
                 within_seconds,
                 &base_curr,
                 &quote_curr,
@@ -260,7 +263,7 @@ impl<'py> IntoPyObject<'py> for Price<'_> {
     }
 }
 
-impl<'py> IntoPyObject<'py> for JDateTime<'_> {
+impl<'py> IntoPyObject<'py> for JDateTime {
     type Target = PyDateTime;
     type Output = Bound<'py, Self::Target>;
     type Error = PyErr;
@@ -333,11 +336,7 @@ impl PyPrice {
             .get_unit(self.quote_unit())
             .unwrap_or_else(|| config.merge_unit(&Unit::new(self.quote_unit().clone()), allocator));
         let chrono_date: DateTimeWrapper = self.datetime;
-        let date = JDateTime::from_datetime(
-            chrono_date.0,
-            Some(config.date_format()),
-            Some(config.time_format()),
-        );
+        let date = JDateTime::new(chrono_date.0, DateTimePrecision::Second);
 
         /*
         let price_dict = PyDict::new(py);

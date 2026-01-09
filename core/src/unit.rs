@@ -23,7 +23,7 @@ use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use std::str::{self, FromStr};
 use std::sync::{Arc, LazyLock};
-use yaml_rust::Yaml;
+use yaml_rust2::Yaml;
 
 pub static DEFAULT_UNIT_FORMAT: LazyLock<UnitFormat> = LazyLock::new(UnitFormat::default);
 
@@ -355,7 +355,7 @@ impl<'h> fmt::Debug for Unit<'h> {
 impl From<&Unit<'_>> for Yaml {
     fn from(unit: &Unit<'_>) -> Self {
         // Unit code should not be needed as it would conventionally be the key for this map.
-        let mut hash = yaml_rust::yaml::Hash::new();
+        let mut hash = yaml_rust2::yaml::Hash::new();
         hash.insert(
             Yaml::String("name".to_string()),
             Yaml::String(unit.display_name().to_string()),
@@ -530,13 +530,11 @@ impl NumberFormat {
             digit_count += 1;
         }
 
-        // Write negative opening bracket if needed
-        if quantity.is_sign_negative()
-            && let Some(neg_style) = self.negative_style
-        {
-            match neg_style {
-                NegativeStyle::NegativeSign => writer.write_char('-')?,
-                NegativeStyle::Brackets => writer.write_char('(')?,
+        // Write negative opening style if needed
+        if quantity.is_sign_negative() {
+            match self.negative_style {
+                Some(NegativeStyle::NegativeSign) | None => writer.write_char('-')?,
+                Some(NegativeStyle::Brackets) => writer.write_char('(')?,
             }
         }
 
@@ -570,10 +568,15 @@ impl NumberFormat {
 
         // Write integer part with thousands separators
         let start_pos = pos;
+        let write_thousands_separator =
+            self.parts.iter().any(|p| matches!(p, NumberFormatPart::Separator(_)));
         for (i, &byte) in
             digit_buffer[start_pos..start_pos + num_integer_digits as usize].iter().enumerate()
         {
-            if i > 0 && (num_integer_digits - i as u32).is_multiple_of(3) {
+            if write_thousands_separator
+                && i > 0
+                && (num_integer_digits - i as u32).is_multiple_of(3)
+            {
                 writer.write_char(self.thousands_separator as char)?;
             }
             writer.write_char(byte as char)?;

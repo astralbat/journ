@@ -17,17 +17,17 @@ use crate::mod_cgt;
 use crate::module_init::MODULE_NAME;
 use crate::pool_event::PoolEvent;
 use crate::pool_manager::PoolManager;
-use crate::report::command::CagCommand;
+use crate::report::cag_command::CagCommand;
 use chrono::Utc;
 use journ_core::configuration::{Configuration, Filter};
-use journ_core::date_and_time::JDateTimeRange;
+use journ_core::datetime::JDateTimeRange;
 use journ_core::error::JournResult;
 use journ_core::error::{BlockContextError, JournError};
 use journ_core::journal::Journal;
 use journ_core::journal_entry::JournalEntry;
 use journ_core::journal_entry_flow::Flow;
 use journ_core::parsing::text_block::TextBlock;
-use journ_core::reporting::command::arguments::Cmd;
+use journ_core::report::command::arguments::{Cmd, Command};
 use journ_core::unit::Unit;
 use journ_core::valuer::ValueResult;
 use journ_core::{err, match_map, valuer};
@@ -63,7 +63,7 @@ impl<'h> CapitalGainsComputer {
         // Use the account filter to decide which currencies we're going to calculate on.
         let mut included_units: Vec<&'h Unit<'h>> = {
             let mut units = HashSet::new();
-            for entry in journal.entry_range(cmd.begin_and_end_cmd.begin_end_range()) {
+            for entry in journal.entry_range(cmd.begin_and_end_cmd().begin_end_range()) {
                 for pst in entry.postings() {
                     if cmd.account_filter().is_included(pst.account()) {
                         // Prefer the journal config for the unit over the posting's.
@@ -118,12 +118,12 @@ impl<'h> CapitalGainsComputer {
         pool_events.extend(queue.flush_all(&mut pool_manager)?);
 
         pool_events.extend(pool_manager.progress_deals(JDateTimeRange::new(
-            cmd.datetime_fmt_cmd.datetime_from_utc(&Utc::now().naive_utc()),
+            cmd.datetime_fmt_cmd().datetime_from_utc(&Utc::now().naive_utc()),
             None,
         ))?);
 
         // Now report on only those events in the full date range asked for.
-        let from_to_range = cmd.begin_and_end_cmd.begin_end_range();
+        let from_to_range = cmd.begin_and_end_cmd().begin_end_range();
         pool_events.retain(|e| from_to_range.contains(&e.deal_datetime().start()));
 
         let cg = CapitalGains::new(
@@ -147,7 +147,7 @@ impl<'h> CapitalGainsComputer {
     where
         'h: 'u,
     {
-        let cg_metadata = entry.cg_metadata()?;
+        let cg_metadata = entry.cg_metadata(unit_of_account)?;
 
         // Assume entries that are adjustments to have no deals.
         // This allows adjustments entries to manage Asset accounts as part of that reorganisation.
@@ -167,12 +167,12 @@ impl<'h> CapitalGainsComputer {
             .unwrap()
             .round_deal_values();
         valuer::exec_optimistic(&mut writeable_entry, round_values, |valued_entry| {
-            let mut deals = Self::scan_net_equity_flows(valued_entry, entry)?;
+            let mut deals = Self::scan_net_equity_flows(valued_entry, entry, unit_of_account)?;
 
             // Ensure included deals are valued in the uoa
             for deal in deals.iter_mut().filter(|d| unit_filter.is_included(d.unit())) {
-                if let Err(_e) = deal.ensure_valued(unit_of_account, round_values) {
-                    return ValueResult::ValuationNeeded(deal.unit(), unit_of_account);
+                if let Err(e) = deal.ensure_valued(unit_of_account, round_values) {
+                    return ValueResult::Err(e.into());
                 }
             }
 
@@ -189,25 +189,27 @@ impl<'h> CapitalGainsComputer {
                 );
             }
 
-            let implied_deals = deals.iter().filter(|d| !d.is_required());
-            let implied_deals_no_uoa = implied_deals.filter(|d| d.unit() != unit_of_account);
-            let expenses_division = EntryExpenses::scan_and_divide(
-                valued_entry,
-                unit_of_account,
-                implied_deals_no_uoa.clone().map(|d| d.valued_amount()),
-            )?;
+            if deals.iter().any(|d| unit_filter.is_included(d.unit())) {
+                let implied_deals = deals.iter().filter(|d| !d.is_required());
+                let implied_deals_no_uoa = implied_deals.filter(|d| d.unit() != unit_of_account);
+                let expenses_division = EntryExpenses::scan_and_divide(
+                    valued_entry,
+                    unit_of_account,
+                    implied_deals_no_uoa.clone().map(|d| d.valued_amount()),
+                )?;
 
-            for (i, deal) in deals
-                .iter_mut()
-                .filter(|d| !d.is_required())
-                .filter(|d| d.unit() != unit_of_account)
-                .enumerate()
-                .filter(|(_, d)| unit_filter.is_included(d.unit()))
-            {
-                let mut expenses = expenses_division.get_expenses(i);
-                expenses = expenses.without_unit(deal.unit());
+                for (i, deal) in deals
+                    .iter_mut()
+                    .filter(|d| !d.is_required())
+                    .filter(|d| d.unit() != unit_of_account)
+                    .enumerate()
+                    .filter(|(_, d)| unit_filter.is_included(d.unit()))
+                {
+                    let mut expenses = expenses_division.get_expenses(i);
+                    expenses = expenses.without_unit(deal.unit());
 
-                deal.add_expenses(expenses);
+                    deal.add_expenses(expenses);
+                }
             }
             ValueResult::Ok(
                 deals
@@ -229,11 +231,12 @@ impl<'h> CapitalGainsComputer {
     fn scan_net_equity_flows<'a, 'u>(
         valued_entry: &'a JournalEntry<'h>,
         existing_entry: &'h JournalEntry<'h>,
+        unit_of_account: &'h Unit<'h>,
     ) -> JournResult<SmallVec<[Deal<'h>; 4]>> {
         let mut deals = smallvec![];
 
         let cg_flows = CgFlows::new(valued_entry.flows());
-        let cg_metadata = existing_entry.cg_metadata()?;
+        let cg_metadata = existing_entry.cg_metadata(unit_of_account)?;
 
         // All the units we're dealing with
         #[allow(clippy::mutable_key_type)]
@@ -256,7 +259,7 @@ impl<'h> CapitalGainsComputer {
 
             // Add implicit deals
             let unit_flows = cg_flows.by_unit(unit);
-            deals.append(&mut unit_flows.create_deals(existing_entry)?);
+            deals.append(&mut unit_flows.create_deals(existing_entry, unit_of_account)?);
         }
 
         Ok(deals)
@@ -432,7 +435,7 @@ impl<'h> DealingEventQueue<'h> {
 
     fn push_back_deal(&mut self, deal: Deal<'h>) {
         let cmd = Cmd::cast::<CagCommand>();
-        let criteria = if cmd.group_deals_by_date {
+        let criteria = if cmd.group_deals_by_date() {
             DealGroupCriteria::same_day_same_sign(&deal)
         } else {
             DealGroupCriteria::Single

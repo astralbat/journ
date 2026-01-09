@@ -213,7 +213,7 @@ impl<'h> OwnedOrMutConfigParseHelper<'h> for &mut Configuration<'h> {
 /// no parser matches.
 #[macro_export]
 macro_rules! match_parser {
-    ($input:expr, $($parser:expr => $handler:expr),+) => {{
+    ($input:expr, $($parser:expr $(, if $cond:expr)? => $handler:expr),+) => {{
         use nom::Err as NomErr;
         use $crate::error::parsing::IParseError;
 
@@ -236,7 +236,10 @@ macro_rules! match_parser {
                     Err(NomErr::Incomplete(_)) => break 'handler_match Err(NomErr::Failure(orig_input.into_err("Incomplete input"))),
                 }
             )+
-            Err(NomErr::Error(orig_input.into_err("No parser matched expression")))
+            // Special "None" message meaning no parsers matched. We check for this below
+            // when looping.
+            use $crate::err;
+            Err(NomErr::Error(err!("None")))
         };
         match handler_match_res {
             Err(e) => Err(e),
@@ -247,9 +250,11 @@ macro_rules! match_parser {
 
 /// Repeatedly matches a parser and applies an associated handler.
 /// This will only produce an error when a parser returns a `Failure` or if an handler fails.
+///
+/// If no parsers match the expressions, then `Ok(I, I)` is returned with the remaining input.
 #[macro_export]
 macro_rules! match_parsers {
-    ($input:expr, $($parser:expr => $handler:expr),+) => {{
+    ($input:expr, $($parser:expr $(, if $cond:expr)? => $handler:expr),+) => {{
         use $crate::match_parser;
 
         let mut inp = $input;
@@ -258,10 +263,13 @@ macro_rules! match_parsers {
                 break Ok((inp.clone(), inp));
             }
 
-            match match_parser!(inp.clone(), $($parser => $handler),+) {
+            match match_parser!(inp.clone(), $($parser $(, if $cond)? => $handler),+) {
                 Ok((rem, _handler_res)) => {
                     inp = rem;
+                    continue;
                 }
+                // Special "None" message meaning no parsers matched. We return from the loop.
+                Err(NomErr::Error(e)) if e == "None" => break Ok((inp.clone(), inp)),
                 Err(e) => break Err(e),
             }
         }

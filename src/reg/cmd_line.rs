@@ -8,9 +8,9 @@
 use crate::reg::reg_command::RegCommand;
 use journ_core::error::JournResult;
 use journ_core::journal::Journal;
-use journ_core::reporting::command::IntoExecCommand;
-use journ_core::reporting::command::arguments::{Arguments, DateTimeFormatCommand};
-use journ_core::reporting::command::cmd_line::BeginAndEndArguments;
+use journ_core::report::command::IntoExecCommand;
+use journ_core::report::command::arguments::{Arguments, DateTimeFormatCommand};
+use journ_core::report::command::cmd_line::BeginAndEndArguments;
 
 #[derive(clap::Args, Debug)]
 #[command(name = "reg", about = "Register of accounts")]

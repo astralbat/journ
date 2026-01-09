@@ -7,12 +7,11 @@
  */
 use crate::parsing::text_block::TextBlock;
 use crate::parsing::util::interim_space;
-use crate::reporting::command::arguments::Cmd;
-use crate::reporting::table::Table;
-use crate::reporting::table::row::Row;
-use crate::reporting::table::{Alignment, Cell};
-use crate::reporting::term_style::{Colour, Style};
-use std::any::Any;
+use crate::report::command::arguments::Cmd;
+use crate::report::table::Table;
+use crate::report::table::row::Row;
+use crate::report::table::{Alignment, Cell};
+use crate::report::term_style::{Colour, Style};
 use std::error::Error;
 use std::ops::Range;
 use std::{fmt, mem};
@@ -40,6 +39,13 @@ impl JournError {
         }
     }
 
+    pub fn downcast_msg<T: Error + 'static>(&self) -> Option<&T> {
+        match self.msg.downcast_ref::<Box<T>>() {
+            Some(s) => Some(s.as_ref()),
+            None => None,
+        }
+    }
+
     pub fn msg_mut<T: Error + Send + Sync + 'static>(&mut self) -> Option<&mut T> {
         //Some(self.msg.downcast_mut::<Box<T>>()?.deref_mut())
         self.msg.downcast_mut::<T>()
@@ -47,14 +53,6 @@ impl JournError {
 
     pub fn with_source<S: Into<Box<dyn Error + Send + Sync + 'static>>>(self, source: S) -> Self {
         Self { msg: self.msg, source: Some(source.into()) }
-    }
-
-    /// Gets the error message as a &'static str if it is one.
-    pub fn as_message(&self) -> Option<&'static str> {
-        match (&self.msg as &dyn Any).downcast_ref::<&'static str>() {
-            Some(s) => Some(s),
-            None => None,
-        }
     }
 
     /// If the message is a list of errors, flatten it.
@@ -213,6 +211,15 @@ impl fmt::Display for JournError {
             }
         }
         Ok(())
+    }
+}
+
+impl<'a> PartialEq<&'a str> for JournError {
+    fn eq(&self, other: &&'a str) -> bool {
+        use std::fmt::Write;
+        let mut buf = String::new();
+        write!(buf, "{}", self.msg).unwrap();
+        buf.trim() == *other
     }
 }
 

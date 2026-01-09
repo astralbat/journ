@@ -11,13 +11,13 @@ use crate::error::{BlockContext, BlockContextError, JournError, JournResult};
 use crate::journal_obj::JournalObj;
 use crate::parsing::input::{BlockInput, ConfigInput, LocatedInput, TextBlockInput, TextInput};
 use crate::parsing::text_block::{TextBlock, block, block_remainder1};
-use crate::parsing::util::{blank_lines0, spaced_word};
+use crate::parsing::util::{blank_lines0, double_space, spaced_word};
 use crate::parsing::{IParseResult, entry};
 use crate::{err, impl_journal_obj_common, parse_block};
 use nom::bytes::complete::tag;
 use nom::character::complete::{space0, space1};
 use nom::combinator::{map, opt, recognize};
-use nom::sequence::{preceded, tuple};
+use nom::sequence::{pair, preceded, tuple};
 use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -153,6 +153,9 @@ impl<'h> Metadata<'h> {
         self.inner().key()
     }
 
+    /// Gets the metadata value.
+    ///
+    /// The returned string is not trimmed.
     pub fn value(&self) -> Option<&str> {
         self.inner().value()
     }
@@ -204,7 +207,7 @@ impl<'h> Metadata<'h> {
     fn value_parser<I: TextInput<'h> + BlockInput<'h>>(
         input: I,
     ) -> IParseResult<'h, I, Option<Cow<'h, str>>> {
-        opt(map(block_remainder1, |r: I| Cow::Borrowed(r.text())))(input)
+        opt(preceded(double_space, map(block_remainder1, |r: I| Cow::Borrowed(r.text()))))(input)
     }
     fn value_as_nested_metadata_parser<
         I: TextInput<'h> + LocatedInput<'h> + ConfigInput<'h> + BlockInput<'h>,

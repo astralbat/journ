@@ -7,7 +7,8 @@
  */
 use crate::account::Account;
 use crate::amount::AmountExpr;
-use crate::date_and_time::{DateAndTime, JDate, JDateTime, JDateTimeRange, JTime};
+use crate::datetime::DateAndTime;
+use crate::datetime::{JDate, JDateTime, JDateTimeRange, JTime};
 use crate::error::parsing::{IErrorMsg, IParseError, tag_err};
 use crate::journal_entry::{EntryObject, JournalEntry};
 use crate::match_blocks;
@@ -31,7 +32,7 @@ use nom::sequence::{pair, preceded, tuple};
 use nom::{Err as NomErr, Finish};
 use std::sync::Arc;
 
-pub fn date<'h, I>(input: I) -> IParseResult<'h, I, JDate<'h>>
+pub fn date<'h, I>(input: I) -> IParseResult<'h, I, JDate>
 where
     I: TextInput<'h> + ConfigInput<'h>,
 {
@@ -39,7 +40,7 @@ where
     JDate::parse(df)(input)
 }
 
-pub fn time<'h, I>(input: I) -> IParseResult<'h, I, JTime<'h>>
+pub fn time<'h, I>(input: I) -> IParseResult<'h, I, JTime>
 where
     I: TextInput<'h> + ConfigInput<'h>,
 {
@@ -47,23 +48,21 @@ where
     JTime::parse(tf)(input)
 }
 
-/// Parser that reads the `date` and `time` separated by a single space.
-pub fn datetime<'h, I>(tz: Tz) -> impl Fn(I) -> IParseResult<'h, I, JDateTime<'h>>
+/// Parser that reads the `date` and `time` in the configured DateTime format.
+pub fn datetime<'h, I>(tz: Tz) -> impl Fn(I) -> IParseResult<'h, I, JDateTime>
 where
     I: TextInput<'h> + ConfigInput<'h>,
 {
     move |input: I| {
-        let df = input.config().date_format();
-        let tf = input.config().time_format();
-        JDateTime::parse(df, tf, tz)(input)
+        let dtf = input.config().datetime_format();
+        JDateTime::parse(dtf, tz)(input)
     }
 }
 
-pub fn date_and_time<'h, I>(input: I) -> IParseResult<'h, I, DateAndTime<'h>>
+pub fn date_and_time<'h, I>(input: I) -> IParseResult<'h, I, DateAndTime>
 where
     I: TextInput<'h> + ConfigInput<'h>,
 {
-    let df = input.config().date_format();
     let tz = input.config().timezone();
 
     // Date from is required
@@ -78,12 +77,9 @@ where
                 alt((
                     map(&mut datetime(tz), |dt| JDateTimeRange::new(datetime_from, Some(dt))),
                     map_res(time, |time_to| {
-                        JDateTime::from_date_time(
-                            JDate::new(datetime_from.naive_local().date(), df),
-                            Some(time_to),
-                            tz,
-                        )
-                        .map(|jdt| JDateTimeRange::new(datetime_from, Some(jdt)))
+                        datetime_from
+                            .with_time(time_to)
+                            .map(|jdt| JDateTimeRange::new(datetime_from, Some(jdt)))
                     }),
                 )),
             )(input)?;
@@ -244,7 +240,7 @@ pub(crate) fn metadata<'h, I: TextInput<'h> + BlockInput<'h> + ConfigInput<'h>>(
     Ok((input, md))
 }
 
-pub fn entry_date_and_remainder<'h, I>(input: I) -> IParseResult<'h, I, (DateAndTime<'h>, I)>
+pub fn entry_date_and_remainder<'h, I>(input: I) -> IParseResult<'h, I, (DateAndTime, I)>
 where
     I: TextInput<'h> + ConfigInput<'h>,
 {
@@ -256,7 +252,7 @@ pub static E_ENTRY_EXPECTED: &str = "Entry expected";
 
 pub fn entry<'h, 's, 'e, 'p, I>(
     input: I,
-    date_and_time: DateAndTime<'h>,
+    date_and_time: DateAndTime,
 ) -> JParseResult<I, JournalEntry<'h>>
 where
     'h: 'e,

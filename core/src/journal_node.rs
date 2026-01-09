@@ -44,13 +44,13 @@ impl<'h, 'a, 'b> DirectiveTreeIter<'h, 'a, 'b> {
 }
 
 impl<'h, 'a, 'b> Iterator for DirectiveTreeIter<'h, 'a, 'b> {
-    type Item = &'b Directive<'h>;
+    type Item = (&'b JournalNodeSegment<'h>, &'b Directive<'h>);
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             if let Some(dir) = self.inner.get(self.position) {
                 self.position += 1;
-                return Some(dir);
+                return Some((self.current_segment.as_ref().unwrap(), dir));
             }
             let current_segment = self.current_segment.and_then(|seg| seg.next_segment());
             match current_segment {
@@ -538,9 +538,9 @@ impl<'h> JournalNode<'h> {
         writer: &mut W,
         directive_filter: &F,
     ) -> JournResult<()> {
-        for (i, seg) in self.segments().iter().enumerate() {
+        for (i, seg) in self.segments().into_iter().enumerate() {
             self.write_from_dir_iter(
-                Box::new(seg.directives().iter()),
+                Box::new(seg.directives().iter().map(|dir| (*seg, dir))),
                 writer,
                 directive_filter,
                 if i == 0 { "" } else { "\n" },
@@ -559,16 +559,16 @@ impl<'h> JournalNode<'h> {
 
     fn write_from_dir_iter<'a, W: Write, F: Filter<Directive<'h>>>(
         &self,
-        dir_iter: Box<dyn Iterator<Item = &'a Directive<'h>> + 'a>,
+        dir_iter: Box<dyn Iterator<Item = (&'a JournalNodeSegment<'h>, &'a Directive<'h>)> + 'a>,
         writer: &mut W,
         directive_filter: &F,
         initial_leading_space: &str,
     ) -> JournResult<()> {
         let map_err = |e| err!(e; "IO Error");
-        let dir_iter: Box<dyn Iterator<Item = &'a Directive>> =
-            Box::new(dir_iter.filter(|d| directive_filter.is_included(d)));
+        let dir_iter: Box<dyn Iterator<Item = (&'a JournalNodeSegment, &'a Directive)>> =
+            Box::new(dir_iter.filter(|(_, d)| directive_filter.is_included(d)));
         let mut last_leading_space = initial_leading_space;
-        for (i, dir) in dir_iter.enumerate() {
+        for (i, (seg, dir)) in dir_iter.enumerate() {
             // For the second directive onwards, the minimal leading space is a newline.
             if i > 0 && last_leading_space.is_empty() {
                 last_leading_space = "\n";
@@ -592,7 +592,10 @@ impl<'h> JournalNode<'h> {
                             write!(writer, "{last_leading_space}{entry}").map_err(map_err)?;
                         }
                         DirectiveKind::Price(price) => {
-                            write!(writer, "{last_leading_space}{price}").map_err(map_err)?;
+                            write!(writer, "{last_leading_space}").map_err(map_err)?;
+                            // We write the price with the segment's config which applies
+                            // to all prices in the segment.
+                            price.write(writer, seg.config()).map_err(map_err)?;
                         }
                         _ => panic!(
                             "The only objects that can be written are entries and prices; write parsed text for other directives"

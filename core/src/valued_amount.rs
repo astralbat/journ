@@ -9,9 +9,9 @@ use crate::alloc::HerdAllocator;
 use crate::amount::{Amount, AmountExpr, Quantity};
 use crate::err;
 use crate::money_util::MoneyPot;
-use crate::reporting::table;
-use crate::reporting::table::{Cell, WrapPolicy};
-use crate::reporting::term_style::Colour;
+use crate::report::table::{Cell, WrapPolicy};
+use crate::report::term_style::Colour;
+use crate::report::{table, table2};
 use crate::unit::Unit;
 use crate::valued_amount::ValuationInner::*;
 use crate::valuer::{Valuation, ValuationError, ValuationResult, Valuer};
@@ -21,11 +21,11 @@ use smallvec::{SmallVec, smallvec};
 use std::iter::Sum;
 use std::ops::{Add, Div, Mul, Neg, Sub};
 use std::{fmt, iter};
-use yaml_rust::Yaml;
-use yaml_rust::yaml::Hash;
+use yaml_rust2::Yaml;
+use yaml_rust2::yaml::Hash;
 
 /// A holder for the total value and whether it was originally elided when this posting was parsed.
-#[derive(Clone)]
+#[derive(Clone, Hash)]
 pub struct PostingValuation<'h> {
     // This inner keeps the enums private
     inner: ValuationInner<'h>,
@@ -119,7 +119,7 @@ impl<'h> PostingValuation<'h> {
         }
     }
 }
-#[derive(Clone)]
+#[derive(Clone, Hash)]
 enum ValuationInner<'h> {
     Unit(AmountExpr<'h>),
     /// `Total(amount, elided)`
@@ -177,7 +177,7 @@ impl<'h> From<&PostingValuation<'h>> for Yaml {
 }
 
 /// An amount with optional valuations.
-#[derive(Clone)]
+#[derive(Clone, Hash)]
 pub struct ValuedAmount<'h> {
     // First amount stored separately to avoid Vec allocation in common case
     // where only one amount is parsed.
@@ -543,6 +543,26 @@ impl<'h> ValuedAmount<'h> {
         }
     }
 
+    /// Changes the order of a single valuation in `unit`. The `index` specifies where
+    /// it is moved to, where `0` is the first valuation.
+    ///
+    /// # Panics
+    /// if `index` is out of bounds.
+    pub fn order_valuation(&mut self, unit: &'h Unit<'h>, index: usize) -> bool {
+        if self.is_nil() {
+            return false;
+        }
+        let swap_pos = match self.posting_valuations().position(|val| val.unit() == unit) {
+            Some(pos) if pos == index => return true,
+            Some(pos) => pos,
+            None => return false,
+        };
+
+        let mut_vals = self.valuations.as_mut().unwrap();
+        mut_vals.swap(index, swap_pos);
+        true
+    }
+
     /// Gets the `ValuedAmount` that is the same as this one, but without the amount or valuation in the specified `unit`.
     /// If this `ValuedAmount` doesn't contain the `unit`, then it is returned unchanged.
     ///
@@ -744,6 +764,22 @@ impl<'h> ValuedAmount<'h> {
             valuation.write(w, include_elided)?;
         }
         Ok(())
+    }
+
+    pub fn as_cell(&self) -> Box<dyn table2::Cell> {
+        let mut cell = self.amount().into_cell(self.amount().unit().format());
+        for val in self.posting_valuations() {
+            let symbol = if val.is_total() { "@@" } else { "@" };
+
+            let val_cell = table2::BinaryCell::new(
+                Box::new(symbol),
+                val.value().into_cell(val.value().unit().format()),
+            );
+            cell = Box::new(table2::BinaryCell::new(cell, Box::new(val_cell)));
+        }
+        cell
+
+        //table2::BinaryCell::new(left, right);
     }
 
     /// Similar to `+`, where common units are added where:

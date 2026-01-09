@@ -14,16 +14,16 @@ use journ_core::journal::Journal;
 use journ_core::journal_entry::JournalEntry;
 use journ_core::journal_node::JournalNode;
 use journ_core::posting::Posting;
-use journ_core::reporting::command::arguments::{Cmd, Command, DateTimeFormatCommand};
-use journ_core::reporting::command::cmd_line::BeginAndEndCommand;
-use journ_core::reporting::expr::parser::parse_plan;
-use journ_core::reporting::expr::{
+use journ_core::report::command::arguments::{Cmd, Command, DateTimeFormatCommand};
+use journ_core::report::command::chained_result::ChainingResult;
+use journ_core::report::command::cmd_line::BeginAndEndCommand;
+use journ_core::report::expr::parser::parse_plan;
+use journ_core::report::expr::{
     ColumnValue, GroupKey, GroupState, LateContext, PostingContext, TotalContext,
 };
-use journ_core::reporting::table2::{CellRef, StyledCell};
-use journ_core::reporting::term_style::{Style, Weight};
+use journ_core::report::table2::{CellRef, StyledCell};
+use journ_core::report::term_style::{Style, Weight};
 use journ_core::unit::Unit;
-use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
 
 #[derive(Default, Debug)]
@@ -149,46 +149,34 @@ impl Command for BalCommand {
 }
 
 impl ExecCommand for BalCommand {
-    fn execute<'j, 'h: 'j>(&'h self, journ: &'j mut Journal<'j>) -> JournResult<()> {
+    fn execute<'h>(
+        &'h self,
+        journ: &'h mut Journal<'h>,
+        _chained: Option<ChainingResult>,
+    ) -> JournResult<()> {
         let config = journ.config();
-        let plan = parse_plan(self.column_spec(), Some(self.group_by()))?;
+        let plan =
+            parse_plan(self.column_spec(), Some(self.group_by()), HashMap::new(), None, true)?;
 
-        let mut table = journ_core::reporting::table2::Table::default();
+        let mut table = journ_core::report::table2::Table::default();
         table.set_color(table.color() && !Cmd::args().no_color);
         // Heading Row
         if !self.no_header {
             let heading_style = Style::default().with_weight(Weight::Bold);
             let headings = plan
-                .column_spec()
+                .column_expressions()
                 .iter()
                 .map(|col| StyledCell::new(col.to_string(), heading_style))
                 .collect::<Vec<_>>();
             table.set_heading_row(headings);
         }
 
-        // Aggregate postings into groups
-        let mut groups: HashMap<GroupKey, GroupState> = HashMap::new();
         let mut total_group = GroupState::new(&plan)?;
-        for (entry, pst) in self.filtered_postings(journ)() {
-            let mut context = PostingContext::new(journ, entry, pst);
-
-            let key = GroupKey::new(
-                plan.group_by()
-                    .iter()
-                    .map(|e| {
-                        e.eval(&mut context)
-                            .map_err(|e| err!(e; "Unable to create key from posting context"))
-                            .map(|v| (e.clone(), v))
-                    })
-                    .collect::<JournResult<Vec<_>>>()?,
-            );
-            let group = match groups.entry(key) {
-                Entry::Occupied(e) => e.into_mut(),
-                Entry::Vacant(e) => e.insert(GroupState::new(&plan)?),
-            };
-            group.add(&mut context)?;
-            total_group.add(&mut context)?;
-        }
+        let groups = plan.execute_to_groups(
+            self.filtered_postings(journ)(),
+            |(entry, pst)| PostingContext::new(journ, entry, pst),
+            Some(&mut total_group),
+        )?;
 
         // Finalize groups and add to table
         let partitions = FilterPartitions::new(self, groups)?;
@@ -201,7 +189,7 @@ impl ExecCommand for BalCommand {
                 let mut context = LateContext::new(journ, key.clone(), group.finalize());
                 let mut row: Vec<CellRef> = vec![];
                 let mut found_non_zero = false;
-                for col in plan.column_spec().iter() {
+                for col in plan.column_expressions().iter() {
                     // Get the value from the group key if possible, otherwise evaluate the expression
                     let value = key
                         .get(col)
@@ -222,7 +210,7 @@ impl ExecCommand for BalCommand {
                 if found_non_zero || self.show_zeros {
                     // Section divider
                     if partition_count > 0 && partition_rows == 0 {
-                        table.push_separator_row('-', plan.column_spec().len());
+                        table.push_separator_row('-', plan.column_expressions().len());
                     }
                     table.push_row(row);
                     partition_rows += 1;
@@ -233,12 +221,12 @@ impl ExecCommand for BalCommand {
             if !self.no_total && partition_rows > 1 {
                 let mut context = TotalContext::new(journ, partition_total.finalize());
                 let mut total_row: Vec<CellRef> = vec![];
-                for col in plan.column_spec().iter() {
+                for col in plan.column_expressions().iter() {
                     let value = col.eval(&mut context).unwrap_or(ColumnValue::StringRef(""));
 
                     total_row.push(value.into_cell_ref(self.show_zeros));
                 }
-                table.push_separator_row('-', plan.column_spec().len());
+                table.push_separator_row('-', plan.column_expressions().len());
                 table.push_row(total_row);
             }
             if partition_rows > 0 {
@@ -248,16 +236,16 @@ impl ExecCommand for BalCommand {
 
         // Total row
         if !self.no_total && partition_count > 1 {
-            table.push_separator_row('=', plan.column_spec().len());
+            table.push_separator_row('=', plan.column_expressions().len());
             let mut context = TotalContext::new(journ, total_group.finalize());
             let mut total_row: Vec<CellRef> = vec![];
-            for col in plan.column_spec().iter() {
+            for col in plan.column_expressions().iter() {
                 let value = col.eval(&mut context).unwrap_or(ColumnValue::StringRef(""));
 
                 total_row.push(value.into_cell_ref(self.show_zeros));
             }
             table.push_row(total_row);
-            table.push_separator_row('=', plan.column_spec().len());
+            table.push_separator_row('=', plan.column_expressions().len());
         }
 
         // Print the table

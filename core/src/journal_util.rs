@@ -44,7 +44,7 @@ macro_rules! val {
 macro_rules! journ {
     ($text:expr) => {{
         match $crate::journal::Journal::parse(
-            &mut $crate::reporting::command::arguments::Arguments::default(),
+            &mut $crate::report::command::arguments::Arguments::default(),
             $crate::parsing::text_block::TextBlock::from($text),
             $crate::alloc::ThreadAllocator::new(&$crate::alloc::HERD),
         ) {

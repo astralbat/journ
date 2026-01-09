@@ -28,14 +28,14 @@ use crate::reg::cmd_line::RegArguments;
 use env_logger::fmt::style::{AnsiColor, Color, RgbColor, Style};
 use env_logger::{Builder, Env};
 use journ_core::alloc::HerdAllocator;
-use journ_core::date_and_time::{DateFormat, TimeFormat};
+use journ_core::datetime::{DateFormat, DateTimeFormat, TimeFormat};
 use journ_core::error::JournResult;
 use journ_core::journal::Journal;
 use journ_core::module::{MODULES, Module};
 use journ_core::parsing::text_block::TextBlock;
 use journ_core::python::environment::PythonEnvironment;
-use journ_core::reporting::command::arguments::{Arguments, Cmd, DateTimeFormatCommand};
-use journ_core::reporting::command::{ExecCommand, IntoExecCommand, print_jerror};
+use journ_core::report::command::arguments::{Arguments, Cmd, DateTimeFormatCommand};
+use journ_core::report::command::{ExecCommand, IntoExecCommand, print_jerror};
 use journ_core::{err, parsing};
 use num_format::{SystemLocale, ToFormattedString};
 use std::env;
@@ -81,16 +81,38 @@ pub struct DateTimeFormatArguments {
     #[arg(
         long = "date-format",
         value_name = "DATE_FORMAT",
-        help = "The reporting date format to use"
+        help = "The report date format to use",
+        long_help = "The date format serves two uses: first it is used as the default for parsing \
+        journal entries unless overridden by the 'dateformat' directive. \
+        Second: it is used when displaying dates in the report. If left unspecified, the default \
+        report behaviour is to use the date format from the journal entry."
     )]
-    date_format: Option<&'static DateFormat<'static>>,
+    date_format: Option<DateFormat>,
     #[arg(
         long = "time-format",
         value_name = "TIME_FORMAT",
-        help = "The reporting time format to use"
+        help = "The report time format to use",
+        long_help = "The time format serves two uses: first it is used as the default for parsing \
+        journal entries unless overridden by the 'timeformat' directive. \
+        Second: it is used when displaying times in the report. If left unspecified, the default \
+        report behaviour is to use the time format from the journal entry."
     )]
-    time_format: Option<&'static TimeFormat<'static>>,
-    #[arg(long = "timezone", value_name = "TIMEZONE", help = "The reporting timezone to use")]
+    time_format: Option<TimeFormat>,
+    #[arg(
+        long = "datetime-format",
+        value_name = "DATETIME_FORMAT",
+        help = "The report datetime format to use"
+    )]
+    datetime_format: Option<&'static DateTimeFormat<'static>>,
+    #[arg(
+        long = "timezone",
+        value_name = "TIMEZONE",
+        help = "The report timezone to use",
+        long_help = "The timezone serves two uses: first it is used as the default for parsing \
+        journal entries unless overridden by the 'timezone' directive. \
+        Second: it is used when displaying datetimes in the report. If left unspecified, the default \
+        report behaviour is to use the timezone from the journal entry."
+    )]
     timezone: Option<Tz>,
 }
 
@@ -107,13 +129,13 @@ impl CommandArguments {
     pub fn exec<'j, 'h: 'j>(self, journ: &'j mut Journal<'j>, args: &Arguments) -> JournResult<()> {
         match self {
             CommandArguments::Print(print_args) => {
-                Cmd::set(Box::new(print_args.into_exec_cmd(journ, args)?)).execute(journ)
+                Cmd::set(Box::new(print_args.into_exec_cmd(journ, args)?)).execute(journ, None)
             }
             CommandArguments::Bal(bal_args) => {
-                Cmd::set(Box::new(bal_args.into_exec_cmd(journ, args)?)).execute(journ)
+                Cmd::set(Box::new(bal_args.into_exec_cmd(journ, args)?)).execute(journ, None)
             }
             CommandArguments::Reg(reg_args) => {
-                Cmd::set(Box::new(reg_args.into_exec_cmd(journ, args)?)).execute(journ)
+                Cmd::set(Box::new(reg_args.into_exec_cmd(journ, args)?)).execute(journ, None)
             }
             CommandArguments::Module(module_args) => {
                 match MODULES
@@ -125,8 +147,8 @@ impl CommandArguments {
                 {
                     Some(command) => {
                         let cmd: &dyn ExecCommand =
-                            Cmd::set(command.create(journ, args, &module_args[1..])?);
-                        cmd.execute(journ)
+                            Cmd::set(command.create(journ, args, &module_args)?);
+                        cmd.execute(journ, None)
                     }
                     None => Err(err!("Unknown command: '{}'", module_args[0])),
                 }
@@ -174,8 +196,9 @@ fn main() {
     let main_args = MainArguments::parse();
     let args = Arguments {
         datetime_cmd: DateTimeFormatCommand::new(
-            main_args.datetime_args.date_format,
-            main_args.datetime_args.time_format,
+            main_args.datetime_args.date_format.map(DateFormat::into_inner),
+            main_args.datetime_args.time_format.map(TimeFormat::into_inner),
+            main_args.datetime_args.datetime_format,
             main_args.datetime_args.timezone,
         ),
         aux_date: main_args.aux_date,

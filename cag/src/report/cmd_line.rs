@@ -5,26 +5,25 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
-use crate::cgt_configuration::{
-    CapitalGainsColumn, CapitalGainsGroupBy, CapitalGainsOrderBy, EventPattern,
-};
-use crate::report::command::CagCommand;
+use crate::cgt_configuration::EventPattern;
+use crate::report::cag_command::CagCommand;
 use clap::Parser;
 use journ_core::error::JournResult;
 use journ_core::journal::Journal;
-use journ_core::reporting::command::IntoExecCommand;
-use journ_core::reporting::command::arguments::{Arguments, DateTimeFormatCommand};
-use journ_core::reporting::command::cmd_line::BeginAndEndArguments;
+use journ_core::report::command::IntoExecCommand;
+use journ_core::report::command::arguments::{Arguments, DateTimeFormatCommand};
+use journ_core::report::command::cmd_line::BeginAndEndArguments;
 
 #[derive(Parser, Debug)]
-#[command(name = "cag", about = "Capital gains reporting")]
+#[command(name = "cag", about = "Capital gains report")]
 pub struct CagArguments {
     #[command(flatten)]
     begin_and_end: BeginAndEndArguments,
     #[arg(value_name = "UNIT", value_delimiter = ',', help = "Specify which units to report on")]
     unit_filter: Vec<String>,
+    #[arg(short = 'a', long = "accounts", value_delimiter = ',')]
+    account_filter: Vec<String>,
     #[arg(
-        short = 'e',
         long = "events",
         number_of_values = 1,
         value_delimiter = ',',
@@ -50,47 +49,42 @@ pub struct CagArguments {
         help = "Aggregate journal entry deals that occur on the same day before further processing. This is useful when you have multiple deals on the same day and you want to see the totals for the day."
     )]
     group_deals_by_date: bool,
-    #[arg(
-        long = "group-by",
-        value_name = "GROUP_BY",
-        value_delimiter = ',',
-        help = "Group events together. Valid values are: event-date, deal-date, pool, event, disposal"
-    )]
-    group_by: Vec<CapitalGainsGroupBy>,
+    #[arg(long = "group-by", value_name = "GROUP_BY", help = "Group events together")]
+    group_by: Option<String>,
     #[arg(
         long = "order-by",
-        value_name = "COLUMNS",
         value_delimiter = ',',
+        value_name = "ORDER_BY",
         help = "Order the output by the specified column(s). Valid values are: event-date, deal-date, unit, actual-cost, total-cost"
     )]
-    order_by: Vec<CapitalGainsOrderBy>,
+    order_by: Option<String>,
+    #[arg(long = "descending")]
+    order_descending: bool,
     #[arg(
         long = "show-group",
         help = "When using --group-by, show the group breakdown in the output"
     )]
     show_group: bool,
     #[arg(
-        long = "columns",
-        value_name = "COLUMNS",
+        short = 'o',
         value_delimiter = ',',
-        default_values = vec!["deal-date", "unit", "event", "gain", "loss", "pool-bal-after"],
-        help = "Specify which columns to display. Valid values are: event-date, deal-date, unit, event, pool, acquired, total-cost, disposed, net-proceeds, gain, loss, pool-bal-before, pool-bal-after, description.\nAdditional columns can be added based on associated entry metadata. E.g. +CAG-Note."
+        help = "A comma separated list of columns to print for each capital gains event.",
+        default_value = "Date, Description, match.Gain as Gain"
     )]
-    columns: Vec<CapitalGainsColumn>,
+    column_spec: Vec<String>,
+    #[arg(short = 't', long, help = "Title to display for the table")]
+    title: Option<String>,
     #[arg(long = "csv", help = "Write output as rows of comma separated values")]
     csv: bool,
     #[arg(long = "yaml", help = "Write output as yaml")]
     yaml: bool,
     #[arg(
-        long = "from",
-        help = "Specify the date from which to report. This is inclusive. E.g. \"2021-01-01\""
+        long,
+        help = "Provide a column name to enable storing yaml rows in a map instead of a list by default - the keys of which are the values of this column"
     )]
-    from: Option<String>,
-    #[arg(
-        long = "to",
-        help = "Specify the date to which to report. This is exclusive. E.g. \"2021-12-31\""
-    )]
-    to: Option<String>,
+    yaml_map_key: Option<String>,
+    #[arg(long, allow_hyphen_values = true, num_args = 0..)]
+    chain: Vec<String>,
 }
 
 impl IntoExecCommand for CagArguments {
@@ -98,22 +92,36 @@ impl IntoExecCommand for CagArguments {
 
     #[allow(clippy::field_reassign_with_default)]
     fn into_exec_cmd(self, journ: &Journal, args: &Arguments) -> JournResult<CagCommand> {
-        let mut cmd: CagCommand = CagCommand::default();
-
-        cmd.datetime_fmt_cmd = DateTimeFormatCommand::from_args_or_config(args, journ.config());
-        cmd.begin_and_end_cmd = self.begin_and_end.into_cmd(&cmd.datetime_fmt_cmd);
-        cmd.unit_filter = self.unit_filter;
-        cmd.event_filter = self.event_filter;
-        cmd.show_time = self.show_time;
-        cmd.group_deals_by_date = self.group_deals_by_date;
-        cmd.group_by = self.group_by;
-        cmd.show_group = self.show_group;
-        cmd.order_by = self.order_by;
-        cmd.output_yaml = self.yaml;
-        cmd.write_valuations = self.write_valuations;
-        cmd.write_metadata = self.write_metadata;
-        cmd.disposed_mode = self.disposed_mode;
-        cmd.columns = self.columns;
+        let datetime_fmt_cmd = DateTimeFormatCommand::from_args_or_config(args, journ.config());
+        let cmd: CagCommand = CagCommand {
+            begin_and_end_cmd: self.begin_and_end.into_cmd(&datetime_fmt_cmd),
+            datetime_fmt_cmd,
+            account_filter: self.account_filter,
+            unit_filter: self.unit_filter,
+            event_filter: self.event_filter,
+            show_time: self.show_time,
+            group_deals_by_date: self.group_deals_by_date,
+            group_by: self.group_by,
+            show_group: self.show_group,
+            order_by_spec: self.order_by,
+            order_ascending: !self.order_descending,
+            output_yaml: self.yaml,
+            yaml_map_key: self.yaml_map_key,
+            write_valuations: self.write_valuations,
+            write_metadata: self.write_metadata,
+            disposed_mode: self.disposed_mode,
+            title: self.title,
+            column_spec: self.column_spec.join(","),
+            output_csv: self.csv,
+            chain: if self.chain.is_empty() {
+                None
+            } else {
+                // Clap ignores first argument
+                let mut chain_args = vec!["cag".to_string()];
+                chain_args.append(&mut self.chain.clone());
+                Some(Box::new(CagArguments::parse_from(chain_args).into_exec_cmd(journ, args)?))
+            },
+        };
         Ok(cmd)
     }
 }

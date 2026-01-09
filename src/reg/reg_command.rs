@@ -8,20 +8,21 @@
 use crate::ExecCommand;
 use journ_core::account::Account;
 use journ_core::configuration::{AccountFilter, DescriptionFilter, FileFilter, Filter, UnitFilter};
-use journ_core::err;
 use journ_core::error::JournResult;
 use journ_core::journal::Journal;
 use journ_core::journal_entry::JournalEntry;
 use journ_core::journal_node::JournalNode;
 use journ_core::posting::Posting;
-use journ_core::reporting::balance::Balance;
-use journ_core::reporting::command::arguments::{Cmd, Command, DateTimeFormatCommand};
-use journ_core::reporting::command::cmd_line::BeginAndEndCommand;
-use journ_core::reporting::expr::parser::parse_plan;
-use journ_core::reporting::expr::{ColumnValue, Expr, IdentifierContext, PostingContext};
-use journ_core::reporting::table2::{CellRef, StyledCell};
-use journ_core::reporting::term_style::{Style, Weight};
+use journ_core::report::balance::Balance;
+use journ_core::report::command::arguments::{Cmd, Command, DateTimeFormatCommand};
+use journ_core::report::command::chained_result::ChainingResult;
+use journ_core::report::command::cmd_line::BeginAndEndCommand;
+use journ_core::report::expr::parser::parse_plan;
+use journ_core::report::expr::{ColumnValue, Expr, IdentifierContext, PostingContext};
+use journ_core::report::table2::{Row, StyledCell};
+use journ_core::report::term_style::{Style, Weight};
 use journ_core::unit::Unit;
+use std::collections::HashMap;
 
 #[derive(Default, Debug)]
 pub struct RegCommand {
@@ -111,52 +112,59 @@ impl Command for RegCommand {
 }
 
 impl ExecCommand for RegCommand {
-    fn execute<'j, 'h: 'j>(&self, journ: &'j mut Journal<'j>) -> JournResult<()> {
+    fn execute<'h>(
+        &self,
+        journ: &'h mut Journal<'h>,
+        _chained: Option<ChainingResult>,
+    ) -> JournResult<()> {
         let cmd: &RegCommand = Cmd::cast();
         let config = journ.config();
 
         // Parse the column specification. We need a lower-case version for evaluation.
-        let plan = parse_plan(&cmd.column_spec, None)?;
+        let plan = parse_plan(&cmd.column_spec, None, HashMap::new(), None, true)?;
 
-        let mut table = journ_core::reporting::table2::Table::default();
+        let mut table = journ_core::report::table2::Table::default();
         table.set_color(table.color() && !Cmd::args().no_color);
         // Heading Row
         let heading_style = Style::default().with_weight(Weight::Bold);
         let headings = plan
-            .column_spec()
+            .column_expressions()
             .iter()
             .map(|col| StyledCell::new(col.to_string(), heading_style))
             .collect::<Vec<_>>();
         table.set_heading_row(headings);
 
+        // Allow these columns to expand. Look better.
+        for (i, col) in plan.column_expressions().iter().enumerate() {
+            if let Expr::Identifier(s) = &col
+                && (s.eq_ignore_ascii_case("description") || s.eq_ignore_ascii_case("account"))
+            {
+                table.expand_column(i);
+            }
+        }
+
+        // Evaluate against all the filtered postings
         let mut balance = vec![];
-        for (entry, pst) in self.filtered_postings(&journ) {
+        let data = plan.execute(journ, self.filtered_postings(&journ), |(entry, pst)| {
             let mut context = PostingContext::new(journ, entry, pst);
             balance += pst.amount();
             context.set_identifier("balance", ColumnValue::Amount(balance.balance(pst.unit())));
-            let mut row: Vec<CellRef> = vec![];
+            context
+        })?;
 
-            for (i, col) in plan.column_spec().iter().enumerate() {
-                let value = col
-                    .eval(&mut context)
-                    .map_err(|e| err!("Unable to evaluate column: '{}'", col).with_source(e))?;
-
-                // Allow these columns to expand. Look better.
-                if let Expr::Identifier(s) = &col {
-                    if s.eq_ignore_ascii_case("description") || s.eq_ignore_ascii_case("account") {
-                        table.expand_column(i);
-                    }
-                }
-                row.push(value.into_cell_ref(false));
-            }
-            table.push_row(row);
+        // Add to the table
+        for row_data in data {
+            table.push_row(Row::new(
+                row_data.column_values.into_iter().map(|c| c.into_cell_ref(false)),
+            ))
         }
 
+        // Print the table
         let mut output = String::new();
         table.print(&mut output).unwrap();
         print!("{output}");
 
-        // We only need to write the price database.
+        // Now we only need to write the price database.
         config.price_databases().into_iter().for_each(|db| db.write_file().unwrap());
         Ok(())
     }

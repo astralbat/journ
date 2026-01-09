@@ -11,26 +11,24 @@ use crate::deal::{Deal, DealId};
 use crate::deal_holding::AverageDealHolding;
 use crate::module_init::MODULE_NAME;
 use crate::pool::PoolBalance;
-use crate::report::command::CagCommand;
+use crate::report::cag_command::CagCommand;
 use crate::ruleset::{AgeUnit, Condition, DealKind, Rule};
 use chrono::{DateTime, Duration, NaiveDate};
 use chrono_tz::Tz;
 use journ_core::alloc::HerdAllocator;
 use journ_core::amount::{Amount, Quantity};
 use journ_core::configuration::Configuration;
-use journ_core::date_and_time::{JDateTime, JDateTimeRange};
+use journ_core::datetime::{DateTimePrecision, JDateTime, JDateTimeRange};
 use journ_core::err;
 use journ_core::error::{JournError, JournResult};
 use journ_core::journal_entry::JournalEntry;
 use journ_core::metadata::Metadata;
-use journ_core::reporting::command::arguments::Cmd;
+use journ_core::report::command::arguments::{Cmd, Command};
 use journ_core::unit::Unit;
 use journ_core::valued_amount::ValuedAmount;
 use journ_core::valuer::{SystemValuer, Valuation, ValuationError, Valuer};
 use linked_hash_set::LinkedHashSet;
 use std::fmt;
-use yaml_rust::Yaml;
-
 pub enum PushError<'h> {
     CriteriaMismatch(Deal<'h>),
     EvalError(JournError),
@@ -42,7 +40,7 @@ pub enum PushError<'h> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DealGroup<'h> {
     id: DealId<'h>,
-    /// The group will always have a unit of account: explicit or implied. Initially, this will be implied bo be the first valuation on the `holding`,
+    /// The group will always have a unit of account: explicit or implied. Initially, this will be implied to be the first valuation on the `holding`,
     /// or if none, the primary unit of the `holding`. When added to a pool, it should be changed to the pool's accounting unit.
     unit_of_account: Option<&'h Unit<'h>>,
     criteria: DealGroupCriteria,
@@ -83,6 +81,10 @@ impl<'h> DealGroup<'h> {
 
     pub fn unit(&self) -> &'h Unit<'h> {
         self.deals[0].unit()
+    }
+
+    pub fn unit_of_account(&self) -> &'h Unit<'h> {
+        self.deals[0].unit_of_account()
     }
 
     pub fn total(&self) -> &PoolBalance<'h> {
@@ -237,7 +239,7 @@ impl<'h> DealGroup<'h> {
         vals
     }
 
-    pub fn datetime(&self) -> JDateTimeRange<'h> {
+    pub fn datetime(&self) -> JDateTimeRange {
         let start = self.deals[0].datetime().start();
         let end = self.deals.last().unwrap().datetime().end();
         JDateTimeRange::new(start, Some(end))
@@ -263,12 +265,12 @@ impl<'h> DealGroup<'h> {
     }
 
     /// Gets whether the group is complete after this `datetime`.
-    pub fn is_complete(&self, datetime: JDateTimeRange<'h>) -> bool {
+    pub fn is_complete(&self, datetime: JDateTimeRange) -> bool {
         self.criteria.is_complete(datetime)
     }
 
     /// Gets whether this deal matches the specified condition at the specified clock time.
-    pub fn matches(&self, cond: &Condition, clock: JDateTime<'h>) -> bool {
+    pub fn matches(&self, cond: &Condition, clock: JDateTime) -> bool {
         let datetime = self.datetime();
 
         match cond {
@@ -315,13 +317,21 @@ impl<'h> DealGroup<'h> {
         let deals = &self.deals;
         let mut avg_entry_valuer = |quote_unit: &'h Unit<'h>, base_amount: Amount<'h>| {
             let mut total_amount = Amount::nil();
-            let mut total_value = Amount::nil();
+            let mut total_value: Option<Valuation> = None;
             for deal in deals {
                 total_amount += deal.valued_amount().amount();
                 match SystemValuer::from(deal.entry())
                     .value(quote_unit, deal.valued_amount().amount())
                 {
-                    Ok(val) => total_value += val.value(),
+                    Ok(mut val) => {
+                        let mut val_clone = val.clone();
+                        total_value = total_value
+                            .map(|tv| {
+                                val_clone.set_via(tv);
+                                val_clone
+                            })
+                            .or(Some(val))
+                    }
                     Err(ValuationError::Undetermined(reason)) => {
                         return Err(ValuationError::EvalFailure(
                             err!("No value for deal: {}", deal,).with_source(reason),
@@ -330,7 +340,10 @@ impl<'h> DealGroup<'h> {
                     Err(e) => return Err(e),
                 }
             }
-            Ok(Valuation::new(total_value / total_amount.quantity() * base_amount.quantity()))
+            let v = total_value.as_ref().unwrap().value();
+            Ok(total_value
+                .unwrap()
+                .with_value(v / total_amount.quantity() * base_amount.quantity()))
         };
 
         if self.taxable_gain.is_none() {
@@ -359,11 +372,7 @@ impl<'h> DealGroup<'h> {
         let date_valuer = |config: Configuration<'h>, value_date: DateTime<Tz>| {
             move |quote_unit: &'h Unit<'h>, base_amount: Amount<'h>| match SystemValuer::on_date(
                 config.clone(),
-                JDateTime::from_datetime(
-                    value_date,
-                    Some(config.date_format()),
-                    Some(config.time_format()),
-                ),
+                JDateTime::new(value_date, DateTimePrecision::Second),
             )
             .value(quote_unit, base_amount)
             {
@@ -398,8 +407,9 @@ impl<'h> DealGroup<'h> {
     pub fn ensure_valued(&mut self, uoa: &'h Unit<'h>) -> Result<(), JournError> {
         self.value_with_system_valuer(uoa)?;
         self.unit_of_account = Some(uoa);
-        // Put in terms of the uoa. This makes more sense when printing.
+        // Put in terms of the uoa. This makes more sense when printing and finding the cost later.
         self.holding.set_in_terms_of_unit_of_account(uoa);
+        self.taxable_gain.as_mut().map(|tg| tg.order_valuation(uoa, 0));
         Ok(())
     }
 }
@@ -416,9 +426,10 @@ impl fmt::Display for DealGroup<'_> {
     }
 }
 
+/*
 impl From<&DealGroup<'_>> for Yaml {
     fn from(value: &DealGroup<'_>) -> Self {
-        let mut map = yaml_rust::yaml::Hash::new();
+        let mut map = yaml_rust2::yaml::Hash::new();
         let expenses = value.expenses();
         let total = value.total().valued_amount().clone();
         let total_before_expenses = value.total_before_expenses();
@@ -433,7 +444,7 @@ impl From<&DealGroup<'_>> for Yaml {
         );
         Yaml::Hash(map)
     }
-}
+}*/
 
 /// The criteria used to determine how deals are grouped together.
 /// All deals within the group will satisfy the same criteria.
@@ -441,14 +452,14 @@ impl From<&DealGroup<'_>> for Yaml {
 pub enum DealGroupCriteria {
     /// One deal, one group. This is the simplest grouping.
     Single,
-    /// Group deals together if they occur on the same day (as determined by the reporting timezone),
+    /// Group deals together if they occur on the same day (as determined by the report timezone),
     /// and have the same sign (i.e. all buys or all sells).
     SameDaySameSign(NaiveDate, bool),
 }
 impl DealGroupCriteria {
     pub fn same_day_same_sign(deal: &Deal) -> Self {
         // It is important to make sure the timezone is consistent
-        let tz = Cmd::cast::<CagCommand>().datetime_fmt_cmd.timezone_or_default();
+        let tz = Cmd::cast::<CagCommand>().datetime_fmt_cmd().timezone_or_default();
         let deal_date = deal.datetime().start().datetime().with_timezone(&tz).date_naive();
         DealGroupCriteria::SameDaySameSign(deal_date, deal.total().amount().is_positive())
     }
@@ -457,7 +468,7 @@ impl DealGroupCriteria {
     pub fn matches(&self, deal: &Deal) -> bool {
         match self {
             DealGroupCriteria::SameDaySameSign(date, sign) => {
-                let tz = Cmd::cast::<CagCommand>().datetime_fmt_cmd.timezone_or_default();
+                let tz = Cmd::cast::<CagCommand>().datetime_fmt_cmd().timezone_or_default();
                 let deal_date = deal.datetime().start().datetime().with_timezone(&tz).date_naive();
                 deal_date == *date && deal.total().amount().is_positive() == *sign
             }
@@ -468,7 +479,7 @@ impl DealGroupCriteria {
     pub fn is_complete(&self, datetime: JDateTimeRange) -> bool {
         match self {
             DealGroupCriteria::SameDaySameSign(date, _) => {
-                let tz = Cmd::cast::<CagCommand>().datetime_fmt_cmd.timezone_or_default();
+                let tz = Cmd::cast::<CagCommand>().datetime_fmt_cmd().timezone_or_default();
                 let date_rhs = datetime.start().datetime().with_timezone(&tz).date_naive();
                 date_rhs > *date
             }

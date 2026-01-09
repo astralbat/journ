@@ -6,28 +6,21 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::adjustment::Adjustment;
-use crate::cgt_configuration::{CapitalGainsColumn, EventFilter, MatchMethod};
-use crate::deal_holding::{AbsDealHolding, DealHolding};
+use crate::cgt_configuration::{EventFilter, MatchMethod};
+use crate::deal_holding::DealHolding;
 use crate::pool::PoolBalance;
-use crate::report::command::CagCommand;
-use itertools::Itertools;
+use journ_core::amount::Amount;
 use journ_core::configuration::Filter;
-use journ_core::date_and_time::JDateTimeRange;
+use journ_core::datetime::JDateTimeRange;
 use journ_core::metadata::Metadata;
-use journ_core::reporting::command::arguments::Cmd;
-use journ_core::reporting::table::Cell;
-use journ_core::reporting::table::Row;
-use journ_core::reporting::term_style::{Colour, Weight};
 use journ_core::unit::Unit;
 use journ_core::valued_amount::ValuedAmount;
 use linked_hash_set::LinkedHashSet;
 use std::borrow::Cow;
-use std::ops::Add;
+use std::ops::{Add, Neg};
 use std::sync::atomic;
 use std::sync::atomic::AtomicUsize;
 use std::{fmt, iter};
-use yaml_rust::Yaml;
-use yaml_rust::yaml::Hash;
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct MatchDetails<'h> {
@@ -36,7 +29,7 @@ pub struct MatchDetails<'h> {
     /// The part of the pool that was matched
     target: DealHolding<'h>,
     /// The incoming transaction that matched the pool. This will be a single deal usually, optionally adjusted.
-    /// This may be multiple deals if multiple MatchDetails have been aggregated, such as when reporting.
+    /// This may be multiple deals if multiple MatchDetails have been aggregated, such as when report.
     originator: DealHolding<'h>,
 }
 
@@ -76,46 +69,37 @@ impl<'h> MatchDetails<'h> {
 
     /// The actual purchase cost in proportion to the amount disposed including expenses.
     /// The actual cost is rounded.
-    pub fn actual_cost(&self) -> ValuedAmount<'h> {
+    pub fn actual_cost(&self) -> Amount<'h> {
         let buy_holding = self.buy_holding();
         match buy_holding.split_parent() {
             Some(parent) => {
                 // If the parent is available, we can calculate according to the correct formula to avoid rounding issues.
                 let disposed = self.sell_holding().total().amount().abs();
                 let acquired_origin_amount = parent.total().amount();
-                let acquired_origin_cost =
-                    parent.total().valued_amount().clone().without_unit(buy_holding.unit());
+                let acquired_origin_cost = parent.total().cost();
                 (&acquired_origin_cost * (disposed / acquired_origin_amount).quantity()).rounded()
             }
-            _ => buy_holding
-                .total()
-                .valued_amount()
-                .clone()
-                .without_unit(buy_holding.unit())
-                .rounded(),
+            _ => buy_holding.total().cost().rounded(),
         }
     }
 
-    pub fn net_proceeds(&self) -> ValuedAmount<'h> {
+    pub fn net_proceeds(&self) -> Amount<'h> {
         // Use gross - expenses calculation rather than the holding's total. If we use the latter and negate it,
         // it will not be able to handle negative net_proceeds which can indeed happen.
-        let mut gross_to_net = self
-            .sell_holding()
-            .total_before_expenses()
-            .without_unit(self.originator().unit())
-            .negated();
-        let expenses = self.sell_holding().expenses();
-        gross_to_net.sub_from(&expenses);
-        gross_to_net.rounded()
+        let gross_to_net =
+            self.sell_holding().total_before_expenses().valuations().next().unwrap().value().neg();
+        let expenses = self.sell_holding().expenses().value_in(gross_to_net.unit()).unwrap();
+        (gross_to_net - expenses).rounded()
     }
 
     /// Gets the gain (or loss if negative) of this match.
     /// This is the sell total - the buy total which is the gain in both long and short contexts.
-    pub fn gain(&self) -> ValuedAmount<'h> {
+    pub fn gain(&self) -> Amount<'h> {
+        let uoa = self.sell_holding().total().cost().unit();
         if let Some(gain) = self.sell_holding().explicit_taxable_gain() {
-            return gain;
+            return gain.value_in(uoa).unwrap();
         }
-        (self.net_proceeds() - self.actual_cost()).unwrap()
+        self.net_proceeds() - self.actual_cost()
     }
 }
 
@@ -146,6 +130,7 @@ impl<'h> Add for MatchDetails<'h> {
     }
 }
 
+/*
 impl From<&MatchDetails<'_>> for Yaml {
     fn from(value: &MatchDetails<'_>) -> Self {
         let mut map = Hash::new();
@@ -185,7 +170,7 @@ impl From<&MatchDetails<'_>> for Yaml {
         }
         Yaml::Hash(map)
     }
-}
+}*/
 
 #[derive(Clone, PartialEq, Eq)]
 pub enum PoolEventKind<'h> {
@@ -193,7 +178,7 @@ pub enum PoolEventKind<'h> {
     Adjustment(Adjustment<'h>),
     /// A deal was added to the pool
     PooledDeal(DealHolding<'h>),
-    /// A deal was moved from the specified pool name
+    /// A deal was moved to the specified `DealHolding`, and from the specified pool name
     MovedDeal(DealHolding<'h>, &'h str),
     /// An acquisition was matched against a disposal
     Match(MatchDetails<'h>),
@@ -220,36 +205,7 @@ impl fmt::Display for PoolEventKind<'_> {
     }
 }
 
-macro_rules! impl_from_kind_for_cell {
-    ($kind:ty) => {
-        impl<'h, 'a> From<$kind> for Cell<'a>
-        where
-            'h: 'a,
-        {
-            fn from(value: $kind) -> Self {
-                let mut cell: Cell = match &value {
-                    PoolEventKind::PooledDeal(dh) => {
-                        [Cell::from(&"Pooled "), dh.total().clone().into()].into()
-                    }
-                    PoolEventKind::MovedDeal(dh, ..) => {
-                        [Cell::from(&"Unpooled "), dh.total().clone().into()].into()
-                    }
-                    PoolEventKind::Match(details) => [
-                        Cell::from(&"Matched "),
-                        [Cell::from(details.target().total().amount())].into(),
-                    ]
-                    .into(),
-                    PoolEventKind::Adjustment(adj) => [Cell::from(&"Adjusted "), adj.into()].into(),
-                };
-                cell.iter_mut().next().unwrap().set_foreground(Some(Colour::Blue));
-                cell
-            }
-        }
-    };
-}
-impl_from_kind_for_cell!(PoolEventKind<'h>);
-impl_from_kind_for_cell!(&PoolEventKind<'h>);
-
+/*
 impl<'h> From<&PoolEventKind<'h>> for Yaml {
     fn from(value: &PoolEventKind<'h>) -> Self {
         match value {
@@ -310,7 +266,7 @@ impl<'h> From<&PoolEventKind<'h>> for Yaml {
             }
         }
     }
-}
+}*/
 
 impl PartialOrd for PoolEventKind<'_> {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
@@ -366,16 +322,15 @@ impl<'h> Add for PoolEventKind<'h> {
     }
 }
 
-#[derive(Clone)]
 pub struct PoolEvent<'h> {
     /// A unique, incrementing sequence number to be able to correctly determine order when comparing events.
     sequence: usize,
     pool_name: &'h str,
-    /// The date and time when the event took place in the reporting timezone. When events are folded,
+    /// The date and time when the event took place in the report timezone. When events are folded,
     /// they form a range.
     /// This should show its time component, depending on whether the associated deal shows its time
     /// component.
-    date: JDateTimeRange<'h>,
+    date: JDateTimeRange,
     event_kind: PoolEventKind<'h>,
     balance_before: PoolBalance<'h>,
     balance_after: PoolBalance<'h>,
@@ -384,7 +339,7 @@ pub struct PoolEvent<'h> {
 impl<'h> PoolEvent<'h> {
     pub fn new(
         pool_name: &'h str,
-        date: JDateTimeRange<'h>,
+        date: JDateTimeRange,
         kind: PoolEventKind<'h>,
         bal_before: PoolBalance<'h>,
         bal_after: PoolBalance<'h>,
@@ -426,14 +381,14 @@ impl<'h> PoolEvent<'h> {
         &self.balance_after
     }
 
-    /// The date of the event in the reporting timezone. If events have been combined, this will cover
+    /// The date of the event in the report timezone. If events have been combined, this will cover
     /// the date range of those events.
-    pub fn event_datetime(&self) -> JDateTimeRange<'h> {
+    pub fn event_datetime(&self) -> JDateTimeRange {
         self.date
     }
 
-    /// The date of the deal in the reporting timezone.
-    pub fn deal_datetime(&self) -> JDateTimeRange<'h> {
+    /// The date of the deal in the report timezone.
+    pub fn deal_datetime(&self) -> JDateTimeRange {
         match &self.event_kind {
             PoolEventKind::PooledDeal(dh) => dh.datetime(),
             PoolEventKind::MovedDeal(dh, _) => dh.datetime(),
@@ -468,23 +423,25 @@ impl<'h> PoolEvent<'h> {
         }
     }
 
-    pub fn total_cost(&self) -> Option<ValuedAmount<'h>> {
+    /*
+    pub fn total_cost(&self) -> Option<Amount<'h>> {
         match &self.event_kind {
             PoolEventKind::PooledDeal(pooled)
                 if pooled.datetime().start() == self.event_datetime().start()
                     && pooled.total().amount() > 0 =>
             {
-                Some(pooled.total().valued_amount().clone())
+                Some(pooled.total().cost())
             }
             PoolEventKind::Adjustment(_adj) => Some(
                 (&self.balance_after - &self.balance_before)
                     .valued_amount()
                     .clone()
-                    .without_unit(self.unit()),
+                    .without_unit(self.unit())
+                    .amount(),
             ),
             _ => None,
         }
-    }
+    }*/
 
     /// Gets the disposal if this event was a match. The disposal is what was disposed and
     /// the proceeds received.
@@ -496,7 +453,7 @@ impl<'h> PoolEvent<'h> {
     }
 
     /// Gets the disposal value after the expense adjustment.
-    pub fn net_proceeds(&self) -> Option<ValuedAmount<'h>> {
+    pub fn net_proceeds(&self) -> Option<Amount<'h>> {
         match &self.event_kind {
             PoolEventKind::Match(details) => {
                 let net_proceeds = details.net_proceeds();
@@ -510,7 +467,7 @@ impl<'h> PoolEvent<'h> {
         }
     }
 
-    pub fn expenses(&self) -> Option<ValuedAmount<'h>> {
+    pub fn expenses(&self) -> Option<Amount<'h>> {
         match &self.event_kind {
             PoolEventKind::Match(details) => match details.sell_holding().expenses() {
                 exp if !exp.is_zero() => Some(exp),
@@ -526,25 +483,26 @@ impl<'h> PoolEvent<'h> {
             }
             _ => None,
         }
+        .map(|a| a.amount())
     }
 
-    pub fn actual_cost(&self) -> Option<ValuedAmount<'h>> {
+    pub fn actual_cost(&self) -> Option<Amount<'h>> {
         match &self.event_kind {
             PoolEventKind::Match(details) => Some(details.actual_cost()),
             _ => None,
         }
     }
 
-    pub fn gain(&self) -> Option<ValuedAmount<'h>> {
+    pub fn gain(&self) -> Option<Amount<'h>> {
         match &self.event_kind {
-            PoolEventKind::Match(details) if details.gain().amount() > 0 => Some(details.gain()),
+            PoolEventKind::Match(details) if details.gain() > 0 => Some(details.gain()),
             _ => None,
         }
     }
 
-    pub fn losses(&self) -> Option<ValuedAmount<'h>> {
+    pub fn losses(&self) -> Option<Amount<'h>> {
         match &self.event_kind {
-            PoolEventKind::Match(details) if details.gain().amount() < 0 => Some(details.gain()),
+            PoolEventKind::Match(details) if details.gain() < 0 => Some(details.gain()),
             _ => None,
         }
     }
@@ -893,7 +851,7 @@ impl<'h, 'e> AggregatedPoolEvent<'h, 'e> {
         }
     }
 
-    pub fn event_datetime(&self) -> JDateTimeRange<'h> {
+    pub fn event_datetime(&self) -> JDateTimeRange {
         match self {
             AggregatedPoolEvent::One(e) => (*e).event_datetime(),
             AggregatedPoolEvent::Many(_es) => JDateTimeRange::new(
@@ -903,7 +861,7 @@ impl<'h, 'e> AggregatedPoolEvent<'h, 'e> {
         }
     }
 
-    pub fn deal_datetime(&self) -> JDateTimeRange<'h> {
+    pub fn deal_datetime(&self) -> JDateTimeRange {
         match self {
             AggregatedPoolEvent::One(e) => e.deal_datetime(),
             AggregatedPoolEvent::Many(_es) => {
@@ -1001,17 +959,17 @@ impl<'h, 'e> AggregatedPoolEvent<'h, 'e> {
     }
 
     /// Gets the actual cost of the disposal.
-    pub fn actual_cost(&self) -> Option<ValuedAmount<'h>> {
+    pub fn actual_cost(&self) -> Option<Amount<'h>> {
         match self {
             AggregatedPoolEvent::One(e) => e.actual_cost(),
             AggregatedPoolEvent::Many(es) => {
-                let sum =
-                    es.iter().filter_map(|e| e.actual_cost()).sum::<Option<ValuedAmount>>()?;
+                let sum = es.iter().filter_map(|e| e.actual_cost()).sum::<Option<Amount>>()?;
                 Some(sum)
             }
         }
     }
 
+    /*
     pub fn total_cost(&self) -> Option<ValuedAmount<'h>> {
         match self {
             AggregatedPoolEvent::One(e) => e.total_cost(),
@@ -1020,7 +978,7 @@ impl<'h, 'e> AggregatedPoolEvent<'h, 'e> {
                 Some(sum)
             }
         }
-    }
+    }*/
 
     pub fn disposed(&self) -> Option<ValuedAmount<'h>> {
         match self {
@@ -1032,42 +990,41 @@ impl<'h, 'e> AggregatedPoolEvent<'h, 'e> {
         }
     }
 
-    pub fn net_proceeds(&self) -> Option<ValuedAmount<'h>> {
+    pub fn net_proceeds(&self) -> Option<Amount<'h>> {
         match self {
             AggregatedPoolEvent::One(e) => e.net_proceeds(),
             AggregatedPoolEvent::Many(es) => {
-                let sum =
-                    es.iter().filter_map(|e| e.net_proceeds()).sum::<Option<ValuedAmount>>()?;
+                let sum = es.iter().filter_map(|e| e.net_proceeds()).sum::<Option<Amount>>()?;
                 Some(sum)
             }
         }
     }
 
-    pub fn expenses(&self) -> Option<ValuedAmount<'h>> {
+    pub fn expenses(&self) -> Option<Amount<'h>> {
         match self {
             AggregatedPoolEvent::One(e) => e.expenses(),
             AggregatedPoolEvent::Many(es) => {
-                let sum = es.iter().filter_map(|e| e.expenses()).sum::<Option<ValuedAmount>>()?;
+                let sum = es.iter().filter_map(|e| e.expenses()).sum::<Option<Amount>>()?;
                 Some(sum)
             }
         }
     }
 
-    pub fn gain(&self) -> Option<ValuedAmount<'h>> {
+    pub fn gain(&self) -> Option<Amount<'h>> {
         match self {
             AggregatedPoolEvent::One(e) => e.gain(),
             AggregatedPoolEvent::Many(es) => {
-                let sum = es.iter().filter_map(|e| e.gain()).sum::<Option<ValuedAmount>>()?;
+                let sum = es.iter().filter_map(|e| e.gain()).sum::<Option<Amount>>()?;
                 Some(sum)
             }
         }
     }
 
-    pub fn loss(&self) -> Option<ValuedAmount<'h>> {
+    pub fn loss(&self) -> Option<Amount<'h>> {
         match self {
             AggregatedPoolEvent::One(e) => e.losses(),
             AggregatedPoolEvent::Many(es) => {
-                let sum = es.iter().filter_map(|e| e.loss()).sum::<Option<ValuedAmount>>()?;
+                let sum = es.iter().filter_map(|e| e.loss()).sum::<Option<Amount>>()?;
                 Some(sum)
             }
         }
@@ -1120,6 +1077,7 @@ impl<'h, 'e> AggregatedPoolEvent<'h, 'e> {
         }
     }
 
+    /*
     pub fn as_table_rows(&self, include_sub_events: bool, total_row: bool) -> Vec<Row<'_>> {
         let cag = Cmd::cast::<CagCommand>();
         let mut event_date = self.event_datetime();
@@ -1355,7 +1313,7 @@ impl<'h, 'e> AggregatedPoolEvent<'h, 'e> {
             }
         }
         Yaml::Hash(map)
-    }
+    }*/
 }
 
 impl Ord for AggregatedPoolEvent<'_, '_> {

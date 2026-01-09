@@ -27,11 +27,11 @@ use smallvec::{SmallVec, smallvec};
 use std::fmt::Debug;
 
 pub trait CapitalGainsMetadataAccess<'h> {
-    fn cg_metadata(&self) -> Result<CapitalGainsEntryMetadata<'h>, JournError>;
+    fn cg_metadata(&self, uoa: &'h Unit<'h>) -> Result<CapitalGainsEntryMetadata<'h>, JournError>;
 }
 
 impl<'h> CapitalGainsMetadataAccess<'h> for &'h JournalEntry<'h> {
-    fn cg_metadata(&self) -> Result<CapitalGainsEntryMetadata<'h>, JournError> {
+    fn cg_metadata(&self, uoa: &'h Unit<'h>) -> Result<CapitalGainsEntryMetadata<'h>, JournError> {
         let mut deal_metadata = vec![];
         let mut adjustment_metadata = vec![];
 
@@ -41,6 +41,7 @@ impl<'h> CapitalGainsMetadataAccess<'h> for &'h JournalEntry<'h> {
                     metadata,
                     self,
                     position as u32,
+                    uoa,
                 )?)
             } else if metadata.key() == "CAG-Adjust" {
                 adjustment_metadata.push(CapitalGainsEntryMetadata::parse_adjustment(
@@ -101,10 +102,11 @@ impl<'h> CapitalGainsEntryMetadata<'h> {
         metadata: &Metadata<'h>,
         entry: &'h JournalEntry<'h>,
         position: u32,
+        uoa: &'h Unit<'h>,
     ) -> Result<Deal<'h>, JournError> {
         let err = "Unable to parse CAG-Deal. Deals should be in the format:\n\
                 CAG-Deal  <deal_amount> [++ deal_expenses] [== taxable_gain] -OR- CAG-Deal  -<deal_amount> [-- deal_expenses] [== taxable_gain]";
-        let res = metadata.parse_value(Self::deal_parser(entry, metadata, position), err)?;
+        let res = metadata.parse_value(Self::deal_parser(entry, metadata, position, uoa), err)?;
         Ok(res)
     }
 
@@ -112,6 +114,7 @@ impl<'h> CapitalGainsEntryMetadata<'h> {
         entry: &'h JournalEntry<'h>,
         metadata: &Metadata<'h>,
         position: u32,
+        uoa: &'h Unit<'h>,
     ) -> impl FnMut(I) -> IParseResult<'h, I, Deal<'h>>
     where
         I: TextInput<'h> + ConfigInput<'h> + BlockInput<'h>,
@@ -186,7 +189,7 @@ impl<'h> CapitalGainsEntryMetadata<'h> {
             all_md.append(&mut metadata.value_as_metadata_lines());
 
             let mut deal =
-                Deal::new(Some(position), entry, all_md, valued_amount, taxable_gain, true)
+                Deal::new(Some(position), entry, all_md, valued_amount, taxable_gain, true, uoa)
                     .map_err(|_| {
                         NomErr::Error(IParseError::new(
                             "Unable to detect unit of account for deal",

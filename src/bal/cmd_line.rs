@@ -8,9 +8,9 @@
 use crate::bal::bal_command::BalCommand;
 use journ_core::error::JournResult;
 use journ_core::journal::Journal;
-use journ_core::reporting::command::IntoExecCommand;
-use journ_core::reporting::command::arguments::{Arguments, DateTimeFormatCommand};
-use journ_core::reporting::command::cmd_line::BeginAndEndArguments;
+use journ_core::report::command::IntoExecCommand;
+use journ_core::report::command::arguments::{Arguments, DateTimeFormatCommand};
+use journ_core::report::command::cmd_line::BeginAndEndArguments;
 
 #[derive(clap::Args, Debug)]
 #[command(name = "bal", about = "Print balances of accounts")]

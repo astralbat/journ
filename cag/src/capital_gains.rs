@@ -5,24 +5,14 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
-use crate::cgt_configuration::{CapitalGainsColumn, CapitalGainsGroupBy, CapitalGainsOrderBy};
+use crate::cgt_configuration::CapitalGainsGroupBy;
 use crate::pool::PoolBalance;
 use crate::pool_event::{AggregatedPoolEvent, PoolEvent};
-use crate::report::command::CagCommand;
-use chrono_tz::OffsetName;
-use itertools::Itertools;
+use crate::report::cag_command::CagCommand;
 use journ_core::configuration::Configuration;
-use journ_core::date_and_time::JDateTime;
-use journ_core::reporting::command::arguments::Cmd;
-use journ_core::reporting::table::Cell;
-use journ_core::reporting::table::{Row, Table};
+use journ_core::report::command::arguments::Cmd;
 use journ_core::unit::Unit;
-use journ_core::valued_amount::ValuedAmount;
-use journ_core::valuer::{SystemValuer, Valuer};
-use std::collections::{BTreeSet, HashMap};
-use std::fmt;
-use yaml_rust::yaml::Hash;
-use yaml_rust::{Yaml, YamlEmitter};
+use std::collections::HashMap;
 
 pub struct CapitalGains<'h> {
     config: Configuration<'h>,
@@ -39,27 +29,11 @@ impl<'h> CapitalGains<'h> {
         Self { config, events, pool_balances }
     }
 
+    pub fn events(&self) -> &[PoolEvent<'h>] {
+        &self.events
+    }
+
     /*
-    pub fn update_journal(&self, journal: &Journal<'h>) {
-        // Clear existing metadata completely, first before writing any new metadata.
-        // This avoids any potential issue with metadata being cleared after writing on some entries.
-        let all_entries: HashMap<EntryId, _> = self
-            .events
-            .iter()
-            .flat_map(|e| e.deal_iter().map(|deal| (deal.id().entry_id(), deal.entry())))
-            .collect();
-        for (_, entry) in all_entries.into_iter() {
-            CapitalGainsEntryMetadata::clear_deals(&mut entry.lock().unwrap());
-        }
-
-        let allocator = journal.root().config().allocator();
-        for deal in self.events.iter().flat_map(|e| e.deal_iter()) {
-            if !deal.is_required() {
-                CapitalGainsEntryMetadata::write_deal(deal, allocator);
-            }
-        }
-    }*/
-
     pub fn write_table<W: fmt::Write>(&self, writer: &mut W) -> fmt::Result {
         let cag = Cmd::cast::<CagCommand>();
         let mut aggregated_events = self.events.iter().map(AggregatedPoolEvent::from).collect();
@@ -196,9 +170,10 @@ impl<'h> CapitalGains<'h> {
         write!(writer, "\n\n")?;
         pool_table.print(writer)?;
         Ok(())
-    }
+    }*/
 }
 
+/*
 impl<'h> fmt::Display for CapitalGains<'h> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let cmd = Cmd::cast::<CagCommand>();
@@ -209,8 +184,9 @@ impl<'h> fmt::Display for CapitalGains<'h> {
             self.write_table(f)
         }
     }
-}
+}*/
 
+/*
 impl<'h> From<&CapitalGains<'h>> for Yaml {
     fn from(value: &CapitalGains<'h>) -> Self {
         let cag = Cmd::cast::<CagCommand>();
@@ -266,7 +242,7 @@ impl<'h> From<&CapitalGains<'h>> for Yaml {
         gains_map.insert(Yaml::String("capital_gains".to_string()), Yaml::Hash(map));
         Yaml::Hash(gains_map)
     }
-}
+}*/
 
 fn filtered_events<'h, 'e>(
     events: Vec<AggregatedPoolEvent<'h, 'e>>,
@@ -278,6 +254,7 @@ fn filtered_events<'h, 'e>(
     events.into_iter().filter_map(|e| e.filter_events(&event_filter)).collect()
 }
 
+/*
 fn ordered_events<'h, 'e>(
     mut events: Vec<AggregatedPoolEvent<'h, 'e>>,
 ) -> Vec<AggregatedPoolEvent<'h, 'e>> {
@@ -298,7 +275,7 @@ fn ordered_events<'h, 'e>(
         }
     }
     events
-}
+}*/
 
 fn combine_events(events: &mut Vec<AggregatedPoolEvent>, group_by: &[CapitalGainsGroupBy]) {
     // If there are no groupings, then there's nothing to do.

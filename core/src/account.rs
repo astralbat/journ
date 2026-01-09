@@ -6,11 +6,11 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::metadata::Metadata;
-use crate::reporting::table2::fmt::CellFormatter;
-use crate::reporting::table2::{
+use crate::report::table2::fmt::CellFormatter;
+use crate::report::table2::{
     Cell, CellWidth, ColumnWidth, PolicyWrappingCell, StyledCell, WrapEase, WrapPolicy,
 };
-use crate::reporting::term_style::{Colour, Style};
+use crate::report::term_style::{Colour, Style};
 use crate::unit::Unit;
 use smallvec::{SmallVec, smallvec};
 use std::hash::{Hash, Hasher};

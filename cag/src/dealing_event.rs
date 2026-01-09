@@ -8,11 +8,9 @@
 use crate::adjustment::Adjustment;
 use crate::deal::Deal;
 use crate::deal_group::DealGroup;
-use journ_core::date_and_time::JDateTimeRange;
+use journ_core::datetime::JDateTimeRange;
 use journ_core::unit::Unit;
 use std::cmp::Ordering;
-use std::fmt;
-use std::fmt::Formatter;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum DealingEvent<'h> {
@@ -29,7 +27,7 @@ impl<'h> DealingEvent<'h> {
         }
     }
 
-    pub fn datetime(&self) -> JDateTimeRange<'h> {
+    pub fn datetime(&self) -> JDateTimeRange {
         match self {
             DealingEvent::Deal(deal) => deal.datetime(),
             DealingEvent::Group(group) => group.datetime(),
@@ -61,6 +59,7 @@ impl PartialOrd for DealingEvent<'_> {
     }
 }
 
+/*
 impl fmt::Display for DealingEvent<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
@@ -75,4 +74,4 @@ impl fmt::Display for DealingEvent<'_> {
             }
         }
     }
-}
+}*/

@@ -8,7 +8,7 @@
 use crate::cgt_configuration::UnitOfAccountChange;
 use crate::cgt_configuration::{AssignExpenses, MatchMethod};
 use crate::cgt_configuration::{CagConfiguration, PoolConfiguration};
-use crate::report::command::CagCommand;
+use crate::report::cag_command::CagCommand;
 use crate::ruleset;
 use chrono_tz::Tz;
 use journ_core::directive::{Directive, DirectiveKind};

@@ -5,13 +5,12 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
+use crate::datetime::JDateTime;
 use crate::directive::DirectiveKind;
 use crate::error::JournResult;
 use crate::journal_node::JournalNode;
 use crate::price::Price;
 use crate::unit::Unit;
-use chrono::DateTime;
-use chrono_tz::Tz;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -34,7 +33,7 @@ impl<'h> PriceDatabase<'h> {
         let (prices, initialised) = &mut *prices_lock;
         if !*initialised {
             if let Some(node) = self.node {
-                for dir in node.all_directives_iter() {
+                for (_seg, dir) in node.all_directives_iter() {
                     if let DirectiveKind::Price(p) = dir.kind() {
                         prices.push(Arc::clone(p))
                     }
@@ -56,45 +55,44 @@ impl<'h> PriceDatabase<'h> {
         self.prices_init()
     }
 
-    /// Gets the price closest to the time provided and within plus or minus the number of hours_tolerance.
+    /// Finds the price whose time is closest as possible to the `target` time and having
+    /// the specified `base_unit`, `quote_unit`.
+    ///
+    /// This will return `Some` if that closest price's time is `within_seconds` of the `target's`
+    /// according to either:
+    ///
+    /// * `abs(closest - target) <= within_seconds`
+    /// * `abs(target - closest) < within_seconds`
+    ///
+    /// Following these inequalities, rounding of targets can be used effectively. For example,
+    /// if the `within_seconds` equates to 30min, then a 11:30 target will match 12:00 but not 11.00.
     pub fn get_closest(
         &self,
-        time: DateTime<Tz>,
-        within_seconds: i64,
-        base_curr: &Unit<'h>,
-        quote_curr: &Unit<'h>,
+        target: JDateTime,
+        within_seconds: usize,
+        base_unit: &Unit<'h>,
+        quote_unit: &Unit<'h>,
     ) -> Option<Arc<Price<'h>>> {
         debug!(
             "{} Looking in price_db within_seconds: {}, base_curr: {}, quote_curr: {}",
-            time, within_seconds, base_curr, quote_curr
+            target, within_seconds, base_unit, quote_unit
         );
 
-        let closest = self.closest_by_key(time, |price| {
-            price.base_unit() == base_curr && price.quote_unit() == quote_curr
+        let closest_price = self.closest_by_key(target, |price| {
+            price.base_unit() == base_unit && price.quote_unit() == quote_unit
         });
-        if let Some(closest) = closest.as_ref()
-            && within_seconds >= 0
-            && (closest.datetime().datetime() - time).num_seconds().abs() > within_seconds
-        {
-            return None;
-        }
-        closest
-    }
+        let target = target.datetime();
 
-    pub fn get_closest_by_date(
-        &self,
-        time: DateTime<Tz>,
-        within_seconds: i64,
-    ) -> Option<Arc<Price<'h>>> {
-        let closest = self.closest_by_key(time, |_p| true);
-        if let Some(closest) = closest.as_ref() {
-            if within_seconds >= 0
-                && (closest.datetime().datetime() - time).num_seconds().abs() > within_seconds
+        closest_price.and_then(|closest_price| {
+            let closest = closest_price.datetime().datetime();
+            if !((closest - target).abs().num_seconds() <= within_seconds as i64
+                || (target - closest).abs().num_seconds() < within_seconds as i64)
             {
-                return None;
+                None
+            } else {
+                Some(closest_price)
             }
-        }
-        closest
+        })
     }
 
     /// Adds a price to the database. If a price for the same date already exists
@@ -140,12 +138,8 @@ impl<'h> PriceDatabase<'h> {
         if let Some(file) = node.nearest_filename() {
             trace!("Writing prices to file: {}", file.file_name().unwrap().to_str().unwrap());
             node.clear_directives_filter(|d| matches!(d.kind(), DirectiveKind::Price(_)));
-            let config = node.segments().last().unwrap().config();
             for price in prices.0.iter() {
-                let mut p = (**price).clone();
-                p.set_date_format(config.date_format());
-                p.set_time_format(config.time_format());
-                p.set_timezone(config.timezone());
+                let p = (**price).clone();
                 node.append_directive(DirectiveKind::Price(Arc::new(p)))
             }
             node.write_nearest_file()?;
@@ -156,13 +150,13 @@ impl<'h> PriceDatabase<'h> {
     /// Find's the closest price to key that the supplied matches() function returns true for.
     /// This works by performing an initial binary search to find a central position from which the
     /// search moves out to the left and right.
-    fn closest_by_key<F>(&self, key: DateTime<Tz>, matches: F) -> Option<Arc<Price<'h>>>
+    fn closest_by_key<F>(&self, key: JDateTime, matches: F) -> Option<Arc<Price<'h>>>
     where
         F: Fn(&Price<'h>) -> bool,
     {
         let prices_lock = self.prices_init();
         let prices = &prices_lock.0;
-        let i = match prices.binary_search_by_key(&key, |p| *p.datetime()) {
+        let i = match prices.binary_search_by_key(&key.datetime(), |p| *p.datetime()) {
             Ok(pos) => pos,
             Err(pos) => pos,
         };
@@ -237,7 +231,7 @@ impl<'h> PriceDatabase<'h> {
 
 #[cfg(test)]
 mod tests {
-    use crate::date_and_time::JDateTime;
+    use crate::datetime::date_and_time::JDateTime;
     use crate::price::Price;
     use crate::price_db::PriceDatabase;
     use crate::unit::Unit;

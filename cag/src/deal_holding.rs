@@ -16,7 +16,7 @@ use chrono_tz::Tz;
 use journ_core::alloc::HerdAllocator;
 use journ_core::amount::{Amount, AmountExpr, Quantity};
 use journ_core::configuration::Configuration;
-use journ_core::date_and_time::{JDateTime, JDateTimeRange};
+use journ_core::datetime::{DateTimePrecision, JDateTime, JDateTimeRange};
 use journ_core::err;
 use journ_core::error::{JournError, JournResult};
 use journ_core::ext::NumExt;
@@ -30,7 +30,7 @@ use std::collections::VecDeque;
 use std::fmt::Debug;
 use std::ops::Add;
 use std::{fmt, iter, mem};
-use yaml_rust::Yaml;
+use yaml_rust2::Yaml;
 
 /// A unifying type for the different kinds of deal holdings (containers). A DealHolding is a tree structure with
 /// [Deal] types at its leaves, with the root of the tree being managed by a [`Pool`].
@@ -56,7 +56,8 @@ impl<'h> DealHolding<'h> {
         }
     }
 
-    /// Gets the deal totals without expenses.
+    /// Gets the deal totals without expenses. This will include the primary unit
+    /// as the amount and the amount in the unit of account as the first valuation.
     pub fn total_before_expenses(&self) -> ValuedAmount<'h> {
         match self {
             //Single(deal) => deal.total_before_expenses(),
@@ -75,7 +76,7 @@ impl<'h> DealHolding<'h> {
         }
     }
 
-    pub fn datetime(&self) -> JDateTimeRange<'h> {
+    pub fn datetime(&self) -> JDateTimeRange {
         match self {
             //Single(deal) => deal.datetime(),
             Group(group) => group.datetime(),
@@ -175,6 +176,7 @@ impl<'h> DealHolding<'h> {
                     group.entries().next().unwrap().config().allocator(),
                 ),
                 ValuedAmount::nil(),
+                group.unit_of_account(),
             )),
         );
 
@@ -337,9 +339,10 @@ impl<'h> Add for DealHolding<'h> {
     }
 }
 
+/*
 impl From<&DealHolding<'_>> for Yaml {
     fn from(value: &DealHolding<'_>) -> Self {
-        let mut map = yaml_rust::yaml::Hash::new();
+        let mut map = yaml_rust2::yaml::Hash::new();
         let expenses = value.expenses();
         let total = value.total().valued_amount().clone();
         let total_before_expenses = value.total_before_expenses();
@@ -360,14 +363,14 @@ impl From<&DealHolding<'_>> for Yaml {
         );
         Yaml::Hash(map)
     }
-}
+}*/
 
 /// A deal holding that displays absolute values
 pub struct AbsDealHolding<'h, 'd>(pub &'d DealHolding<'h>);
 
 impl From<AbsDealHolding<'_, '_>> for Yaml {
     fn from(value: AbsDealHolding<'_, '_>) -> Self {
-        let mut map = yaml_rust::yaml::Hash::new();
+        let mut map = yaml_rust2::yaml::Hash::new();
         let expenses = value.0.expenses();
         let total = value.0.total().valued_amount().clone();
         let unadjusted_total = value.0.total_before_expenses();
@@ -384,8 +387,8 @@ impl From<AbsDealHolding<'_, '_>> for Yaml {
 pub struct SequenceDealHolding<'h> {
     sequence: VecDeque<DealHolding<'h>, &'h HerdAllocator<'h>>,
     balance: PoolBalance<'h>,
-    oldest: JDateTime<'h>,
-    newest: JDateTime<'h>,
+    oldest: JDateTime,
+    newest: JDateTime,
 }
 
 impl<'h> SequenceDealHolding<'h> {
@@ -429,7 +432,7 @@ impl<'h> SequenceDealHolding<'h> {
         self.sequence.iter_mut()
     }
 
-    pub fn datetime(&self) -> JDateTimeRange<'h> {
+    pub fn datetime(&self) -> JDateTimeRange {
         // The sequence won't necessarily be in date order due to the way rule logic
         // may operate.
         JDateTimeRange::new(self.oldest, Some(self.newest))
@@ -718,6 +721,7 @@ impl Debug for SequenceDealHolding<'_> {
     }
 }
 
+/*
 impl From<&SequenceDealHolding<'_>> for Yaml {
     fn from(value: &SequenceDealHolding<'_>) -> Self {
         let mut seq = Vec::with_capacity(value.sequence.len());
@@ -726,12 +730,12 @@ impl From<&SequenceDealHolding<'_>> for Yaml {
         }
         Yaml::Array(seq)
     }
-}
+}*/
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct AverageDealHolding<'h> {
     /// The datetime range of dealing events contained within
-    datetime: JDateTimeRange<'h>,
+    datetime: JDateTimeRange,
     valued_amount: ValuedAmount<'h>,
     expenses: ValuedAmount<'h>,
     balance: PoolBalance<'h>,
@@ -739,15 +743,16 @@ pub struct AverageDealHolding<'h> {
 
 impl<'h> AverageDealHolding<'h> {
     pub fn new(
-        datetime: JDateTimeRange<'h>,
+        datetime: JDateTimeRange,
         valued_amount: ValuedAmount<'h>,
         expenses: ValuedAmount<'h>,
+        unit_of_account: &'h Unit<'h>,
     ) -> Self {
         let mut holding = Self {
             datetime,
             valued_amount: valued_amount.clone(),
             expenses,
-            balance: PoolBalance::new(valued_amount),
+            balance: PoolBalance::new(valued_amount, unit_of_account),
         };
         holding.balance = holding.calculate_balance();
         holding
@@ -762,14 +767,14 @@ impl<'h> AverageDealHolding<'h> {
     }
 
     /// The datetime range of dealing events contained within.
-    pub fn datetime_range(&self) -> JDateTimeRange<'h> {
+    pub fn datetime_range(&self) -> JDateTimeRange {
         self.datetime
     }
 
     pub fn calculate_balance(&self) -> PoolBalance<'h> {
         let mut total = self.total_before_expenses().clone();
         total.add_from(&self.expenses);
-        PoolBalance::new(total)
+        PoolBalance::new(total, self.balance.unit_of_account())
     }
 
     pub fn set_value_on_date(
@@ -778,11 +783,8 @@ impl<'h> AverageDealHolding<'h> {
         config: &Configuration<'h>,
         date: DateTime<Tz>,
     ) -> Result<(), JournError> {
-        match SystemValuer::on_date(
-            config.clone(),
-            JDateTime::from_datetime(date, Some(config.date_format()), Some(config.time_format())),
-        )
-        .value(uoa, self.valued_amount.amount())
+        match SystemValuer::on_date(config.clone(), JDateTime::new(date, DateTimePrecision::Second))
+            .value(uoa, self.valued_amount.amount())
         {
             Ok(mut val) => {
                 val.rounded();
@@ -845,6 +847,7 @@ impl<'h> AverageDealHolding<'h> {
     }
 
     pub fn set_in_terms_of_unit_of_account(&mut self, uoa: &'h Unit<'h>) {
+        self.valued_amount.order_valuation(uoa, 0);
         self.expenses.in_terms_of(uoa);
     }
 
@@ -865,6 +868,7 @@ impl<'h> AverageDealHolding<'h> {
 
         // Use the balance for the split and round that. This is more accurate than splitting the
         // valued amount and expenses components, rounding them and adding them back together.
+        let unit_of_account = self.balance.unit_of_account();
         let (bal_split, bal_rem) = self.balance.into_valued_amount().split(split_amount);
 
         let (left_va, rem_va) = self.valued_amount.split(split_amount);
@@ -890,7 +894,7 @@ impl<'h> AverageDealHolding<'h> {
             None
         } else {
             Some(AverageDealHolding {
-                balance: PoolBalance::new(bal_rem),
+                balance: PoolBalance::new(bal_rem, unit_of_account),
                 datetime: self.datetime,
                 valued_amount: rem_va,
                 expenses: right_exp,
@@ -899,7 +903,7 @@ impl<'h> AverageDealHolding<'h> {
         trace!("Averagesplit_max: left_va: {}, right: {:?}", left_va, right.as_ref());
         Ok((
             AverageDealHolding {
-                balance: PoolBalance::new(bal_split),
+                balance: PoolBalance::new(bal_split, unit_of_account),
                 datetime: self.datetime,
                 valued_amount: left_va,
                 expenses: left_exp,

@@ -12,13 +12,12 @@ use crate::module_init::MODULE_NAME;
 use crate::pool::PoolBalance;
 use journ_core::alloc::HerdAllocator;
 use journ_core::amount::AmountExpr;
-use journ_core::date_and_time::JDateTimeRange;
+use journ_core::datetime::JDateTimeRange;
 use journ_core::error::JournResult;
 use journ_core::journal_entry::{EntryId, JournalEntry};
 use journ_core::journal_entry_flow::Flow;
 use journ_core::metadata::Metadata;
-use journ_core::reporting::command::arguments::Cmd;
-use journ_core::reporting::table;
+use journ_core::report::table;
 use journ_core::unit::Unit;
 use journ_core::valued_amount::ValuedAmount;
 use journ_core::valuer::{SystemValuer, ValuationError};
@@ -27,8 +26,6 @@ use std::fmt;
 use std::fmt::Formatter;
 use std::ops::Add;
 use std::sync::atomic::{AtomicU32, Ordering};
-use yaml_rust::Yaml;
-use yaml_rust::yaml::Hash;
 
 pub const PROP_EXPENSES: &str = "Expenses";
 pub const PROP_TAXABLE_GAIN: &str = "Taxable Gain";
@@ -90,7 +87,7 @@ pub struct Deal<'h> {
     /// The entry from which the deal or belongs to.
     entry: &'h JournalEntry<'h>,
     metadata: SmallVec<[Metadata<'h>; 4]>,
-    datetime: JDateTimeRange<'h>,
+    datetime: JDateTimeRange,
     /// Positive for acquisitions, negative for disposals. May be zero but never nil.
     /// The values represent the cost of the deal before allowable expenses for acquisitions; or it may reflect gross proceeds for disposals.
     /// A ValuedAmount type is expected to have at least one valuation in the unit of account set at the time, and valuations in other currencies
@@ -109,10 +106,12 @@ pub struct Deal<'h> {
     /// will override the normal deal detection on the entry.
     required: bool,
     /// When split operations are performed on deals, this is set to the original deal before the split.
-    /// This is useful to allow for reporting whether a deal has been split up, and the amount it was split from.
+    /// This is useful to allow for report whether a deal has been split up, and the amount it was split from.
     split_parent: Option<Box<DealHolding<'h>, &'h HerdAllocator<'h>>>,
     /// The balance of the valued_amount plus allowable_expenses
     balance: PoolBalance<'h>,
+    /// The unit of account
+    unit_of_account: &'h Unit<'h>,
 }
 
 impl<'h> Deal<'h> {
@@ -126,6 +125,7 @@ impl<'h> Deal<'h> {
         mut valued_amount: ValuedAmount<'h>,
         taxable_gain: Option<ValuedAmount<'h>>,
         required: bool,
+        uoa: &'h Unit<'h>,
     ) -> JournResult<Self> {
         assert!(!valued_amount.is_nil());
 
@@ -133,11 +133,7 @@ impl<'h> Deal<'h> {
             .map(|id| DealId::new(entry.id(), id))
             .unwrap_or_else(|| DealId::allocate(entry.id()));
 
-        // Base the datetime of the deal on the argument's timezone rather than the entry's. This
-        // allows us to compare deals effectively and prepare the deal for reporting.
-        let cmd = Cmd::get();
-        let datetime =
-            entry.date_and_time().datetime_range().convert_datetime_range(cmd.datetime_fmt_cmd());
+        let datetime = entry.date_and_time().datetime_range();
 
         let round_deals = entry
             .config()
@@ -149,7 +145,7 @@ impl<'h> Deal<'h> {
             valued_amount.round_total_valuations();
         }
 
-        let balance = Self::calc_balance(&valued_amount, &ValuedAmount::nil(), &[]);
+        let balance = Self::calc_balance(&valued_amount, &ValuedAmount::nil(), &[], uoa);
 
         Ok(Self {
             id,
@@ -163,10 +159,11 @@ impl<'h> Deal<'h> {
             split_parent: None,
             balance,
             adjustments: vec![],
+            unit_of_account: uoa,
         })
     }
 
-    pub fn zero(unit: &'h Unit<'h>, entry: &'h JournalEntry<'h>) -> Self {
+    pub fn zero(unit: &'h Unit<'h>, entry: &'h JournalEntry<'h>, uoa: &'h Unit<'h>) -> Self {
         let allocator = entry.config().allocator();
         Self::new(
             None,
@@ -175,6 +172,7 @@ impl<'h> Deal<'h> {
             ValuedAmount::new_in(AmountExpr::from(unit.with_quantity(0)), allocator),
             None,
             false,
+            uoa,
         )
         .unwrap()
     }
@@ -199,19 +197,28 @@ impl<'h> Deal<'h> {
             self.allowable_expenses.round();
         }
 
-        self.balance = Self::calc_balance(&self.valued_amount, &self.allowable_expenses, &[]);
+        self.balance = Self::calc_balance(
+            &self.valued_amount,
+            &self.allowable_expenses,
+            &[],
+            self.unit_of_account,
+        );
     }
 
     pub fn id(&self) -> DealId<'h> {
         self.id
     }
 
-    pub fn datetime(&self) -> JDateTimeRange<'h> {
+    pub fn datetime(&self) -> JDateTimeRange {
         self.datetime
     }
 
     pub fn unit(&self) -> &'h Unit<'h> {
         self.valued_amount.amount().unit()
+    }
+
+    pub fn unit_of_account(&self) -> &'h Unit<'h> {
+        self.unit_of_account
     }
 
     pub fn allocator(&self) -> &'h HerdAllocator<'h> {
@@ -259,8 +266,12 @@ impl<'h> Deal<'h> {
                 tg.value_in_or_value_with(unit_of_account, &mut system_valuer, rounded).map(Some)
             })
             .unwrap_or(Ok(None))?;
-        self.balance =
-            Self::calc_balance(&self.valued_amount, &self.allowable_expenses, &self.adjustments);
+        self.balance = Self::calc_balance(
+            &self.valued_amount,
+            &self.allowable_expenses,
+            &self.adjustments,
+            self.unit_of_account,
+        );
         Ok(())
     }
 
@@ -291,6 +302,7 @@ impl<'h> Deal<'h> {
         valued_amount: &ValuedAmount<'h>,
         expenses: &ValuedAmount<'h>,
         adjustments: &[Adjustment<'h>],
+        uoa: &'h Unit<'h>,
     ) -> PoolBalance<'h> {
         let mut adj_va = valued_amount.clone();
         adj_va.add_from(expenses);
@@ -298,7 +310,7 @@ impl<'h> Deal<'h> {
             adj.apply(&mut adj_va).unwrap();
         }
 
-        PoolBalance::new(adj_va)
+        PoolBalance::new(adj_va, uoa)
     }
 
     pub fn entry(&self) -> &'h JournalEntry<'h> {
@@ -389,6 +401,7 @@ impl<'a> From<&'a Deal<'_>> for table::Cell<'a> {
     }
 }
 
+/*
 impl From<&Deal<'_>> for Yaml {
     fn from(deal: &Deal<'_>) -> Self {
         let mut map = Hash::new();
@@ -404,7 +417,7 @@ impl From<&Deal<'_>> for Yaml {
         //map.insert(Yaml::String("remainder".to_string()), Yaml::Boolean(deal.is_remainder()));
         Yaml::Hash(map)
     }
-}
+}*/
 
 impl PartialEq for Deal<'_> {
     fn eq(&self, other: &Self) -> bool {
@@ -440,8 +453,12 @@ impl<'h> Add<&Deal<'h>> for Deal<'h> {
         self.adjustments.append(&mut rhs.adjustments.clone());
         self.valued_amount = (&self.valued_amount + &rhs.valued_amount).unwrap();
         self.allowable_expenses = (&self.allowable_expenses + &rhs.allowable_expenses)?;
-        self.balance =
-            Self::calc_balance(&self.valued_amount, &self.allowable_expenses, &self.adjustments);
+        self.balance = Self::calc_balance(
+            &self.valued_amount,
+            &self.allowable_expenses,
+            &self.adjustments,
+            self.unit_of_account,
+        );
         Some(self)
     }
 }

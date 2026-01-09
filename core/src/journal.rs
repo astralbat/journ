@@ -7,7 +7,7 @@
  */
 use crate::alloc::HerdAllocator;
 use crate::configuration::Configuration;
-use crate::date_and_time::JDateTime;
+use crate::datetime::JDateTime;
 use crate::directive::DirectiveKind;
 use crate::err;
 use crate::error::{BlockContext, BlockContextError, JournErrors, JournResult};
@@ -17,8 +17,8 @@ use crate::parsing::input::TextBlockInput;
 use crate::parsing::parser::JournalParseNode;
 use crate::parsing::text_block::TextBlock;
 use crate::python::mod_ledger::PythonLedgerModule;
-use crate::reporting::balance::AccountBalances;
-use crate::reporting::command::arguments::Arguments;
+use crate::report::balance::AccountBalances;
+use crate::report::command::arguments::Arguments;
 use nom_locate::LocatedSpan;
 use normalize_path::NormalizePath;
 use std::collections::BTreeMap;
@@ -81,7 +81,7 @@ impl<'h> Journal<'h> {
             EntryDateId<'h>,
             (Option<&'h TextBlock<'h>>, &'h JournalEntry<'h>),
         > = BTreeMap::new();
-        for dir in root.all_directives_iter() {
+        for (seg, dir) in root.all_directives_iter() {
             match dir.kind() {
                 DirectiveKind::Entry(e) => {
                     entries.insert(EntryDateId::from(*e), (dir.parsed(), e));
@@ -167,14 +167,14 @@ impl<'h> Journal<'h> {
         range: R,
     ) -> impl DoubleEndedIterator<Item = &'h JournalEntry<'h>> + Clone + 'a
     where
-        R: RangeBounds<JDateTime<'a>>,
+        R: RangeBounds<JDateTime>,
     {
         let range = EntryDateId::date_range(range);
         self.entries.range(range).map(|e| e.1.1)
     }
 
     /// Searches for an entry whose start date and description match those specified
-    pub fn contains_entry(&self, start_date: JDateTime<'h>, description: &str) -> bool {
+    pub fn contains_entry(&self, start_date: JDateTime, description: &str) -> bool {
         for entry in self.entry_range(&start_date..=&start_date) {
             if entry.description() == description {
                 return true;
@@ -191,7 +191,7 @@ impl<'h> Journal<'h> {
     ) -> impl Iterator<Item = &'h JournalEntry<'h>> + 'a
     where
         'b: 'a,
-        R: RangeBounds<JDateTime<'a>>,
+        R: RangeBounds<JDateTime>,
     {
         self.entry_range(datetime_range).filter(move |e| e.description() == description)
     }

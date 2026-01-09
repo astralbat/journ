@@ -93,6 +93,7 @@ impl<'h, F: Flows<'h>> CgFlows<'h, F> {
     pub fn create_deals(
         &self,
         entry: &'h JournalEntry<'h>,
+        unit_of_account: &'h Unit<'h>,
     ) -> JournResult<SmallVec<[Deal<'h>; 2]>> {
         if !self.flows.is_homogenous() {
             panic!("Deals can only be created from homogenous flows");
@@ -138,7 +139,15 @@ impl<'h, F: Flows<'h>> CgFlows<'h, F> {
             };
             if md.iter().any(|l: &Metadata| l.key() == "CAG-ForceDeal") {
                 let valued_amount = flow.valued_amount().clone();
-                deals.push(Deal::new(None, entry, md, valued_amount, None, false)?);
+                deals.push(Deal::new(
+                    None,
+                    entry,
+                    md,
+                    valued_amount,
+                    None,
+                    false,
+                    unit_of_account,
+                )?);
             }
         }
 
@@ -151,7 +160,17 @@ impl<'h, F: Flows<'h>> CgFlows<'h, F> {
             };
             if !md.iter().any(|l| l.key() == "CAG-NoDeal") {
                 let valued_amount = flow.valued_amount().clone();
-                deals.push(Deal::new(None, entry, md, valued_amount, None, false)?);
+                if valued_amount.unit() != unit_of_account {
+                    deals.push(Deal::new(
+                        None,
+                        entry,
+                        md,
+                        valued_amount,
+                        None,
+                        false,
+                        unit_of_account,
+                    )?);
+                }
             }
         }
         Ok(deals)

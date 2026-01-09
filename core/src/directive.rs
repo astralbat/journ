@@ -6,7 +6,7 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::account::Account;
-use crate::date_and_time::{DateFormat, TimeFormat};
+use crate::datetime::DateTimeFormat;
 use crate::journal_entry::JournalEntry;
 use crate::journal_node::JournalNode;
 use crate::module::ModuleDirectiveObj;
@@ -16,7 +16,6 @@ use crate::unit::{Unit, Units};
 use chrono_tz::Tz;
 use std::cmp::Ordering;
 use std::sync::Arc;
-
 //pub type ParsedJournalEntry<'h> = Arc<Mutex<ParsedDirective<'h, JournalEntry<'h>>>>;
 
 #[derive(Debug)]
@@ -30,12 +29,13 @@ pub enum DirectiveKind<'h> {
     Include(&'h JournalNode<'h>) = 5,
     Branch(&'h JournalNode<'h>) = 6,
     Python(&'h JournalNode<'h>) = 7,
-    DateFormat(&'h DateFormat<'h>) = 8,
-    TimeFormat(&'h TimeFormat<'h>) = 9,
-    TimeZone(Tz) = 10,
+    DateFormat(&'h DateTimeFormat<'h>) = 8,
+    TimeFormat(&'h DateTimeFormat<'h>) = 9,
+    DateTimeFormat(&'h DateTimeFormat<'h>) = 10,
+    TimeZone(Tz) = 11,
     //Cgt(CgtConfiguration<'h>) = 11,
-    Module(&'h dyn ModuleDirectiveObj) = 12,
-    Comment(&'h str) = 13,
+    Module(&'h dyn ModuleDirectiveObj) = 13,
+    Comment(&'h str) = 14,
 }
 
 impl<'h> PartialEq<DirectiveKind<'h>> for DirectiveKind<'h> {

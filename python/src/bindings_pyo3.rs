@@ -16,14 +16,14 @@ use chrono_tz::Tz;
 use env_logger::Builder;
 use journ_core::alloc::HerdAllocator;
 use journ_core::configuration::AlwaysIncluded;
-use journ_core::date_and_time::{DateAndTime, JDateTime, JDateTimeRange};
+use journ_core::datetime::date_and_time::{DateAndTime, JDateTime, JDateTimeRange};
 use journ_core::err;
 use journ_core::error::JournError;
 use journ_core::journal_node::NodeId;
 use journ_core::module::MODULES;
 use journ_core::parsing::text_block::TextBlock;
 use journ_core::python::mod_ledger;
-use journ_core::reporting::balance::AccountBalances;
+use journ_core::report::balance::AccountBalances;
 use journ_core::unit::{RoundingStrategy, UnitFormat};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -123,8 +123,8 @@ impl Journal {
     #[new]
     fn new(filename: &str) -> PyLedgerResult<Self> {
         //let allocator = HerdAllocator::new(&HERD);
-        let args = journ_core::reporting::command::arguments::Arguments::set(
-            journ_core::reporting::command::arguments::Arguments::default(),
+        let args = journ_core::report::command::arguments::Arguments::set(
+            journ_core::report::command::arguments::Arguments::default(),
         );
         let filename = &**ALLOCATOR.alloc(PathBuf::from(filename));
 

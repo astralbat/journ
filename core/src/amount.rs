@@ -5,11 +5,11 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
-use crate::reporting::table::Cell;
-use crate::reporting::table::WrapPolicy;
-use crate::reporting::table2::{AlignedCell, Alignment, BlankCell, SpaceDistribution, StyledCell};
-use crate::reporting::term_style::{Colour, Style};
-use crate::reporting::{table, table2};
+use crate::report::table::Cell;
+use crate::report::table::WrapPolicy;
+use crate::report::table2::{AlignedCell, Alignment, BlankCell, SpaceDistribution, StyledCell};
+use crate::report::term_style::{Colour, Style};
+use crate::report::{table, table2};
 use crate::unit;
 use crate::unit::{NegativeStyle, RoundingStrategy, Unit, UnitFormat};
 use fmt::Write;
@@ -24,7 +24,7 @@ use std::ops::{
     SubAssign,
 };
 use std::{cmp, fmt, mem};
-use yaml_rust::Yaml;
+use yaml_rust2::Yaml;
 
 /// A quantity is a `Decimal` that forms the numeric part of an `Amount`. E.g. the '5' in '$5'.
 pub type Quantity = Decimal;
@@ -523,6 +523,12 @@ impl<'h> Amount<'h> {
     }
 }
 
+impl Default for Amount<'_> {
+    fn default() -> Self {
+        Amount::nil()
+    }
+}
+
 impl Eq for Amount<'_> {}
 
 impl<'h> PartialOrd for Amount<'h> {
@@ -632,7 +638,7 @@ impl<'h, 'a> From<Amount<'h>> for Cell<'a> {
 impl<'h> From<&Amount<'h>> for Yaml {
     fn from(amount: &Amount<'h>) -> Self {
         // Converts the amount to a hash of unit and quantity.
-        let mut hash = yaml_rust::yaml::Hash::new();
+        let mut hash = yaml_rust2::yaml::Hash::new();
         hash.insert(
             Yaml::String("unit".to_string()),
             Yaml::String(amount.unit().code().to_string()),
@@ -987,6 +993,12 @@ impl<'h> From<Amount<'h>> for AmountExpr<'h> {
 impl<'h> PartialEq<Amount<'h>> for AmountExpr<'h> {
     fn eq(&self, other: &Amount<'h>) -> bool {
         self.amount == *other
+    }
+}
+
+impl Hash for AmountExpr<'_> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.amount.hash(state);
     }
 }
 

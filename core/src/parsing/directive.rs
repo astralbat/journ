@@ -6,7 +6,7 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::account::Account;
-use crate::date_and_time::{DateAndTime, DateFormat, JDateTime, TimeFormat};
+use crate::datetime::{DateAndTime, DateFormatMode, DateTimeFormat};
 use crate::directive::{Directive, DirectiveKind};
 use crate::error::parsing::{IParseError, promote};
 use crate::error::{JournErrors, JournResult};
@@ -27,8 +27,8 @@ use crate::{err, match_blocks, parsing};
 use chrono_tz::Tz;
 use nom::branch::alt;
 use nom::character::complete::{space0, space1};
-use nom::combinator::{consumed, map, map_res, opt, rest};
-use nom::sequence::{pair, preceded};
+use nom::combinator::{consumed, map, opt, rest};
+use nom::sequence::preceded;
 use nom::{Err as NomErr, Finish};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -79,7 +79,7 @@ fn dateformat_directive<'h, I>(input: I) -> JParseResult<I, Directive<'h>>
 where
     I: TextInput<'h> + ConfigInput<'h> + BlockInput<'h>,
 {
-    let (rem, df) = DateFormat::parse_format(input.clone())?;
+    let (rem, df) = DateTimeFormat::parse_format(DateFormatMode::Date)(input.clone())?;
     let mut config = input.config_mut();
     let allocator = config.allocator();
     config.set_date_format(allocator.alloc(df));
@@ -90,10 +90,21 @@ fn timeformat_directive<'h, I>(input: I) -> JParseResult<I, Directive<'h>>
 where
     I: TextInput<'h> + ConfigInput<'h> + BlockInput<'h>,
 {
-    let (rem, tf) = TimeFormat::parse_format(input.clone())?;
+    let (rem, tf) = DateTimeFormat::parse_format(DateFormatMode::Time)(input.clone())?;
     let mut config = input.config_mut();
     let allocator = config.allocator();
     config.set_time_format(allocator.alloc(tf));
+    Ok((rem, Directive::new(Some(input.block()), DirectiveKind::TimeFormat(config.time_format()))))
+}
+
+fn datetimeformat_directive<'h, I>(input: I) -> JParseResult<I, Directive<'h>>
+where
+    I: TextInput<'h> + ConfigInput<'h> + BlockInput<'h>,
+{
+    let (rem, tf) = DateTimeFormat::parse_format(DateFormatMode::DateTime)(input.clone())?;
+    let mut config = input.config_mut();
+    let allocator = config.allocator();
+    config.set_datetime_format(allocator.alloc(tf));
     Ok((rem, Directive::new(Some(input.block()), DirectiveKind::TimeFormat(config.time_format()))))
 }
 
@@ -150,17 +161,13 @@ where
     let (dir_rem, rem_value) = promote("Price date expected", line_value)(input.clone())?;
 
     // Parse date
-    let (rem_value, datetime) =
-        map_res(pair(entry::date, preceded(space1, entry::time)), |(date, time)| {
-            JDateTime::from_date_time(date, Some(time), tz)
-        })(rem_value.clone())
-        .map_err(|_| {
-            NomErr::Failure(rem_value.into_err(E_PARSE_DATETIME).with_source(format!(
-                "Expected datetime format: {} {}",
-                input.config().date_format().format_str(),
-                input.config().time_format().format_str()
-            )))
-        })?;
+    let (rem_value, datetime) = entry::datetime(tz)(rem_value.clone()).map_err(|_| {
+        NomErr::Failure(rem_value.into_err(E_PARSE_DATETIME).with_source(format!(
+            "Expected datetime format: {} {}",
+            input.config().date_format().format_str(),
+            input.config().time_format().format_str()
+        )))
+    })?;
 
     // Parse base unit
     let (rem_value, base_unit) = {
@@ -192,10 +199,7 @@ where
     Ok((dir_rem, Directive::new(Some(input.block()), DirectiveKind::Price(Arc::new(price)))))
 }
 
-fn entry<'h, 's, 'e, 'p, I>(
-    input: I,
-    date_and_time: DateAndTime<'h>,
-) -> JParseResult<I, Directive<'h>>
+fn entry<'h, 's, 'e, 'p, I>(input: I, date_and_time: DateAndTime) -> JParseResult<I, Directive<'h>>
 where
     I: TextInput<'h>
         + BlockInput<'h>
@@ -391,6 +395,7 @@ where
         },
         param_value("dateformat") => |input| push_directive(dateformat_directive(input)?.1, false),
         param_value("timeformat") => |input| push_directive(timeformat_directive(input)?.1, false),
+        param_value("datetimeformat") => |input| push_directive(datetimeformat_directive(input)?.1, false),
         param_value("timezone") => |input| push_directive(timezone_directive(input)?.1, false),
         param_value("python") => |input| push_directive(python_directive(input)?.1, false),
         param_value("units") => |input| push_directive(units_directive(input)?.1, false),
@@ -476,7 +481,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use crate::date_and_time::{JDate, JTime};
+    use crate::datetime::date_and_time::{JDate, JTime};
     use crate::ext::StrExt;
     use crate::metadata::Metadata;
     use crate::parsing::directive::*;

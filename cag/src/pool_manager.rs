@@ -16,7 +16,7 @@ use crate::ruleset::{ActionRule, AgeUnit, Condition, Rule};
 use chrono::{LocalResult, TimeZone};
 use journ_core::alloc::HerdAllocator;
 use journ_core::configuration::{Configuration, Filter};
-use journ_core::date_and_time::{JDateTime, JDateTimeRange};
+use journ_core::datetime::{DateTimePrecision, JDateTime, JDateTimeRange};
 use journ_core::err;
 use journ_core::error::{BlockContextError, JournError, JournResult};
 use journ_core::journal_entry::JournalEntry;
@@ -95,7 +95,7 @@ impl<'h, 'u> PoolManager<'h> {
 
     pub fn progress_deals(
         &mut self,
-        event_datetime: JDateTimeRange<'h>,
+        event_datetime: JDateTimeRange,
     ) -> JournResult<Vec<PoolEvent<'h>>> {
         let mut pool_events = vec![];
 
@@ -176,7 +176,7 @@ impl<'h, 'u> PoolManager<'h> {
     fn apply_deal_rules(
         &mut self,
         mut group: DealGroup<'h>,
-        event_datetime: JDateTimeRange<'h>,
+        event_datetime: JDateTimeRange,
         from_pool: Option<&'h str>,
         events: &mut Vec<PoolEvent<'h>>,
     ) -> JournResult<()> {
@@ -271,10 +271,9 @@ impl<'h, 'u> PoolManager<'h> {
                                 self.pool_scheduler_mut(pool_id).insert(PoolSchedulerEntry {
                                     pool_id,
                                     deal_id,
-                                    datetime: JDateTime::from_datetime(
+                                    datetime: JDateTime::new(
                                         future_date,
-                                        Some(event_datetime.date_format()),
-                                        event_datetime.time_format(),
+                                        DateTimePrecision::Second,
                                     ),
                                     deal_unit,
                                 });
@@ -388,7 +387,7 @@ impl<'h> PoolScheduler<'h> {
     /// The entries are read according to the `match_method`
     pub fn remove_next(
         &mut self,
-        threshold_date: JDateTime<'h>,
+        threshold_date: JDateTime,
         unit: &'h Unit<'h>,
         match_method: MatchMethod,
     ) -> Option<PoolSchedulerEntry<'h>> {
@@ -410,7 +409,7 @@ impl<'h> PoolScheduler<'h> {
 pub struct PoolSchedulerEntry<'h> {
     /// The scheduled date and time. This should be in the desired timezone
     /// of fired events.
-    datetime: JDateTime<'h>,
+    datetime: JDateTime,
     pool_id: usize,
     deal_unit: &'h Unit<'h>,
     deal_id: DealId<'h>,

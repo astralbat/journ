@@ -61,10 +61,12 @@ impl<'h> JournalNodeSegment<'h> {
         *guard = directives;
     }
 
+    /// Gets the configuration state as it is at the end of the segment.
     pub fn config(&self) -> &Configuration<'h> {
         self.configuration.get().expect("Journal node segment has no configuration")
     }
 
+    /// Sets the configuration state as it is at the end of the segment.
     pub(crate) fn set_config(&self, configuration: Configuration<'h>) {
         self.configuration.set(configuration).expect("Configuration should only be set once");
     }

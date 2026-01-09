@@ -9,7 +9,8 @@ use crate::account::Account;
 use crate::alloc::HerdAllocator;
 use crate::amount::Amount;
 use crate::configuration::Configuration;
-use crate::date_and_time::{DateAndTime, JDate, JDateTime};
+use crate::datetime::DateAndTime;
+use crate::datetime::{JDate, JDateTime};
 use crate::error::{BlockContext, BlockContextError, JournError, JournResult};
 use crate::ext::{RangeBoundsExt, StrExt};
 use crate::journal_entry_flow::{Flow, Flows};
@@ -17,7 +18,7 @@ use crate::journal_node::{FIRST_NODE_ID, LAST_NODE_ID, NodeId};
 use crate::metadata::Metadata;
 use crate::parsing::text_block::TextBlock;
 use crate::posting::{Posting, PostingId};
-use crate::reporting::command::arguments::Cmd;
+use crate::report::command::arguments::Cmd;
 use crate::unit::Unit;
 use crate::{err, match_map};
 use chrono::{
@@ -54,7 +55,7 @@ pub struct EntryDateId<'h> {
 }
 
 impl<'h> EntryDateId<'h> {
-    pub fn date_range<R: RangeBounds<JDateTime<'h>>>(range: R) -> Range<EntryDateId<'h>> {
+    pub fn date_range<R: RangeBounds<JDateTime>>(range: R) -> Range<EntryDateId<'h>> {
         let start = match range.start_bound() {
             Bound::Included(date) => date.naive_utc(),
             Bound::Excluded(date) => date.add(Duration::seconds(1)).naive_utc(),
@@ -118,7 +119,7 @@ impl<'h> EntryId<'h> {
                 &entry
                     .date_and_time
                     .aux_date_time()
-                    .map(|adt| adt.datetime())
+                    .map(|adt: JDateTime| adt.datetime())
                     .unwrap_or_else(|| entry.date_and_time.datetime_from()),
             ) + entry.id().id as u64
         } else {
@@ -181,7 +182,7 @@ pub struct JournalEntry<'h> {
     /// The text block from which the entry came. This will be `None` if the entry was inserted into a node rather than parsed.
     text_block: Option<&'h TextBlock<'h>>,
     date_id: Option<u64>,
-    date_and_time: DateAndTime<'h>,
+    date_and_time: DateAndTime,
     objects: Vec<EntryObject<'h>, &'h HerdAllocator<'h>>,
     description: &'h str,
     /// The state of the configuration at the time the entry was parsed.
@@ -192,7 +193,7 @@ impl<'h> JournalEntry<'h> {
     pub fn new(
         node_id: &'h NodeId<'h>,
         config: Configuration<'h>,
-        date_and_time: DateAndTime<'h>,
+        date_and_time: DateAndTime,
         description: &'h str,
         objects: Vec<EntryObject<'h>, &'h HerdAllocator<'h>>,
     ) -> Self {
@@ -227,11 +228,11 @@ impl<'h> JournalEntry<'h> {
         self.date_id.unwrap()
     }
 
-    pub fn date(&self) -> JDate<'h> {
+    pub fn date(&self) -> JDate {
         self.date_and_time.date_from()
     }
 
-    pub fn date_and_time(&self) -> &DateAndTime<'h> {
+    pub fn date_and_time(&self) -> &DateAndTime {
         &self.date_and_time
     }
 
@@ -777,7 +778,8 @@ impl<'h> JournalEntry<'h> {
     }
 
     pub fn write<W: fmt::Write>(&self, w: &mut W, include_elided: bool) -> fmt::Result {
-        write!(w, "{}{}", self.date_and_time, self.description)?;
+        self.date_and_time.write(w, &self.config)?;
+        write!(w, "{}", self.description)?;
         for obj in self.objects.iter() {
             match obj {
                 EntryObject::Comments(s) => {

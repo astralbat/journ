@@ -7,14 +7,15 @@
  */
 use crate::ExecCommand;
 use journ_core::configuration::{AccountFilter, Filter};
-use journ_core::date_and_time::JDateTime;
+use journ_core::datetime::JDateTime;
 use journ_core::directive::{Directive, DirectiveKind};
 use journ_core::error::JournResult;
 use journ_core::journal::Journal;
 use journ_core::journal_entry::JournalEntry;
 use journ_core::journal_node::JournalNode;
-use journ_core::reporting::command::arguments::{Command, DateTimeFormatCommand};
-use journ_core::reporting::command::cmd_line::BeginAndEndCommand;
+use journ_core::report::command::arguments::{Command, DateTimeFormatCommand};
+use journ_core::report::command::chained_result::ChainingResult;
+use journ_core::report::command::cmd_line::BeginAndEndCommand;
 use std::ops::RangeBounds;
 use std::path::Path;
 use std::process::exit;
@@ -42,7 +43,7 @@ struct DatetimeEntryFilter<R> {
 }
 impl<'a, R> Filter<JournalEntry<'a>> for DatetimeEntryFilter<R>
 where
-    R: RangeBounds<JDateTime<'a>>,
+    R: RangeBounds<JDateTime>,
 {
     fn is_included(&self, entry: &JournalEntry<'a>) -> bool {
         self.range.contains(&entry.date_and_time().from())
@@ -52,7 +53,7 @@ where
 impl PrintCommand {
     fn create_dir_filter<'a, R>(&self, datetime_range: R) -> impl Filter<Directive<'a>>
     where
-        R: RangeBounds<JDateTime<'a>>,
+        R: RangeBounds<JDateTime>,
     {
         struct DirFilter<R> {
             account_filter: AccountFilter,
@@ -60,7 +61,7 @@ impl PrintCommand {
         }
         impl<'d, R> Filter<Directive<'d>> for DirFilter<R>
         where
-            R: RangeBounds<JDateTime<'d>>,
+            R: RangeBounds<JDateTime>,
         {
             fn is_included(&self, item: &Directive<'d>) -> bool {
                 if let DirectiveKind::Entry(je) = item.kind() {
@@ -80,7 +81,11 @@ impl PrintCommand {
 }
 
 impl ExecCommand for PrintCommand {
-    fn execute<'j, 'h: 'j>(&self, journ: &'j mut Journal<'j>) -> JournResult<()> {
+    fn execute<'h>(
+        &'h self,
+        journ: &'h mut Journal<'h>,
+        _chained: Option<ChainingResult>,
+    ) -> JournResult<()> {
         let dir_filter = self.create_dir_filter(self.begin_and_end_cmd.begin_end_range());
         match self.print_file.as_ref().map(|s| s.to_string()) {
             Some(pf) => match journ.find_node_by_filename(Path::new(&pf)) {

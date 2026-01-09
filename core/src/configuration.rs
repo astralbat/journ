@@ -7,8 +7,9 @@
  */
 use crate::account::Account;
 use crate::alloc::HerdAllocator;
-use crate::date_and_time::{
-    DEFAULT_DATE_FORMAT, DEFAULT_NUMBER_FORMAT, DEFAULT_TIME_FORMAT, DateFormat, TimeFormat,
+use crate::datetime::{
+    DEFAULT_DATE_FORMAT, DEFAULT_DATETIME_FORMAT, DEFAULT_NUMBER_FORMAT, DEFAULT_TIME_FORMAT,
+    DateTimeFormat,
 };
 use crate::journal_node::{JournalNode, NodeId};
 use crate::module::MODULES;
@@ -58,8 +59,9 @@ struct BaseConfiguration<'h> {
     /// changes _and_ it is in use elsewhere (`Configuration::clone`).
     parent: Option<Arc<BaseConfiguration<'h>>>,
     version: ConfigurationVersion<'h>,
-    date_format: &'h DateFormat<'h>,
-    time_format: &'h TimeFormat<'h>,
+    date_format: &'h DateTimeFormat<'h>,
+    time_format: &'h DateTimeFormat<'h>,
+    datetime_format: &'h DateTimeFormat<'h>,
     timezone: Tz,
     number_format: &'h NumberFormat,
     default_unit: &'h Unit<'h>,
@@ -81,6 +83,7 @@ impl<'h> BaseConfiguration<'h> {
             number_format: DEFAULT_NUMBER_FORMAT.deref(),
             date_format: DEFAULT_DATE_FORMAT.deref(),
             time_format: DEFAULT_TIME_FORMAT.deref(),
+            datetime_format: DEFAULT_DATETIME_FORMAT.deref(),
             timezone: Tz::UTC,
             default_unit: allocator.alloc(Unit::none()),
             units: Default::default(),
@@ -105,15 +108,10 @@ impl<'h> BaseConfiguration<'h> {
             let new_base = Self {
                 parent: self.parent.clone(),
                 version: ConfigurationVersion::next(self.version),
-                date_format: self.date_format,
-                time_format: self.time_format,
-                timezone: self.timezone,
-                number_format: self.number_format,
-                default_unit: self.default_unit,
                 units: self.units.clone(),
                 accounts: self.accounts.clone(),
                 module_config: self.module_config.clone(),
-                herd_allocator: self.herd_allocator,
+                ..**self
             };
             *self = Arc::new(new_base);
             Arc::get_mut(self).unwrap()
@@ -197,6 +195,7 @@ impl Debug for BaseConfiguration<'_> {
         writeln!(f, "    Version:       {}", self.version)?;
         writeln!(f, "    Date Format:   {}", self.date_format.format_str())?;
         writeln!(f, "    Time Format:   {}", self.time_format.format_str())?;
+        writeln!(f, "    Datetime Format:  {}", self.datetime_format.format_str())?;
         writeln!(f, "    Timezone:      {}", self.timezone)?;
         writeln!(f, "    Number Format: {}", self.number_format)?;
         writeln!(f, "    Default Unit:  {}", self.default_unit.code())?;
@@ -318,15 +317,10 @@ impl<'h> Configuration<'h> {
                 } else {
                     ConfigurationVersion::initial(node_id)
                 },
-                date_format: self.base_config.date_format,
-                time_format: self.base_config.time_format,
-                timezone: self.base_config.timezone,
-                number_format: self.base_config.number_format,
-                default_unit: self.base_config.default_unit,
                 units: HashMap::new(),
                 accounts: HashMap::new(),
                 module_config: HashMap::new(),
-                herd_allocator: self.base_config.herd_allocator,
+                ..*self.base_config
             }),
         }
     }
@@ -336,27 +330,43 @@ impl<'h> Configuration<'h> {
     }
 
     /// Gets the date format in use.
-    pub fn date_format(&self) -> &'h DateFormat<'h> {
+    pub fn date_format(&self) -> &'h DateTimeFormat<'h> {
         self.base_config.date_format
     }
 
     /// Sets the date format for reading subsequent entries. The date format can be overridden
     /// multiple times to accommodate different entry styles.
-    pub fn set_date_format(&mut self, df: &'h DateFormat<'h>) {
+    pub fn set_date_format(&mut self, df: &'h DateTimeFormat<'h>) {
         let base_config = self.get_mut();
         base_config.date_format = df;
+        // Update the datetime format to be consistent with the new date format.
+        base_config.datetime_format = base_config.datetime_format.with_date_format(df).into_owned();
     }
 
     /// Gets the time format in use.
-    pub fn time_format(&self) -> &'h TimeFormat<'h> {
+    pub fn time_format(&self) -> &'h DateTimeFormat<'h> {
         self.base_config.time_format
     }
 
     /// Sets the time format for reading subsequent entries. The time format can be overridden
     /// multiple times to accommodate different entry styles.
-    pub fn set_time_format(&mut self, tf: &'h TimeFormat<'h>) {
+    pub fn set_time_format(&mut self, tf: &'h DateTimeFormat<'h>) {
         let base_config = self.get_mut();
         base_config.time_format = tf;
+        // Update the datetime format to be consistent with the new time format.
+        base_config.datetime_format = base_config.datetime_format.with_time_format(tf).into_owned();
+    }
+
+    pub fn datetime_format(&self) -> &'h DateTimeFormat<'h> {
+        self.base_config.datetime_format
+    }
+
+    pub fn set_datetime_format(&mut self, dtf: &'h DateTimeFormat<'h>) {
+        let base_config = self.get_mut();
+        base_config.datetime_format = dtf;
+        // Update the date and time formats to be consistent with the new datetime format.
+        base_config.date_format = base_config.datetime_format.with_date_format(dtf).into_owned();
+        base_config.time_format = base_config.time_format.with_time_format(dtf).into_owned();
     }
 
     /// Gets the time zone in use. The default is UTC unless overridden within the journal file.
@@ -478,6 +488,7 @@ impl<'h> Configuration<'h> {
         let base_config = self.get_mut();
         base_config.date_format = config.date_format();
         base_config.time_format = config.time_format();
+        base_config.datetime_format = config.datetime_format();
         base_config.timezone = config.timezone();
         base_config.number_format = config.number_format();
         base_config.default_unit = config.default_unit();

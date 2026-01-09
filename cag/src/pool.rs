@@ -16,10 +16,9 @@ use chrono_tz::Tz;
 use journ_core::alloc::HerdAllocator;
 use journ_core::amount::{Amount, AmountExpr};
 use journ_core::configuration::Configuration;
-use journ_core::date_and_time::JDateTimeRange;
+use journ_core::datetime::JDateTimeRange;
 use journ_core::err;
 use journ_core::error::JournResult;
-use journ_core::reporting::table;
 use journ_core::unit::Unit;
 use journ_core::valued_amount::ValuedAmount;
 use log::{debug, info, warn};
@@ -28,7 +27,7 @@ use rust_decimal_macros::dec;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::ops::{Add, AddAssign, Mul, Sub};
-use yaml_rust::Yaml;
+use yaml_rust2::Yaml;
 
 /// A pool is the top-level structure responsible for holding and matching `Deals`.
 /// It only makes sense that a pool deals with a single unit (and its aliases) as quantities
@@ -166,18 +165,17 @@ impl<'h> Pool<'h> {
     pub fn push(
         &mut self,
         mut group: DealGroup<'h>,
-        event_datetime: JDateTimeRange<'h>,
+        event_datetime: JDateTimeRange,
         from_pool: Option<&'h str>,
     ) -> JournResult<PoolEvent<'h>> {
         // Ensure that incoming deals can be valued in the pool's unit of account
         group.ensure_valued(self.unit_of_account)?;
 
         let deal_unit = group.unit();
-        let bal_before = self
-            .holdings
-            .get(deal_unit)
-            .map(|h| h.total().clone())
-            .unwrap_or_else(|| PoolBalance::zero(deal_unit, self.allocator));
+        let bal_before =
+            self.holdings.get(deal_unit).map(|h| h.total().clone()).unwrap_or_else(|| {
+                PoolBalance::zero(deal_unit, self.unit_of_account, self.allocator)
+            });
 
         self.push_internal(group.clone());
 
@@ -189,10 +187,9 @@ impl<'h> Pool<'h> {
                 None => PoolEventKind::PooledDeal(DealHolding::Group(group)),
             },
             bal_before,
-            self.holdings
-                .get(deal_unit)
-                .map(|dh| dh.total().clone())
-                .unwrap_or_else(|| PoolBalance::zero(deal_unit, self.allocator)),
+            self.holdings.get(deal_unit).map(|dh| dh.total().clone()).unwrap_or_else(|| {
+                PoolBalance::zero(deal_unit, self.unit_of_account, self.allocator)
+            }),
         );
         debug!("{}", event);
         Ok(event)
@@ -203,7 +200,7 @@ impl<'h> Pool<'h> {
     pub fn try_match(
         &mut self,
         mut originator: DealGroup<'h>,
-        event_datetime: JDateTimeRange<'h>,
+        event_datetime: JDateTimeRange,
     ) -> JournResult<Result<(Vec<PoolEvent<'h>>, Option<DealGroup<'h>>), DealGroup<'h>>> {
         // Ensure the unit of account is set so that adj_deal.amount() is successful.
         originator.ensure_valued(self.unit_of_account)?;
@@ -238,7 +235,7 @@ impl<'h> Pool<'h> {
     fn try_match_single(
         &mut self,
         originator: DealGroup<'h>,
-        event_datetime: JDateTimeRange<'h>,
+        event_datetime: JDateTimeRange,
     ) -> Result<(Option<PoolEvent<'h>>, Option<DealGroup<'h>>), DealGroup<'h>> {
         let unit = originator.unit();
         match self.holdings.remove(unit) {
@@ -264,10 +261,9 @@ impl<'h> Pool<'h> {
                                 originator_matched,
                             )),
                             bal_before,
-                            target_remaining
-                                .as_ref()
-                                .map(|dh| dh.total().clone())
-                                .unwrap_or_else(|| PoolBalance::zero(unit, self.allocator)),
+                            target_remaining.as_ref().map(|dh| dh.total().clone()).unwrap_or_else(
+                                || PoolBalance::zero(unit, self.unit_of_account, self.allocator),
+                            ),
                         );
                         info!("{}", event);
                         if let Some(tr) = target_remaining {
@@ -309,7 +305,7 @@ impl<'h> Pool<'h> {
             .holdings
             .get(unit)
             .map(|h| h.total().clone())
-            .unwrap_or_else(|| PoolBalance::zero(unit, self.allocator));
+            .unwrap_or_else(|| PoolBalance::zero(unit, self.unit_of_account, self.allocator));
 
         adj.convert_set_to_add(bal_before.valued_amount());
 
@@ -320,8 +316,8 @@ impl<'h> Pool<'h> {
                     // This is a warning and occurs when there is a time overlap in the entries
                     warn!(
                         "Datetime of adjustment may be before that of the latest deal: {} < {}",
-                        adj.datetime().start(),
-                        holding.datetime().end(),
+                        adj.datetime().start().datetime(),
+                        holding.datetime().end().datetime(),
                     );
                 }
 
@@ -338,7 +334,7 @@ impl<'h> Pool<'h> {
                     unit,
                     DealHolding::Group(DealGroup::new(
                         DealGroupCriteria::Single,
-                        Deal::zero(unit, adj.entry()),
+                        Deal::zero(unit, adj.entry(), self.unit_of_account),
                     )),
                 );
                 self.holdings.get_mut(unit).unwrap().add_adjustment(adj.clone())
@@ -349,7 +345,7 @@ impl<'h> Pool<'h> {
             .holdings
             .get(unit)
             .map(|dh| dh.total().clone())
-            .unwrap_or_else(|| PoolBalance::zero(unit, self.allocator));
+            .unwrap_or_else(|| PoolBalance::zero(unit, self.unit_of_account, self.allocator));
         debug!(
             "{} Adjusted {:?} on pool {}, bal now = {:?}",
             adj.datetime(),
@@ -369,7 +365,7 @@ impl<'h> Pool<'h> {
     pub fn balance(&self, unit: &'h Unit<'h>) -> PoolBalance<'h> {
         match self.holdings.get(unit) {
             Some(holding) => holding.total().clone(),
-            None => PoolBalance::zero(unit, self.allocator),
+            None => PoolBalance::zero(unit, self.unit_of_account, self.allocator),
         }
     }
 
@@ -381,69 +377,76 @@ impl<'h> Pool<'h> {
 /// A snapshot of a pool in time, summarising the total amount held in the pool and its cost which
 /// is not necessarily the same as its value as the cost can include deal expenses.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct PoolBalance<'h>(ValuedAmount<'h>);
+pub struct PoolBalance<'h> {
+    inner: ValuedAmount<'h>,
+    uoa: &'h Unit<'h>,
+}
 
 impl<'h> PoolBalance<'h> {
-    pub fn new(va: ValuedAmount<'h>) -> Self {
+    pub fn new(va: ValuedAmount<'h>, uoa: &'h Unit<'h>) -> Self {
         assert!(!va.is_nil());
 
-        PoolBalance(va)
+        PoolBalance { inner: va, uoa }
     }
 
-    pub fn zero(unit: &'h Unit<'h>, herd_allocator: &'h HerdAllocator<'h>) -> Self {
-        PoolBalance(ValuedAmount::new_in(AmountExpr::from(unit.with_quantity(0)), herd_allocator))
+    pub fn zero(
+        unit: &'h Unit<'h>,
+        uoa: &'h Unit<'h>,
+        herd_allocator: &'h HerdAllocator<'h>,
+    ) -> Self {
+        PoolBalance {
+            inner: ValuedAmount::new_in(AmountExpr::from(unit.with_quantity(0)), herd_allocator),
+            uoa,
+        }
     }
 
     pub fn is_zero(&self) -> bool {
-        self.0.is_zero()
+        self.inner.is_zero()
     }
 
     /// The pool's amount.
     pub fn amount(&self) -> Amount<'h> {
-        self.0.amount()
+        self.inner.amount()
+    }
+
+    pub fn unit_of_account(&self) -> &'h Unit<'h> {
+        self.uoa
+    }
+
+    /// Gets the pool balance's cost in the unit of account
+    pub fn cost(&self) -> Amount<'h> {
+        self.inner.value_in(self.uoa).unwrap()
     }
 
     pub fn valued_amount(&self) -> &ValuedAmount<'h> {
-        &self.0
+        &self.inner
     }
 
     pub fn into_valued_amount(self) -> ValuedAmount<'h> {
-        self.0
+        self.inner
     }
 
     /// Gets valuations only, excluding the main amount
     pub fn valuations(&self) -> impl Iterator<Item = Amount<'h>> + '_ {
-        self.0.valuations().map(|v| v.value())
+        self.inner.valuations().map(|v| v.value())
     }
 }
 
 impl fmt::Display for PoolBalance<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
+        write!(f, "{}", self.inner)
     }
 }
 
 impl fmt::Debug for PoolBalance<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?}", self.0)
-    }
-}
-
-impl<'a> From<&'a PoolBalance<'_>> for table::Cell<'a> {
-    fn from(value: &'a PoolBalance) -> Self {
-        (&value.0).into()
-    }
-}
-
-impl From<PoolBalance<'_>> for table::Cell<'_> {
-    fn from(value: PoolBalance) -> Self {
-        value.0.into()
+        write!(f, "{:?}", self.inner)
     }
 }
 
 impl From<&PoolBalance<'_>> for Yaml {
     fn from(value: &PoolBalance<'_>) -> Self {
-        Yaml::from(&value.0)
+        Yaml::from(&value.inner)
     }
 }
 
@@ -451,7 +454,7 @@ impl<'h> Add<&PoolBalance<'h>> for &PoolBalance<'h> {
     type Output = PoolBalance<'h>;
 
     fn add(self, rhs: &PoolBalance<'h>) -> Self::Output {
-        PoolBalance((&self.0 + &rhs.0).unwrap())
+        PoolBalance { inner: (&self.inner + &rhs.inner).unwrap(), uoa: self.uoa }
     }
 }
 
@@ -459,7 +462,7 @@ impl<'h> Sub<&PoolBalance<'h>> for &PoolBalance<'h> {
     type Output = PoolBalance<'h>;
 
     fn sub(self, rhs: &PoolBalance<'h>) -> Self::Output {
-        PoolBalance((&self.0 - &rhs.0).unwrap())
+        PoolBalance { inner: (&self.inner - &rhs.inner).unwrap(), uoa: self.uoa }
     }
 }
 
@@ -467,7 +470,7 @@ impl AddAssign<&Self> for PoolBalance<'_> {
     fn add_assign(&mut self, rhs: &Self) {
         assert_eq!(rhs.amount().unit(), self.amount().unit());
 
-        self.0 = (&self.0 + &rhs.0).unwrap();
+        self.inner = (&self.inner + &rhs.inner).unwrap();
     }
 }
 
@@ -475,7 +478,7 @@ impl<'h> Mul<Decimal> for &PoolBalance<'h> {
     type Output = PoolBalance<'h>;
 
     fn mul(self, rhs: Decimal) -> Self::Output {
-        PoolBalance(&self.0 * rhs)
+        PoolBalance { inner: &self.inner * rhs, uoa: self.uoa }
     }
 }
 

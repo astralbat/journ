@@ -1,4 +1,5 @@
-# Can be used within LLDB by executing `command script import $abs_path_to_lldb/type_summaries.py` at the prompt.
+# Can be used within LLDB by executing `command script import $abs_path_to_lldb/type_summaries.py` at the prompt
+# or by adding the string to ~/.lldbinit file.
 
 import lldb
 from datetime import datetime, timedelta
@@ -38,7 +39,7 @@ def decimal_summary(value, internal_dict):
     return f"{sign}{integer_part}.{fractional_part:0{scale}d}"
 
 def naive_date_summary(value, internal_dict):
-    ymdf = value.GetChildMemberWithName("ymdf").GetValueAsUnsigned()
+    ymdf = value.GetChildMemberWithName("yof").GetChildAtIndex(0).GetChildAtIndex(0).GetValueAsUnsigned()
     year = (ymdf >> 13) - 1
     doy = ((ymdf >> 4) & 511) - 1
     timestamp = 86400 * ((year * 365 + year // 4 - year // 100 + year // 400) -
@@ -53,6 +54,23 @@ def naive_time_summary(value, internal_dict):
     hours, remainder = divmod(time_delta.seconds, 3600)
     minutes, seconds = divmod(remainder, 60)
     return f"{hours:02}:{minutes:02}:{seconds:02}"
+
+def naive_datetime_summary(value, internal_dict):
+    date_v = value.GetChildMemberWithName("date")
+    time_v = value.GetChildMemberWithName("time")
+    date_s = naive_date_summary(date_v, internal_dict).strip('"')
+    time_s = naive_time_summary(time_v, internal_dict).strip('"')
+
+    return f"{date_s} {time_s}"
+
+def datetime_summary(value, internal_dict):
+    naive_datetime_s = value.GetChildMemberWithName("datetime").GetSummary()
+    timezone_s = value.GetChildMemberWithName("offset").GetChildMemberWithName("tz").GetValue()
+    return f"{naive_datetime_s} {timezone_s}"
+
+def unit_summary(value, internal_dict):
+    code = value.GetChildMemberWithName("code")
+    return code.GetSummary()
 
 def amount_summary(value, internal_dict):
     quantity = value.GetChildMemberWithName("quantity")
@@ -123,7 +141,16 @@ def __lldb_init_module(debugger, internal_dict):
     debugger.HandleCommand(
         'type summary add -F type_summaries.naive_time_summary chrono::naive::time::NaiveTime'
     )
+    debugger.HandleCommand(
+        'type summary add -F type_summaries.naive_datetime_summary chrono::naive::datetime::NaiveDateTime'
+    )
+    debugger.HandleCommand(
+        'type summary add -x -F type_summaries.datetime_summary ^chrono::datetime::DateTime<.+>$'
+    )
 
+    debugger.HandleCommand(
+        'type summary add -F type_summaries.unit_summary journ_core::unit::Unit'
+    )
     debugger.HandleCommand(
         'type summary add -F type_summaries.amount_summary journ_core::amount::Amount'
     )

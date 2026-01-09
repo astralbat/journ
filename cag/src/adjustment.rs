@@ -7,11 +7,11 @@
  */
 use journ_core::alloc::HerdAllocator;
 use journ_core::amount::{Amount, Quantity};
-use journ_core::date_and_time::JDateTimeRange;
+use journ_core::datetime::JDateTimeRange;
 use journ_core::error::JournResult;
 use journ_core::journal_entry::{EntryId, JournalEntry};
 use journ_core::metadata::Metadata;
-use journ_core::reporting::table::{Cell, WrapPolicy};
+use journ_core::report::table::{Cell, WrapPolicy};
 use journ_core::unit::Unit;
 use journ_core::valued_amount::{PostingValuation, ValuedAmount};
 use log::trace;
@@ -20,8 +20,8 @@ use rust_decimal::prelude::One;
 use smallvec::SmallVec;
 use std::fmt;
 use std::fmt::Formatter;
-use yaml_rust::Yaml;
-use yaml_rust::yaml::Hash;
+use yaml_rust2::Yaml;
+use yaml_rust2::yaml::Hash;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct AdjustmentId<'h> {
@@ -172,7 +172,7 @@ pub struct Adjustment<'h> {
     pool: Option<&'h str>,
     entry: &'h JournalEntry<'h>,
     metadata: SmallVec<[Metadata<'h>; 4]>,
-    datetime: JDateTimeRange<'h>,
+    datetime: JDateTimeRange,
     amount_adjustments: Vec<AmountAdjustment<'h>>,
     properties: Vec<Metadata<'h>>,
     allocator: &'h HerdAllocator<'h>,
@@ -229,7 +229,7 @@ impl<'h> Adjustment<'h> {
         self.id
     }
 
-    pub fn datetime(&self) -> JDateTimeRange<'h> {
+    pub fn datetime(&self) -> JDateTimeRange {
         self.datetime
     }
 
@@ -247,6 +247,7 @@ impl<'h> Adjustment<'h> {
         self
     }
 
+    /// There will always be at least one amount adjustment.
     pub fn amount_adjustments(&self) -> &[AmountAdjustment<'h>] {
         &self.amount_adjustments
     }
@@ -479,6 +480,7 @@ where
     }
 }
 
+/*
 impl From<&Adjustment<'_>> for Yaml {
     fn from(adj: &Adjustment) -> Self {
         let mut hash = Hash::new();
@@ -488,4 +490,4 @@ impl From<&Adjustment<'_>> for Yaml {
         hash.insert(Yaml::String("adjustments".to_string()), Yaml::Array(adjustments));
         Yaml::Hash(hash)
     }
-}
+}*/
