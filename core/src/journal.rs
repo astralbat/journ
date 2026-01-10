@@ -81,7 +81,7 @@ impl<'h> Journal<'h> {
             EntryDateId<'h>,
             (Option<&'h TextBlock<'h>>, &'h JournalEntry<'h>),
         > = BTreeMap::new();
-        for (seg, dir) in root.all_directives_iter() {
+        for (_seg, dir) in root.all_directives_iter() {
             match dir.kind() {
                 DirectiveKind::Entry(e) => {
                     entries.insert(EntryDateId::from(*e), (dir.parsed(), e));

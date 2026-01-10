@@ -7,6 +7,8 @@
  */
 mod agg_state;
 mod cosum;
+mod first;
+mod last;
 mod max;
 mod min;
 mod sum;
@@ -15,6 +17,8 @@ mod unique;
 
 pub use agg_state::*;
 pub use cosum::*;
+pub use first::*;
+pub use last::*;
 pub use max::*;
 pub use min::*;
 pub use sum::*;

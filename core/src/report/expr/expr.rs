@@ -5,13 +5,14 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
-use crate::amount::Amount;
+use crate::datetime::JDateTime;
 use crate::err;
 use crate::error::{JournError, JournResult};
 use crate::report::expr::functions::abs::abs;
 use crate::report::expr::functions::*;
 use crate::report::expr::parser::{BinOp, CompareOp, LogicalOp};
 use crate::report::expr::{ColumnValue, IdentifierContext};
+use chrono::Duration;
 use rust_decimal::Decimal;
 use smartstring::alias::String as SS;
 use std::fmt;
@@ -58,7 +59,7 @@ impl<'h> Expr<'h> {
             Identifier(name) => {
                 context.eval_identifier(name).ok_or_else(|| err!("Invalid identifier: '{}'", name))
             }
-            Number(num) => Ok(ColumnValue::Amount(Amount::nil().with_quantity(*num))),
+            Number(num) => Ok(ColumnValue::Number(*num)),
             Aliased(inner, alias) => {
                 let value = inner.eval(context)?;
                 context.set_identifier(alias, value.clone());
@@ -219,10 +220,10 @@ fn eval_scalar_function<'h, 'a>(
         num(args, context)
     } else if name.eq_ignore_ascii_case("abs") {
         abs(args, context)
-    } else if name.eq_ignore_ascii_case("max") {
-        max(args, context)
-    } else if name.eq_ignore_ascii_case("min") {
-        min(args, context)
+    } else if name.eq_ignore_ascii_case("greatest") {
+        greatest(args, context)
+    } else if name.eq_ignore_ascii_case("least") {
+        least(args, context)
     } else if name.eq_ignore_ascii_case("concat") {
         concat(args, context)
     } else if name.eq_ignore_ascii_case("text") {
@@ -231,6 +232,8 @@ fn eval_scalar_function<'h, 'a>(
         date(args, context)
     } else if name.eq_ignore_ascii_case("datevalue") {
         datevalue(args, context)
+    } else if name.eq_ignore_ascii_case("now") {
+        now(args, context)
     } else if name.eq_ignore_ascii_case("if") {
         cond(args, context)
     } else {
@@ -267,28 +270,40 @@ fn eval_binary_op<'h, 'a>(
         }};
     }
 
-    let mut results = Vec::new();
-    for mapping in left.map(&right) {
-        match mapping {
-            (Some(ColumnValue::Amount(a)), Some(ColumnValue::Amount(b))) => {
-                results.push(
-                    binary_op!(a, b, op)
-                        .map(|amount| ColumnValue::Amount(amount))
-                        .unwrap_or_else(|_: JournError| ColumnValue::Undefined),
-                );
-            }
-            _ => {
-                return Err(err!("Binary operations are only supported for `Amount` type"));
+    //let mut results = Vec::new();
+    match (&left, &right) {
+        (ColumnValue::Number(a), ColumnValue::Number(b)) => {
+            binary_op!(a, b, op).map(ColumnValue::Number)
+        }
+        // The number represents a duration in days. It may be a fraction of a day.
+        (ColumnValue::Datetime(a), ColumnValue::Number(b))
+        | (ColumnValue::Number(b), ColumnValue::Datetime(a)) => {
+            let seconds: i64 = (*b * dec!(60) * dec!(60) * dec!(24)).ceil().try_into().unwrap();
+            match op {
+                BinOp::Add => Ok(ColumnValue::Datetime(JDateTime::new(
+                    a.datetime() + Duration::seconds(seconds),
+                    a.precision(),
+                ))),
+                BinOp::Sub => Ok(ColumnValue::Datetime(JDateTime::new(
+                    a.datetime() - Duration::seconds(seconds),
+                    a.precision(),
+                ))),
+                _ => Err(err!("Datetime binary operation not supported: {} {} {}", a, op, b)),
             }
         }
+        (ColumnValue::Amount(a), ColumnValue::Amount(b)) => binary_op!(a, b, op)
+            .map(|amount| Ok(ColumnValue::Amount(amount)))
+            .unwrap_or_else(|_: JournError| Ok(ColumnValue::Undefined)),
+        _ => Err(err!("Binary operation not supported: {:?} {} {:?}", left, op, right)),
     }
+    /*pf
     if results.is_empty() {
         Ok(ColumnValue::Undefined)
     } else if results.len() == 1 {
-        Ok(results.into_iter().next().unwrap())
+        results.into_iter().next().unwrap()
     } else {
-        Ok(ColumnValue::List(results))
-    }
+        Ok(ColumnValue::List(results.into_iter().collect::<Result<Vec<_>, _>>()?))
+    }*/
 }
 
 fn eval_compare_op<'h, 'a>(
@@ -301,18 +316,16 @@ fn eval_compare_op<'h, 'a>(
     }
 
     let compare_res = match op {
-        CompareOp::Match => left_value.matches(&right_value),
-        CompareOp::NotMatch => left_value.matches(&right_value).map(|b| !b),
-        CompareOp::Eq => Some(left_value.cmp(&right_value) == std::cmp::Ordering::Equal),
-        CompareOp::Neq => Some(left_value.cmp(&right_value) != std::cmp::Ordering::Equal),
-        CompareOp::Lt => Some(left_value.cmp(&right_value) == std::cmp::Ordering::Less),
-        CompareOp::Lte => Some(left_value.cmp(&right_value) != std::cmp::Ordering::Greater),
-        CompareOp::Gt => Some(left_value.cmp(&right_value) == std::cmp::Ordering::Greater),
-        CompareOp::Gte => Some(left_value.cmp(&right_value) != std::cmp::Ordering::Less),
+        CompareOp::Match => left_value.matches(&right_value)?,
+        CompareOp::NotMatch => !left_value.matches(&right_value)?,
+        CompareOp::Eq => left_value.cmp(&right_value)? == std::cmp::Ordering::Equal,
+        CompareOp::Neq => left_value.cmp(&right_value)? != std::cmp::Ordering::Equal,
+        CompareOp::Lt => left_value.cmp(&right_value)? == std::cmp::Ordering::Less,
+        CompareOp::Lte => left_value.cmp(&right_value)? != std::cmp::Ordering::Greater,
+        CompareOp::Gt => left_value.cmp(&right_value)? == std::cmp::Ordering::Greater,
+        CompareOp::Gte => left_value.cmp(&right_value)? != std::cmp::Ordering::Less,
     };
-    compare_res.map(ColumnValue::Boolean).ok_or_else(|| {
-        err!("Comparison operation '{} {} {}' is not valid", left_value, op, right_value)
-    })
+    Ok(ColumnValue::Boolean(compare_res))
 }
 
 fn eval_logical_op<'h, 'a>(

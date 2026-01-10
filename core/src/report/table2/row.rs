@@ -42,8 +42,8 @@ impl<'c> Row<'c> {
         self.cells.push(CellRef::Borrowed(content));
     }
 
-    pub fn append(&mut self, cell: CellRef<'c>) {
-        self.cells.push(cell);
+    pub fn append<C: Into<CellRef<'c>>>(&mut self, cell: C) {
+        self.cells.push(cell.into());
     }
 
     pub fn cell(&self, index: usize) -> Option<&dyn Cell> {

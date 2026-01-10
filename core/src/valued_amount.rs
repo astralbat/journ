@@ -9,9 +9,7 @@ use crate::alloc::HerdAllocator;
 use crate::amount::{Amount, AmountExpr, Quantity};
 use crate::err;
 use crate::money_util::MoneyPot;
-use crate::report::table::{Cell, WrapPolicy};
-use crate::report::term_style::Colour;
-use crate::report::{table, table2};
+use crate::report::table2;
 use crate::unit::Unit;
 use crate::valued_amount::ValuationInner::*;
 use crate::valuer::{Valuation, ValuationError, ValuationResult, Valuer};
@@ -150,12 +148,6 @@ impl fmt::Debug for PostingValuation<'_> {
                 write!(f, "{:?}", m)
             }
         }
-    }
-}
-
-impl<'h, 'a> From<PostingValuation<'h>> for table::Cell<'a> {
-    fn from(value: PostingValuation<'h>) -> Self {
-        value.expr().amount().into()
     }
 }
 
@@ -856,56 +848,6 @@ impl Default for ValuedAmount<'_> {
         ValuedAmount::nil()
     }
 }
-
-macro_rules! to_cell {
-    ($t:ty) => {
-        impl<'a, 'h> From<$t> for table::Cell<'a> {
-            fn from(value: $t) -> Self {
-                if value.is_nil() {
-                    return table::Cell::from(&"");
-                }
-                let mut vals: Vec<table::Cell<'a>> = Vec::with_capacity(
-                    value.valuations.as_ref().map(|v| v.len() * 2 + 1).unwrap_or(1),
-                );
-                vals.push(value.amount_expr.amount().into());
-                if let Some(valuations) = &value.valuations {
-                    // Put the valuations in to an extra cell layer so that, when wrapped,
-                    // they can align with the main amount.
-                    for val in valuations.iter() {
-                        match &val.inner {
-                            Unit(v) => {
-                                vals.push(table::Cell::from(&" @ "));
-                                vals.push([v.amount()].into());
-                            }
-                            Total(v, _) => {
-                                vals.push(table::Cell::from(&" @@ "));
-                                vals.push([v.amount()].into())
-                            }
-                        }
-                    }
-                }
-                let mut cell: table::Cell<'a> = vals.into();
-                if value.amount().is_negative() {
-                    cell.set_foreground(Some(Colour::Red));
-                }
-                cell.set_wrap_policy(WrapPolicy::With(|cell: &Cell| {
-                    for (i, child) in cell.iter().enumerate() {
-                        if *child == " @ " || *child == " @@ " {
-                            if i == cell.as_branch().unwrap().len() - 1 {
-                                return WrapPolicy::Never;
-                            }
-                            return WrapPolicy::Position(i + 1);
-                        }
-                    }
-                    WrapPolicy::Any
-                }));
-                cell
-            }
-        }
-    };
-}
-to_cell!(ValuedAmount<'h>);
-to_cell!(&ValuedAmount<'h>);
 
 impl<'h> From<&ValuedAmount<'h>> for Yaml {
     fn from(va: &ValuedAmount<'h>) -> Self {

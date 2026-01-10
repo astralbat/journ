@@ -17,7 +17,7 @@ use crate::{err, impl_journal_obj_common, parse_block};
 use nom::bytes::complete::tag;
 use nom::character::complete::{space0, space1};
 use nom::combinator::{map, opt, recognize};
-use nom::sequence::{pair, preceded, tuple};
+use nom::sequence::{preceded, tuple};
 use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::cell::RefCell;

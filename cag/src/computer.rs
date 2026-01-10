@@ -19,7 +19,7 @@ use crate::pool_event::PoolEvent;
 use crate::pool_manager::PoolManager;
 use crate::report::cag_command::CagCommand;
 use chrono::Utc;
-use journ_core::configuration::{Configuration, Filter};
+use journ_core::configuration::Filter;
 use journ_core::datetime::JDateTimeRange;
 use journ_core::error::JournResult;
 use journ_core::error::{BlockContextError, JournError};
@@ -126,11 +126,7 @@ impl<'h> CapitalGainsComputer {
         let from_to_range = cmd.begin_and_end_cmd().begin_end_range();
         pool_events.retain(|e| from_to_range.contains(&e.deal_datetime().start()));
 
-        let cg = CapitalGains::new(
-            Configuration::clone(journal.config()),
-            pool_events,
-            pool_manager.pools().iter().map(|p| (p.name(), p.balances().collect())).collect(),
-        );
+        let cg = CapitalGains::new(pool_events);
         Ok(cg)
     }
 

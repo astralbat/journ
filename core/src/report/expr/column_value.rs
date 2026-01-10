@@ -9,12 +9,14 @@ use crate::account::Account;
 use crate::amount::Amount;
 use crate::amounts::Amounts;
 use crate::configuration::{AccountFilter, Filter};
-use crate::datetime::{JDate, JDateTime, JDateTimeRange};
-use crate::eval_identifier;
+use crate::datetime::{DateTimePrecision, JDate, JDateTime, JDateTimeRange};
+use crate::error::JournResult;
 use crate::report::command::arguments::Cmd;
 use crate::report::table2::{BLANK_CELL, CellRef, EllipsisCell, MultiLineCell};
 use crate::unit::{NumberFormat, Unit};
 use crate::valued_amount::ValuedAmount;
+use crate::{err, eval_identifier};
+use chrono::MappedLocalTime;
 use rust_decimal::Decimal;
 use smartstring::alias::String as SS;
 use std::cmp::Ordering;
@@ -116,6 +118,7 @@ impl<'h> ColumnValue<'h> {
             ColumnValue::StringRef(s) => Some(s),
             ColumnValue::String(s) => Some(s.as_str()),
             ColumnValue::Account(a) => Some(a.name()),
+            ColumnValue::Description(d) => Some(d),
             _ => None,
         }
     }
@@ -161,7 +164,20 @@ impl<'h> ColumnValue<'h> {
     }
 
     pub fn as_datetime(&self) -> Option<JDateTime> {
-        if let ColumnValue::Datetime(dt) = self { Some(*dt) } else { None }
+        match self {
+            ColumnValue::Datetime(dt) => Some(*dt),
+            ColumnValue::Date(dt) => {
+                // Set as midnight in the configured timezone
+                let tz = Cmd::get().datetime_fmt_cmd().timezone_or_default();
+                let dt = match dt.and_hms_nano_opt(0, 0, 0, 0)?.and_local_timezone(tz) {
+                    MappedLocalTime::None => None,
+                    MappedLocalTime::Single(t) => Some(t),
+                    MappedLocalTime::Ambiguous(t, _) => Some(t),
+                }?;
+                Some(JDateTime::new(dt, DateTimePrecision::Day))
+            }
+            _ => None,
+        }
     }
 
     pub fn as_datetime_range(&self) -> Option<JDateTimeRange> {
@@ -176,8 +192,21 @@ impl<'h> ColumnValue<'h> {
         }
     }
 
-    pub fn cmp(&self, other: &ColumnValue<'h>) -> Ordering {
-        self.as_number()
+    pub fn cmp(&self, other: &ColumnValue<'h>) -> JournResult<Ordering> {
+        self.as_amount()
+            .and_then(|a| {
+                other.as_amount().map(|b| {
+                    if a.unit() != b.unit() {
+                        Err(err!("Units must be the same when comparing amounts"))
+                    } else {
+                        Ok(a.cmp(&b))
+                    }
+                })
+            })
+            .transpose()?;
+
+        let try_cmp = self
+            .as_number()
             .and_then(|a| other.as_number().map(|b| a.cmp(&b)))
             .or_else(|| self.as_datetime().and_then(|a| other.as_datetime().map(|b| a.cmp(&b))))
             .or_else(|| {
@@ -185,30 +214,34 @@ impl<'h> ColumnValue<'h> {
             })
             .or_else(|| self.as_date().and_then(|a| other.as_date().map(|b| a.cmp(&b))))
             .or_else(|| self.as_str().and_then(|a| other.as_str().map(|b| a.cmp(b))))
-            .or_else(|| self.as_undefined().and_then(|a| other.as_undefined().map(|b| a.cmp(&b))))
-            .unwrap_or_else(|| {
+            .or_else(|| self.as_undefined().and_then(|a| other.as_undefined().map(|b| a.cmp(&b))));
+
+        match try_cmp {
+            Some(cmp) => Ok(cmp),
+            None => {
                 if let (ColumnValue::List(a), ColumnValue::List(b)) = (self, other) {
                     // Compare like-wise until one element is no equal
-                    let mut combined = a.iter().zip(b);
+                    let combined = a.iter().zip(b);
                     for (a, b) in combined {
-                        let cmp = a.cmp(b);
+                        let cmp = a.cmp(b)?;
                         if cmp != Ordering::Equal {
-                            return cmp;
+                            return Ok(cmp);
                         }
                     }
-                    a.len().cmp(&b.len())
+                    Ok(a.len().cmp(&b.len()))
                 } else {
-                    <Self as Ord>::cmp(self, other)
+                    Err(err!("Unable to compare {} with {}", self, other))
                 }
-            })
+            }
+        }
     }
 
-    pub fn matches(&self, other: &ColumnValue<'h>) -> Option<bool> {
+    pub fn matches(&self, other: &ColumnValue<'h>) -> JournResult<bool> {
         match (self, other) {
             (ColumnValue::Account(a), ColumnValue::String(b)) => {
-                AccountFilter::new(slice::from_ref(b).iter()).is_included(a).into()
+                Ok(AccountFilter::new(slice::from_ref(b).iter()).is_included(a))
             }
-            _ => None,
+            _ => Err(err!("Cannot match {} with {}", self, other)),
         }
     }
 
@@ -344,6 +377,7 @@ impl<'h> ColumnValue<'h> {
         eval_identifier!(identifier, ColumnValue<'h>, self,
             Amount(a) if "quantity" => Number(a.quantity()),
             Amount(a) if "unit" => Unit(a.unit()),
+            Datetime(dt) if "date" => Date(dt.date()),
             DatetimeRange(range) if "start" => Datetime(range.start()),
             DatetimeRange(range) if "end" => Datetime(range.end()),
             // Fallback to code if name unavailable
@@ -481,4 +515,21 @@ impl<'a, 'h> Iterator for ColumnValueIter<'a, 'h> {
             None
         }
     }
+}
+
+/// A simple sort algorithm for sorting ColumnValues when comparing them
+/// might result in an error.
+pub fn try_sort<'h>(v: &mut [ColumnValue<'h>]) -> JournResult<()> {
+    for i in 1..v.len() {
+        let mut j = i;
+        while j > 0 {
+            // Only call cmp, propagate errors with `?`
+            if v[j - 1].cmp(&v[j])? != Ordering::Greater {
+                break;
+            }
+            v.swap(j - 1, j);
+            j -= 1;
+        }
+    }
+    Ok(())
 }

@@ -5,7 +5,7 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
-use crate::report::table2::fmt::cell_formatter::CellFormatter;
+use crate::report::table2::fmt::cell_formatter::{CellFormatter, lines_and_cols};
 use crate::report::table2::{Cell, ColumnWidth};
 use std::fmt;
 use std::fmt::Write;
@@ -32,17 +32,27 @@ impl Write for BasicCellFormatter<'_> {
     }
 }
 
+/// A formatter that can be reused for writing strings in a buffered way.
 #[derive(Default)]
 pub struct StringCellFormatter {
-    buf: String,
+    // An array of buffers rather than one String buffer means we make separate
+    // writes out in the same way as in for fewer side effects as when compared
+    // to not buffering (TableCellFormatter). The main side effect is the detection of escape
+    // chars when styling. Separate writes retains this detection.
+    bufs: Vec<String>,
+    // A buffer pointing to bufs next write position.
+    buf_ptr: usize,
+    width: usize,
 }
 impl StringCellFormatter {
-    pub fn buffer(&self) -> &str {
-        &self.buf
+    /// Gets the number of chars that have been written to the buffer.
+    pub fn count(&self) -> usize {
+        self.width
     }
 
     pub fn clear(&mut self) {
-        self.buf.clear();
+        self.buf_ptr = 0;
+        self.width = 0;
     }
 }
 
@@ -53,7 +63,27 @@ impl CellFormatter for StringCellFormatter {
 }
 impl Write for StringCellFormatter {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        self.buf.push_str(s);
+        let (_, cols) = lines_and_cols(s);
+        self.width += cols;
+
+        let buf = if self.buf_ptr == self.bufs.len() {
+            self.bufs.push(String::new());
+            &mut self.bufs[self.buf_ptr]
+        } else {
+            &mut self.bufs[self.buf_ptr]
+        };
+        buf.clear();
+        buf.push_str(s);
+        self.buf_ptr += 1;
+        Ok(())
+    }
+}
+
+impl fmt::Display for StringCellFormatter {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for i in 0..self.buf_ptr {
+            self.bufs[i].fmt(f)?;
+        }
         Ok(())
     }
 }

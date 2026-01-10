@@ -36,48 +36,20 @@ pub struct RegCommand {
 }
 
 impl RegCommand {
-    pub fn set_datetime_fmt_cmd(&mut self, datetime_fmt_cmd: DateTimeFormatCommand) {
-        self.datetime_fmt_cmd = datetime_fmt_cmd;
-    }
-
-    pub fn set_begin_and_end_cmd(&mut self, begin_and_end_cmd: BeginAndEndCommand) {
-        self.begin_and_end_cmd = begin_and_end_cmd;
-    }
-
     pub fn account_filter(&self) -> impl for<'t> Filter<Account<'t>> + '_ {
         AccountFilter::new(self.account_filter.iter())
-    }
-
-    pub fn set_account_filter(&mut self, accounts: Vec<String>) {
-        self.account_filter = accounts;
     }
 
     pub fn unit_filter(&self) -> impl for<'t> Filter<Unit<'t>> + '_ {
         UnitFilter::new(self.unit_filter.iter())
     }
 
-    pub fn set_unit_filter(&mut self, units: Vec<String>) {
-        self.unit_filter = units;
-    }
-
     pub fn file_filter(&self) -> impl for<'h> Filter<JournalNode<'h>> + '_ {
         FileFilter(&self.file_filter)
     }
 
-    pub fn set_file_filter(&mut self, files: Vec<String>) {
-        self.file_filter = files;
-    }
-
     pub fn description_filter(&self) -> impl Filter<str> + '_ {
         DescriptionFilter(&self.description_filter)
-    }
-
-    pub fn set_description_filter(&mut self, descriptions: Vec<String>) {
-        self.description_filter = descriptions
-    }
-
-    pub fn set_column_spec(&mut self, spec: String) {
-        self.column_spec = spec;
     }
 
     pub fn filtered_postings<'h>(
@@ -124,7 +96,6 @@ impl ExecCommand for RegCommand {
         let plan = parse_plan(&cmd.column_spec, None, HashMap::new(), None, true)?;
 
         let mut table = journ_core::report::table2::Table::default();
-        table.set_color(table.color() && !Cmd::args().no_color);
         // Heading Row
         let heading_style = Style::default().with_weight(Weight::Bold);
         let headings = plan
@@ -132,7 +103,7 @@ impl ExecCommand for RegCommand {
             .iter()
             .map(|col| StyledCell::new(col.to_string(), heading_style))
             .collect::<Vec<_>>();
-        table.set_heading_row(headings);
+        table.append_heading_row(headings);
 
         // Allow these columns to expand. Look better.
         for (i, col) in plan.column_expressions().iter().enumerate() {

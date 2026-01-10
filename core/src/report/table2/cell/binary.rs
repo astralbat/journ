@@ -5,10 +5,10 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
-use crate::report::table2::ColumnWidth;
 use crate::report::table2::cell::{Cell, lease_formatter, return_formatter};
 use crate::report::table2::cell_width::{CellWidth, SpaceDistribution};
 use crate::report::table2::fmt::CellFormatter;
+use crate::report::table2::{CellRef, ColumnWidth};
 use log::Level;
 use std::fmt;
 
@@ -55,19 +55,19 @@ impl Cell for BinaryCell {
         //f.set_width(padded_l_width.clone());
         let mut left_buffer = lease_formatter();
         let left_res = self.left.print(&mut left_buffer, line, padded_l_width.clone());
-        write!(f, "{}", left_buffer.buffer())?;
+        write!(f, "{}", left_buffer)?;
 
         // Print padding between left and right cells
         if let Some(padded_l_width) = padded_l_width {
             if log_enabled!(Level::Debug) {
                 debug_assert!(
-                    left_buffer.buffer().chars().count() <= padded_l_width.width(),
+                    left_buffer.count() <= padded_l_width.width(),
                     "Left cell wrote more than its allocated width ({} > {})",
-                    left_buffer.buffer().chars().count(),
+                    left_buffer.count(),
                     padded_l_width.width()
                 );
             }
-            for _ in 0..(padded_l_width.width() - left_buffer.buffer().chars().count()) {
+            for _ in 0..(padded_l_width.width() - left_buffer.count()) {
                 write!(f, "{}", self.padding_char())?;
             }
         }
@@ -97,5 +97,11 @@ impl Cell for BinaryCell {
 
     fn padding_char(&self) -> char {
         self.left.padding_char()
+    }
+}
+
+impl<'c> From<BinaryCell> for CellRef<'c> {
+    fn from(s: BinaryCell) -> Self {
+        CellRef::Owned(Box::new(s))
     }
 }

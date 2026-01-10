@@ -7,25 +7,18 @@
  */
 use crate::err;
 use crate::error::JournResult;
+use crate::report::expr::column_value::try_sort;
 use crate::report::expr::{ColumnValue, Expr, IdentifierContext};
 
-pub fn max<'h>(
+pub fn greatest<'h>(
     args: &[Expr<'h>],
     context: &mut dyn IdentifierContext<'h>,
 ) -> JournResult<ColumnValue<'h>> {
-    if args.len() != 2 {
-        return Err(err!("Function 'max' requires two arguments"));
+    if args.len() < 2 {
+        return Err(err!("Function 'greatest' requires at least two arguments"));
     }
 
-    let val0 = args[0].eval(context)?;
-    let val1 = args[1].eval(context)?;
-    if val0.is_undefined() || val1.is_undefined() {
-        return Ok(ColumnValue::Undefined);
-    }
-
-    let err = || err!("Function 'max' requires both arguments to be of the same type: `Amount`");
-    let left_as_num = val0.as_number().ok_or_else(|| err())?;
-    let right_as_num = val1.as_number().ok_or_else(|| err())?;
-
-    if right_as_num > left_as_num { Ok(val1) } else { Ok(val0) }
+    let mut cols = args.iter().map(|arg| arg.eval(context)).collect::<Result<Vec<_>, _>>()?;
+    try_sort(&mut cols)?;
+    Ok(cols.into_iter().last().unwrap())
 }

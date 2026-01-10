@@ -323,7 +323,7 @@ impl<'h> DealGroup<'h> {
                 match SystemValuer::from(deal.entry())
                     .value(quote_unit, deal.valued_amount().amount())
                 {
-                    Ok(mut val) => {
+                    Ok(val) => {
                         let mut val_clone = val.clone();
                         total_value = total_value
                             .map(|tv| {

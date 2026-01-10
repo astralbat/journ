@@ -116,6 +116,14 @@ impl<'h, 'j> EvalContext<'h> for LateContext<'h, 'j> {
         self.journal.config()
     }
 
+    fn as_valuer_context(&self) -> Option<&dyn ValuerContext<'h>> {
+        Some(self)
+    }
+
+    fn as_valuer_context_mut(&mut self) -> Option<&mut dyn ValuerContext<'h>> {
+        Some(self)
+    }
+
     fn eval_aggregate(&self, index: usize) -> Option<ColumnValue<'h>> {
         self.aggregate_values.get(index).cloned()
     }
@@ -142,6 +150,17 @@ impl<'h, 'j> IdentifierContext<'h> for LateContext<'h, 'j> {
             eval_next(val)
         } else {
             None
+        }
+    }
+}
+
+impl<'h> ValuerContext<'h> for LateContext<'h, '_> {
+    fn valuer<'a>(&'a self, date: Option<JDateTime>) -> JournResult<Box<dyn Valuer<'h> + 'a>> {
+        match date {
+            Some(date) => Ok(Box::new(SystemValuer::on_date(self.journal.config().clone(), date))),
+            None => {
+                Ok(Box::new(SystemValuer::on_date(self.journal.config().clone(), JDateTime::now())))
+            }
         }
     }
 }

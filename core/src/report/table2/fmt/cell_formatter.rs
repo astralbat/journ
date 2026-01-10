@@ -12,11 +12,6 @@ use std::fmt::Write;
 /// A cell formatter is a kind of cell visitor, operating via double dispatch to print the cell's content with `Cell::print(CellFormatter)`.
 pub trait CellFormatter: Write {
     fn format_cell(&mut self, cell: &dyn Cell, line: usize, width: ColumnWidth) -> fmt::Result;
-
-    /// Allow printing of escaped terminal color codes
-    fn color(&self) -> bool {
-        false
-    }
 }
 
 pub(super) fn lines_and_cols(s: &str) -> (usize, usize) {

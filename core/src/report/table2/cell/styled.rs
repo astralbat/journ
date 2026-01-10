@@ -5,10 +5,17 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
+use crate::report::command::arguments::Cmd;
 use crate::report::table2::cell::{lease_formatter, return_formatter};
-use crate::report::table2::fmt::CellFormatter;
-use crate::report::table2::{Cell, CellRef, ColumnWidth, ShrinkableCell};
+use crate::report::table2::fmt::{BasicCellFormatter, CellFormatter};
+use crate::report::table2::{Cell, CellRef, CellWidth, ColumnWidth, ShrinkableCell};
+use crate::report::term_style;
 use crate::report::term_style::Style;
+use std::sync::LazyLock;
+
+pub static IS_STYLED: LazyLock<bool> = LazyLock::new(|| {
+    Cmd::args().color || (!Cmd::args().no_color && atty::is(atty::Stream::Stdout))
+});
 
 pub struct StyledCell<'c> {
     inner: CellRef<'c>,
@@ -31,30 +38,40 @@ impl Cell for StyledCell<'_> {
             return Err(std::fmt::Error);
         }
 
-        if f.color() {
-            self.style.start(f)?;
+        if *IS_STYLED {
+            let mut start_and_inner_fmt = lease_formatter();
+            let mut end_fmt = lease_formatter();
+            self.style.start(&mut start_and_inner_fmt)?;
+            let res = self.inner.print(&mut start_and_inner_fmt, line, width.clone());
+            self.style.end(&mut end_fmt)?;
 
-            let mut tmp_formatter = lease_formatter();
-            let res = self.inner.print(&mut tmp_formatter, line, width.clone());
-            write!(f, "{}", tmp_formatter.buffer())?;
-
+            write!(f, "{}", start_and_inner_fmt)?;
             // It's a good idea to pad here (otherwise the formatter will do it) to keep a consistent style
             if let Some(width) = width {
-                for _ in tmp_formatter.buffer().chars().count()..width.width() {
+                for _ in start_and_inner_fmt.count() + end_fmt.count()..width.width() {
                     write!(f, "{}", self.padding_char())?;
                 }
             }
-            return_formatter(tmp_formatter);
+            write!(f, "{}", end_fmt)?;
 
-            self.style.end(f)?;
+            return_formatter(end_fmt);
+            return_formatter(start_and_inner_fmt);
             res
         } else {
             self.inner.print(f, line, width)
         }
     }
 
-    fn width(&self) -> crate::report::table2::cell_width::CellWidth {
-        self.inner.width()
+    fn width(&self) -> CellWidth {
+        if term_style::DEBUG_MODE {
+            let mut buf = String::new();
+            let mut fmt = BasicCellFormatter::new(&mut buf);
+            self.style.start(&mut fmt).unwrap();
+            self.style.end(&mut fmt).unwrap();
+            CellWidth::Unary(buf.chars().count() + self.inner.width().width())
+        } else {
+            self.inner.width()
+        }
     }
 
     fn height(&self) -> usize {
@@ -63,5 +80,11 @@ impl Cell for StyledCell<'_> {
 
     fn as_shrinkable(&self) -> Option<&dyn ShrinkableCell> {
         self.inner.as_shrinkable()
+    }
+}
+
+impl<'c> From<StyledCell<'c>> for CellRef<'c> {
+    fn from(s: StyledCell<'c>) -> Self {
+        CellRef::Owned(Box::new(s))
     }
 }

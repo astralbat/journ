@@ -38,7 +38,7 @@ impl Cell for AlignedCell<'_> {
         let mut tmp_formatter = lease_formatter();
         self.inner.print(&mut tmp_formatter, line, width)?;
 
-        let content_width = tmp_formatter.buffer().chars().count();
+        let content_width = tmp_formatter.count();
         let padding = total_width.saturating_sub(content_width);
         let (left_pad, right_pad) = match self.alignment {
             Alignment::Left => (0, padding),
@@ -48,7 +48,7 @@ impl Cell for AlignedCell<'_> {
         for _ in 0..left_pad {
             write!(f, "{}", self.inner.padding_char())?;
         }
-        write!(f, "{}", tmp_formatter.buffer())?;
+        write!(f, "{}", tmp_formatter)?;
         for _ in 0..right_pad {
             write!(f, "{}", self.inner.padding_char())?;
         }
@@ -59,5 +59,11 @@ impl Cell for AlignedCell<'_> {
 
     fn width(&self) -> CellWidth {
         self.inner.width()
+    }
+}
+
+impl<'c> From<AlignedCell<'c>> for CellRef<'c> {
+    fn from(c: AlignedCell<'c>) -> Self {
+        CellRef::Owned(Box::new(c))
     }
 }

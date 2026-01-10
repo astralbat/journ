@@ -52,7 +52,7 @@ pub fn value<'h>(
                 "Function 'value()' requires the second argument to be an `Amount` type"
             ))?;
 
-            // The third argument is an optional datetime. If not provided, the current entry's datetime is used.
+            // The third argument is an optional datetime.
             let datetime_col = args.get(2).map(|a| a.eval(context)).transpose()?;
             if datetime_col.as_ref().map(|c| c.is_undefined()).unwrap_or(false) {
                 return Ok(ColumnValue::Undefined);

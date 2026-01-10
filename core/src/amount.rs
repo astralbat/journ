@@ -5,11 +5,9 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
-use crate::report::table::Cell;
-use crate::report::table::WrapPolicy;
+use crate::report::table2;
 use crate::report::table2::{AlignedCell, Alignment, BlankCell, SpaceDistribution, StyledCell};
 use crate::report::term_style::{Colour, Style};
-use crate::report::{table, table2};
 use crate::unit;
 use crate::unit::{NegativeStyle, RoundingStrategy, Unit, UnitFormat};
 use fmt::Write;
@@ -438,89 +436,6 @@ impl<'h> Amount<'h> {
             Box::new(cell)
         }
     }
-
-    /// Counts the number of characters in a normal string representation of the amount.
-    /// Returns a tuple of:
-    /// 0. the number of character counts in the prefixed code before any negative
-    /// 1. the number of characters in the neg sign
-    /// 2. the number of characters in the prefixed code following any negative sign
-    /// 3. the number of digits before the decimal point
-    /// 4. the number of digits after the decimal point
-    /// 5. the number of characters in the suffixed code
-    fn count_formatted_str_parts(self) -> (u16, u16, u16, u16, u16, u16) {
-        struct Counter<'h> {
-            amount: Amount<'h>,
-            // Num of chars in the prefixed code before any negative sign, e.g. the '($' in '($5.00)'.
-            prefixed_code_bef_sign: u16,
-            // Num of chars in the prefixed code following any negative sign. E.g. the '$' in '-$5.00'.
-            // Will be 0 in the absence of any negative sign.
-            prefixed_code_aft_sign: u16,
-            // Num of chars in the suffixed code, e.g. the ' AUD' in '5.00 AUD'.
-            suffixed_code: u16,
-            // The num of digits before the decimal point.
-            before_decimal: u16,
-            // The num of digits after the decimal point.
-            after_decimal: u16,
-            in_quotes: bool,
-            // Becomes true when the decimal point is found.
-            found_decimal: bool,
-            // Becomes true when a '-' or '+' is found.
-            found_sign: bool,
-        }
-        impl fmt::Write for Counter<'_> {
-            fn write_str(&mut self, s: &str) -> fmt::Result {
-                for c in s.chars() {
-                    // This should also work for double quotes that are escaped ("").
-                    if c == '"' {
-                        self.in_quotes = !self.in_quotes;
-                    }
-                    match c {
-                        d if !self.in_quotes
-                            && (d.is_ascii_digit()
-                                || d == self.amount.unit().number_format().thousands_separator()
-                                    as char)
-                            && !self.found_decimal =>
-                        {
-                            self.before_decimal += 1
-                        }
-                        d if !self.in_quotes && d.is_ascii_digit() => self.after_decimal += 1,
-                        dp if !self.in_quotes
-                            && dp
-                                == self.amount.unit().number_format().decimal_separator()
-                                    as char =>
-                        {
-                            self.found_decimal = true
-                        }
-                        '-' | '+' if !self.in_quotes => self.found_sign = true,
-                        _ if self.before_decimal > 0 => self.suffixed_code += 1,
-                        _ if !self.found_sign => self.prefixed_code_bef_sign += 1,
-                        _ => self.prefixed_code_aft_sign += 1,
-                    }
-                }
-                Ok(())
-            }
-        }
-        let mut counter = Counter {
-            amount: self,
-            prefixed_code_bef_sign: 0,
-            prefixed_code_aft_sign: 0,
-            suffixed_code: 0,
-            before_decimal: 0,
-            after_decimal: 0,
-            in_quotes: false,
-            found_decimal: false,
-            found_sign: false,
-        };
-        write!(&mut counter, "{}", self.format_precise()).unwrap();
-        (
-            counter.prefixed_code_bef_sign,
-            if counter.found_sign { 1 } else { 0 },
-            counter.prefixed_code_aft_sign,
-            counter.before_decimal,
-            counter.after_decimal,
-            counter.suffixed_code,
-        )
-    }
 }
 
 impl Default for Amount<'_> {
@@ -582,56 +497,6 @@ impl fmt::Display for Amount<'_> {
         } else {
             write!(f, "{}", self.format())
         }
-    }
-}
-
-impl<'h, 'a> From<Amount<'h>> for Cell<'a> {
-    fn from(amount: Amount<'h>) -> Self {
-        let counts = amount.count_formatted_str_parts();
-        let amount_str = amount.format_precise().to_string();
-
-        // If there is a code part before the amount, group it together with any negative sign
-        // that precedes it.
-        let offset_0 = if counts.0 as usize > 0 || counts.2 as usize > 0 {
-            amount_str
-                .char_indices()
-                .nth(counts.0 as usize + counts.1 as usize + counts.2 as usize)
-                .unwrap()
-                .0
-        // Otherwise, include the negative sign with the amount.
-        } else {
-            0
-        };
-        let part0 = &amount_str[..offset_0];
-
-        // Digits before the decimal point: e.g. '5' in '5.00'.
-        // Include any minus sign if there was no code part previous. It looks better.
-        let mut digits_count = counts.3 as usize;
-        if counts.2 == 0 && counts.1 > 0 {
-            digits_count += counts.1 as usize;
-        }
-        let offset_3 = offset_0 + digits_count;
-        let part3 = &amount_str[offset_0..offset_3];
-
-        // Digits after the decimal point, including the decimal point: e.g. '.00' in '5.00'.
-        let offset_4 = if counts.4 > 0 { offset_3 + counts.4 as usize + 1 } else { offset_3 };
-        let part4 = &amount_str[offset_3..offset_4];
-
-        // Code suffix. E.g. ' AUD' in '5.00 AUD'.
-        let part5 = &amount_str[offset_4..];
-
-        let mut amount_cell = Cell::from([
-            Cell::new(part0.to_string()).with_alignment(table::Alignment::Right),
-            Cell::new(part3.to_string()).with_alignment(table::Alignment::Right),
-            Cell::new(part4.to_string()),
-            Cell::new(part5.to_string()),
-        ]);
-        // Don't wrap amounts, they become unreadable
-        amount_cell.set_wrap_policy(WrapPolicy::Never);
-        if amount.is_negative() {
-            amount_cell.set_foreground(Some(Colour::Red))
-        }
-        amount_cell
     }
 }
 

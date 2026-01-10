@@ -5,7 +5,7 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
-use crate::cgt_configuration::{EventFilter, EventPattern};
+use crate::cgt_configuration::{EventFilter, EventPattern, PoolFilter};
 use crate::computer::CapitalGainsComputer;
 use crate::report::cmd_line::CagArguments;
 use crate::report::expr::context::CagContext;
@@ -20,7 +20,7 @@ use journ_core::report::command::chained_result::ChainingResult;
 use journ_core::report::command::cmd_line::BeginAndEndCommand;
 use journ_core::report::command::{ChainableCommand, ExecCommand, IntoExecCommand};
 use journ_core::report::expr::parser::parse_plan;
-use journ_core::report::expr::{ColumnValue, Expr, RowData};
+use journ_core::report::expr::{Expr, RowData};
 use journ_core::report::table2::{Row, StyledCell, Table};
 use journ_core::report::term_style::{Style, Weight};
 use journ_core::unit::Unit;
@@ -36,19 +36,17 @@ pub struct CagCommand {
     pub(super) account_filter: Vec<String>,
     pub(super) event_filter: Vec<EventPattern>,
     pub(super) unit_filter: Vec<String>,
+    pub(super) pool_filter: Vec<String>,
+    pub(super) head: Option<usize>,
+    pub(super) tail: Option<usize>,
     pub(super) group_by: Option<String>,
     pub(super) group_deals_by_date: bool,
-    pub(super) show_group: bool,
     pub(super) order_by_spec: Option<String>,
     pub(super) order_ascending: bool,
-    pub(super) disposed_mode: bool,
-    pub(super) output_csv: bool,
     pub(super) output_yaml: bool,
     pub(super) yaml_map_key: Option<String>,
-    pub(super) show_time: bool,
-    pub(super) write_valuations: bool,
-    pub(super) write_metadata: bool,
     pub(super) title: Option<String>,
+    pub(super) no_header: bool,
     pub(super) column_spec: String,
     pub(super) chain: Option<Box<CagCommand>>,
 }
@@ -70,33 +68,37 @@ impl CagCommand {
         EventFilter(&self.event_filter)
     }
 
+    pub fn pool_filter(&self) -> PoolFilter {
+        PoolFilter(self.pool_filter.iter().map(|s| s.as_str().into()).collect())
+    }
+
     pub fn group_deals_by_date(&self) -> bool {
         self.group_deals_by_date
     }
 
-    pub fn output_yaml(&self) -> bool {
-        self.output_yaml
-    }
-
     pub fn create_table(&self) -> Table<'_> {
-        let mut table = journ_core::report::table2::Table::default();
-        table.set_color(table.color() && !Cmd::args().no_color);
-        table
+        Table::default()
     }
 
     pub fn append_table<'a>(
-        &self,
+        &'a self,
         mut table: Table<'a>,
         column_expressions: &[Expr],
         rows: Vec<RowData<'a>>,
     ) -> Table<'a> {
+        let chain_pos = Cmd::chain_position();
+        if chain_pos > 0 {
+            table.append_chain_separator(self.title.as_ref());
+        }
         // Heading Row
-        let heading_style = Style::default().with_weight(Weight::Bold);
-        let headings = column_expressions
-            .iter()
-            .map(|col| StyledCell::new(col.to_string(), heading_style))
-            .collect::<Vec<_>>();
-        table.set_heading_row(headings);
+        if !self.no_header {
+            let heading_style = Style::default().with_weight(Weight::Bold);
+            let headings = column_expressions
+                .iter()
+                .map(|col| StyledCell::new(col.to_string(), heading_style))
+                .collect::<Vec<_>>();
+            table.append_heading_row(headings);
+        }
 
         for row in rows {
             table.push_row(Row::new(row.column_values.into_iter().map(|v| v.into_cell_ref(false))));
@@ -309,8 +311,41 @@ impl ExecCommand for CagCommand {
             self.order_by_spec.as_ref().map(String::as_str),
             self.order_ascending,
         )?;
-        let data =
-            plan.execute(&*journ, capital_gains.events().iter(), |e| CagContext::new(journ, e))?;
+        let event_filter = self.event_filter();
+        let pool_filter = self.pool_filter();
+        let data = plan.execute(
+            &*journ,
+            capital_gains
+                .events()
+                .iter()
+                .filter(|e| event_filter.is_included(e))
+                .filter(|e| pool_filter.is_included(e)),
+            |e| CagContext::new(journ, e),
+        )?;
+
+        // The data rows are limited by --head and/or --tail.
+        let data = if self.head.is_some() || self.tail.is_some() {
+            let data_len = data.len();
+            data.into_iter()
+                .enumerate()
+                .filter(|(i, _)| {
+                    return if let Some(head) = self.head
+                        && i < &head
+                    {
+                        true
+                    } else if let Some(tail) = self.tail
+                        && &(data_len - tail) <= i
+                    {
+                        true
+                    } else {
+                        false
+                    };
+                })
+                .map(|e| e.1)
+                .collect()
+        } else {
+            data
+        };
 
         let chaining_res = if chained
             .as_ref()
@@ -334,7 +369,9 @@ impl ExecCommand for CagCommand {
 
         // Otherwise print output
         match chaining_res {
-            ChainingResult::Table(table) => print!("{table}"),
+            ChainingResult::Table(table) => {
+                print!("{table}")
+            }
             ChainingResult::Yaml(root) => {
                 let mut string = String::new();
                 let mut emitter = YamlEmitter::new(&mut string);

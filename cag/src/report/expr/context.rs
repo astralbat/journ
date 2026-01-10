@@ -77,8 +77,8 @@ where
     fn eval_identifier(&self, identifier: &str) -> Option<ColumnValue<'h>> {
         use EventObj::*;
         let res = eval_identifier!(identifier, EventObj<'h, 'e>,
-            "eventDatetime" => Value(ColumnValue::DatetimeRange(self.event.event_datetime())),
-            "dealDatetime" => Value(ColumnValue::DatetimeRange(self.event.deal_datetime())),
+            "eventDate" => Value(ColumnValue::DatetimeRange(self.event.event_datetime())),
+            "dealDate" => Value(ColumnValue::DatetimeRange(self.event.deal_datetime())),
             "description" => Value(ColumnValue::String(self.event.description().iter().join(",").into())),
             "unit" => Value(ColumnValue::Unit(self.event.unit())),
             "pool" => Pool(self.event),
@@ -112,10 +112,10 @@ where
             },
             "type" => {
                 match self.event.kind() {
-                    PoolEventKind::PooledDeal(_) => Value(ColumnValue::String("pooled".into())),
-                    PoolEventKind::MovedDeal(_, _) => Value(ColumnValue::String("moved".into())),
-                    PoolEventKind::Match(_) => Value(ColumnValue::String("match".into())),
-                    PoolEventKind::Adjustment(_) => Value(ColumnValue::String("adjustment".into()))
+                    PoolEventKind::PooledDeal(_) => Value(ColumnValue::String("Pooled".into())),
+                    PoolEventKind::MovedDeal(_, _) => Value(ColumnValue::String("Moved".into())),
+                    PoolEventKind::Match(_) => Value(ColumnValue::String("Matched".into())),
+                    PoolEventKind::Adjustment(_) => Value(ColumnValue::String("Adjusted".into()))
                 }
             },
             "pooled" => {
@@ -187,6 +187,7 @@ impl<'h, 'e> EventObj<'h, 'e> {
             PoolBalance(bal) => Value(ValuedAmount(bal.valued_amount().clone())),
             CagValuedAmount(bal) if "amount" => Value(Amount(bal.amount())),
             CagValuedAmount(bal) if "cost" => Value(Amount(bal.valuations().next().unwrap().value())),
+            Pool(event) if "" => Value(String(event.pool_name().into())),
             Pool(event) if "name" => Value(String(event.pool_name().into())),
             Pool(event) if "balanceBefore" => PoolBalance(event.balance_before()),
             Pool(event) if "balanceAfter" => PoolBalance(event.balance_after()),
@@ -212,7 +213,7 @@ impl<'h, 'e> EventObj<'h, 'e> {
             DealGroup(group) if "total" => PoolBalance(group.total()),
             DealGroup(group) if "expenses" => Value(Amount(group.expenses().amount())),
             DealGroup(group) if "totalBeforeExpenses" => CagValuedAmount(group.total_before_expenses().clone()),
-            DealGroup(group) if "datetime" => Value(DatetimeRange(group.datetime())),
+            DealGroup(group) if "date" => Value(DatetimeRange(group.datetime())),
             DealGroup(group) if "remainder" => Value(Boolean({
                 match group.split_parent() {
                     Some(parent) => parent.total().amount() != group.total().amount(),
@@ -230,7 +231,7 @@ impl<'h, 'e> EventObj<'h, 'e> {
             DealHolding(holding) if "total" => PoolBalance(holding.total()),
             DealHolding(holding) if "expenses" => Value(Amount(holding.expenses().amount())),
             DealHolding(holding) if "totalBeforeExpenses" => CagValuedAmount(holding.total_before_expenses()),
-            DealHolding(holding) if "datetime" => Value(DatetimeRange(holding.datetime())),
+            DealHolding(holding) if "date" => Value(DatetimeRange(holding.datetime())),
             DealHolding(holding) if "remainder" => Value(Boolean({
                 match holding.split_parent() {
                     Some(parent) => parent.total().amount() != holding.total().amount(),

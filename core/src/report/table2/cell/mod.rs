@@ -12,13 +12,14 @@ pub mod decimal;
 pub mod ellipsis;
 pub mod multi;
 pub mod separator;
+pub mod spanned;
 pub mod str;
 pub mod styled;
 pub mod wrapped;
 
+use crate::report::table2::ColumnWidth;
 use crate::report::table2::cell_width::CellWidth;
 use crate::report::table2::fmt::{BasicCellFormatter, CellFormatter, StringCellFormatter};
-use crate::report::table2::{ColumnWidth, StyledCell};
 use smallvec::SmallVec;
 use smartstring::alias::String as SS;
 use smartstring::{SmartString, SmartStringMode};
@@ -34,7 +35,8 @@ thread_local! {
 fn lease_formatter() -> StringCellFormatter {
     TMP_FORMATTERS.with(|buffers| {
         let mut buffers = buffers.borrow_mut();
-        buffers.pop().unwrap_or_default()
+        let fmt = buffers.pop().unwrap_or_default();
+        fmt
     })
 }
 
@@ -78,12 +80,6 @@ impl<'c, M: SmartStringMode + 'static> From<SmartString<M>> for CellRef<'c> {
 
 impl From<String> for CellRef<'_> {
     fn from(s: String) -> Self {
-        CellRef::Owned(Box::new(s))
-    }
-}
-
-impl<'c> From<StyledCell<'c>> for CellRef<'c> {
-    fn from(s: StyledCell<'c>) -> Self {
         CellRef::Owned(Box::new(s))
     }
 }
@@ -227,19 +223,3 @@ impl Cell for ModifiableCell<'_> {
         self.inner.padding_char()
     }
 }
-
-/*
-impl<'c, T> From<T> for CellRef<'c>
-where
-    T: Cell + Sized + 'c,
-{
-    fn from(c: T) -> Self {
-        CellRef::Owned(Box::new(c))
-    }
-}*/
-/*
-impl<'c> From<&'c dyn Cell> for CellRef<'c> {
-    fn from(c: &'c dyn Cell) -> Self {
-        CellRef::Borrowed(c)
-    }
-}*/

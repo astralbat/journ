@@ -7,11 +7,10 @@
  */
 use crate::parsing::text_block::TextBlock;
 use crate::parsing::util::interim_space;
-use crate::report::command::arguments::Cmd;
-use crate::report::table::Table;
-use crate::report::table::row::Row;
-use crate::report::table::{Alignment, Cell};
+use crate::report::table2;
+use crate::report::table2::{AlignedCell, Alignment, BinaryCell, Row, StyledCell};
 use crate::report::term_style::{Colour, Style};
+use smartstring::alias::String as SS;
 use std::error::Error;
 use std::ops::Range;
 use std::{fmt, mem};
@@ -184,21 +183,39 @@ impl Error for JournError {
 impl fmt::Display for JournError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Write indents after newlines, if there isn't already an indent.
-        let write_indented = |err: String, f: &mut fmt::Formatter<'_>| -> fmt::Result {
-            let mut peekable = err.chars().peekable();
-            while let Some(c) = peekable.next() {
-                write!(f, "{}", c)?;
-                if c == '\n' {
-                    if peekable.peek() == Some(&' ') || peekable.peek() == Some(&'\u{21b3}') {
-                        continue;
+        struct IndentedLineFormat<'w, W: Write> {
+            inner: &'w mut W,
+            end_of_line: bool,
+        }
+        impl<'w, W> Write for IndentedLineFormat<'w, W>
+        where
+            W: Write,
+        {
+            fn write_str(&mut self, s: &str) -> fmt::Result {
+                if self.end_of_line {
+                    let first_char = s.chars().next();
+                    if first_char != Some(' ')
+                        && first_char != Some('\u{21b3}')
+                        && first_char != Some('\u{1b}')
+                    {
+                        write!(self.inner, "  ")?;
                     }
-                    write!(f, "  ")?;
+                }
+                if let Some(end_pos) = s.chars().position(|c| c == '\n')
+                    && end_pos != s.chars().count() - 1
+                {
+                    self.write_str(&s[..end_pos + 1])?;
+                    self.write_str(&s[end_pos + 1..])
+                } else {
+                    self.end_of_line = s.ends_with('\n');
+                    self.inner.write_str(s)
                 }
             }
-            Ok(())
-        };
+        }
 
-        write_indented(self.msg.to_string(), f)?;
+        use std::fmt::Write;
+        let mut fmt = IndentedLineFormat { inner: f, end_of_line: false };
+        write!(fmt, "{}", self.msg)?;
 
         if let Some(source) = &self.source {
             writeln!(f)?;
@@ -207,7 +224,8 @@ impl fmt::Display for JournError {
             if let Some(_source) = source.downcast_ref::<JournErrors>() {
                 write!(f, "\n\u{2192} {}", source)?;
             } else {
-                write_indented(source.to_string(), f)?;
+                let mut fmt = IndentedLineFormat { inner: f, end_of_line: false };
+                write!(fmt, "{}", source)?;
             }
         }
         Ok(())
@@ -320,27 +338,28 @@ impl BlockContextLine {
 
 impl From<&BlockContextLine> for Row<'static> {
     fn from(value: &BlockContextLine) -> Self {
-        let highlight_style = if Cmd::args().print_std_err_in_color() {
-            Style::default().with_fg(Colour::Red)
-        } else {
-            Style::default()
-        };
-
-        let mut cells = vec![];
+        let mut row = Row::default();
         if let Some(line_num) = value.line_num {
-            let mut line_num_cell: Cell = format!("{}", line_num).into();
-            line_num_cell.set_alignment(Alignment::Right);
-            line_num_cell.set_foreground(Some(Colour::RGB(120, 120, 120)));
-            cells.push(line_num_cell);
+            let line_num_style = Style::default().with_fg(Colour::RGB(120, 120, 120));
+            let line_num_cell = StyledCell::new(
+                AlignedCell::new(format!("{}", line_num), Alignment::Right),
+                line_num_style,
+            );
+            row.append(line_num_cell);
         }
-        let mut buf = String::new();
-        buf.push_str(&value.text[..value.highlight_range.start]);
-        buf.push_str(
-            &highlight_style.paint(&value.text[value.highlight_range.clone()]).to_string(),
+        let text_style = Style::default().with_fg(Colour::Red);
+        let highlighted_text =
+            StyledCell::new(SS::from(&value.text[value.highlight_range.clone()]), text_style);
+        let left_binary = BinaryCell::new(
+            Box::new(SS::from(&value.text[..value.highlight_range.start])),
+            Box::new(highlighted_text),
         );
-        buf.push_str(&value.text[value.highlight_range.end..]);
-        cells.push(buf.into());
-        Row::new(cells)
+        let binary = BinaryCell::new(
+            Box::new(left_binary),
+            Box::new(SS::from(&value.text[value.highlight_range.end..])),
+        );
+        row.append(binary);
+        row
     }
 }
 
@@ -439,11 +458,13 @@ impl BlockContext {
 
 impl fmt::Display for BlockContext {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut table = Table::default();
-        table.set_indent(2);
-        table.set_column_separator("  ");
+        let mut table = table2::Table::default();
+        table.set_striped(false);
+        // maybe not needed functionality if messages are auto-indented with IndentedLineFormat
+        // above.
+        table.indent_column(0, 2);
         for next_line in self.lines.iter() {
-            table.add_row(next_line);
+            table.push_row(next_line);
         }
         table.print(f)?;
         Ok(())

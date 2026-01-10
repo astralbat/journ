@@ -59,7 +59,7 @@ impl From<Colour> for u8 {
     }
 }
 
-static DEBUG_MODE: bool = false;
+pub(super) static DEBUG_MODE: bool = false;
 static STYLE_STACK: Mutex<Vec<Style>> = Mutex::new(Vec::new());
 
 thread_local! {

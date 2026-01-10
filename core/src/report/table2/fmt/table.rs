@@ -5,6 +5,7 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
+use crate::report::table2::cell::styled;
 use crate::report::table2::column::{ColumnsVec, TableColumn};
 use crate::report::table2::fmt::cell_formatter::{CellFormatter, lines_and_cols};
 use crate::report::table2::fmt::row_formatter::RowFormatter;
@@ -26,7 +27,6 @@ pub struct TableCellFormatter<'w, 'format> {
     cursor_col: usize,
     cell_separator: &'w str,
     border: TableBorder<'w>,
-    color: bool,
     current_row: Option<&'format Row<'format>>,
     first_cell_in_line: bool,
     odd_bg: Option<Style>,
@@ -42,7 +42,6 @@ impl<'w, 'format> TableCellFormatter<'w, 'format> {
             cursor_col: 0,
             cell_separator: "  ",
             border: TableBorder::default(),
-            color: false,
             odd_bg: None,
             even_bg: None,
             current_row: None,
@@ -77,10 +76,6 @@ impl<'w, 'format> TableCellFormatter<'w, 'format> {
         self.border = border;
     }
 
-    pub fn set_color(&mut self, color: bool) {
-        self.color = color;
-    }
-
     /// Sets whether rows are striped; that they have alternating background colors for distinguishing them.
     /// This tries to use a subtle change in background color or nothing at all. Reverse video is possible,
     /// but doesn't look good.
@@ -93,6 +88,9 @@ impl<'w, 'format> TableCellFormatter<'w, 'format> {
             && support.has_16m
         {
             Self::set_striped_16m(self)
+        } else {
+            // Usually commend out unless debugging on unsupported terminal
+            // self.odd_bg = Some(Style::default().with_bg(Colour::White));
         }
     }
 
@@ -160,10 +158,6 @@ impl<'w, 'format> CellFormatter for TableCellFormatter<'w, 'format> {
         }
         print_res
     }
-
-    fn color(&self) -> bool {
-        self.color
-    }
 }
 
 impl<'format> RowFormatter<'format> for TableCellFormatter<'_, 'format> {
@@ -185,7 +179,7 @@ impl<'format> RowFormatter<'format> for TableCellFormatter<'_, 'format> {
     fn format_line_start(&mut self, row: &Row, row_num: usize, _line: usize) -> fmt::Result {
         self.first_cell_in_line = true;
 
-        if self.color {
+        if *styled::IS_STYLED {
             if row_num.is_multiple_of(2)
                 && let Some(even_bg) = self.even_bg
             {
@@ -211,7 +205,7 @@ impl<'format> RowFormatter<'format> for TableCellFormatter<'_, 'format> {
 
     fn format_line_end(&mut self, row: &Row, row_num: usize, _line: usize) -> fmt::Result {
         // Reset bg at the end of every line. Some terminals do inconsistent rendering otherwise.
-        if self.color {
+        if *styled::IS_STYLED {
             if row_num.is_multiple_of(2)
                 && let Some(even_bg) = self.even_bg
             {
@@ -250,7 +244,7 @@ impl<'format> RowFormatter<'format> for TableCellFormatter<'_, 'format> {
     }
 }
 
-impl<'w, 't> Write for TableCellFormatter<'w, 't> {
+impl<'w, 't> fmt::Write for TableCellFormatter<'w, 't> {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         if s.is_empty() {
             return Ok(());

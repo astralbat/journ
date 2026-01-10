@@ -35,7 +35,6 @@ pub struct BalCommand {
     pub(super) account_filter: Vec<Vec<String>>,
     pub(super) unit_filter: Vec<Vec<String>>,
     pub(super) description_filter: Vec<String>,
-    pub(super) write_csv: bool,
     pub(super) no_header: bool,
     pub(super) no_total: bool,
     pub(super) show_zeros: bool,
@@ -48,64 +47,24 @@ impl BalCommand {
         AccountFilter::new(self.account_filter.iter().flatten())
     }
 
-    pub fn set_account_filter(&mut self, accounts: Vec<Vec<String>>) {
-        self.account_filter = accounts;
-    }
-
     pub fn unit_filter<'h>(&self) -> impl Filter<Unit<'h>> + Clone {
         UnitFilter::new(self.unit_filter.iter().flatten())
-    }
-
-    pub fn set_unit_filter(&mut self, units: Vec<Vec<String>>) {
-        self.unit_filter = units;
-    }
-
-    pub fn set_write_csv(&mut self, write_csv: bool) {
-        self.write_csv = write_csv;
     }
 
     pub fn file_filter<'h>(&self) -> impl Filter<JournalNode<'h>> {
         FileFilter(&self.file_filter)
     }
 
-    pub fn set_file_filter(&mut self, files: Vec<String>) {
-        self.file_filter = files;
-    }
-
     pub fn description_filter(&self) -> impl Filter<str> + Clone {
         DescriptionFilter(&self.description_filter)
-    }
-
-    pub fn set_description_filter(&mut self, descriptions: Vec<String>) {
-        self.description_filter = descriptions
     }
 
     pub fn column_spec(&self) -> &str {
         &self.column_spec
     }
 
-    pub fn set_column_spec(&mut self, column_spec: String) {
-        self.column_spec = column_spec;
-    }
-
     pub fn group_by(&self) -> &str {
         &self.group_by
-    }
-
-    pub fn set_no_header(&mut self, no_header: bool) {
-        self.no_header = no_header;
-    }
-
-    pub fn set_no_total(&mut self, no_total: bool) {
-        self.no_total = no_total;
-    }
-
-    pub fn set_show_zeros(&mut self, show_zeros: bool) {
-        self.show_zeros = show_zeros;
-    }
-
-    pub fn set_group_by(&mut self, group_by: String) {
-        self.group_by = group_by;
     }
 
     pub fn filtered_postings<'h, 'j, 'a>(
@@ -159,7 +118,6 @@ impl ExecCommand for BalCommand {
             parse_plan(self.column_spec(), Some(self.group_by()), HashMap::new(), None, true)?;
 
         let mut table = journ_core::report::table2::Table::default();
-        table.set_color(table.color() && !Cmd::args().no_color);
         // Heading Row
         if !self.no_header {
             let heading_style = Style::default().with_weight(Weight::Bold);
@@ -168,7 +126,7 @@ impl ExecCommand for BalCommand {
                 .iter()
                 .map(|col| StyledCell::new(col.to_string(), heading_style))
                 .collect::<Vec<_>>();
-            table.set_heading_row(headings);
+            table.append_heading_row(headings);
         }
 
         let mut total_group = GroupState::new(&plan)?;

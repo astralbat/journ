@@ -30,20 +30,12 @@ pub struct CagArguments {
         help = "Filter the kind of events to report. E.g. \"-e Pooled MyPool,Matched \""
     )]
     event_filter: Vec<EventPattern>,
-    #[arg(
-        long = "disposed",
-        help = "Disposed mode will group matched events on the same day. This implies --group-by deal-date and --order-by deal-date."
-    )]
-    disposed_mode: bool,
-    #[arg(long = "write-valuations", help = "write the file(s) with valuations")]
-    write_valuations: bool,
-    #[arg(long = "write-metadata", help = "write deal metadata to the entries")]
-    write_metadata: bool,
-    #[arg(
-        long = "show-time",
-        help = "Show the time of day for events and deals in the output where possible. This is not possible when deals or events span a datetime range."
-    )]
-    show_time: bool,
+    #[arg(short = 'p', long = "pool", value_delimiter = ',')]
+    pool_filter: Vec<String>,
+    #[arg(short = 'h', long, help = "Show only the first `head` results")]
+    head: Option<usize>,
+    #[arg(short = 't', long, help = "Show only the last `tail` results")]
+    tail: Option<usize>,
     #[arg(
         long = "group-deals-by-date",
         help = "Aggregate journal entry deals that occur on the same day before further processing. This is useful when you have multiple deals on the same day and you want to see the totals for the day."
@@ -61,21 +53,16 @@ pub struct CagArguments {
     #[arg(long = "descending")]
     order_descending: bool,
     #[arg(
-        long = "show-group",
-        help = "When using --group-by, show the group breakdown in the output"
-    )]
-    show_group: bool,
-    #[arg(
         short = 'o',
         value_delimiter = ',',
         help = "A comma separated list of columns to print for each capital gains event.",
-        default_value = "Date, Description, match.Gain as Gain"
+        default_value = "EventDate.Start, Description, match.Gain as Gain"
     )]
     column_spec: Vec<String>,
-    #[arg(short = 't', long, help = "Title to display for the table")]
+    #[arg(long, help = "Title to display for the table")]
     title: Option<String>,
-    #[arg(long = "csv", help = "Write output as rows of comma separated values")]
-    csv: bool,
+    #[arg(short = 'H', long = "no-header", help = "do not print header row")]
+    no_header: bool,
     #[arg(long = "yaml", help = "Write output as yaml")]
     yaml: bool,
     #[arg(
@@ -99,20 +86,18 @@ impl IntoExecCommand for CagArguments {
             account_filter: self.account_filter,
             unit_filter: self.unit_filter,
             event_filter: self.event_filter,
-            show_time: self.show_time,
+            pool_filter: self.pool_filter,
+            head: self.head,
+            tail: self.tail,
             group_deals_by_date: self.group_deals_by_date,
             group_by: self.group_by,
-            show_group: self.show_group,
             order_by_spec: self.order_by,
             order_ascending: !self.order_descending,
             output_yaml: self.yaml,
             yaml_map_key: self.yaml_map_key,
-            write_valuations: self.write_valuations,
-            write_metadata: self.write_metadata,
-            disposed_mode: self.disposed_mode,
             title: self.title,
+            no_header: self.no_header,
             column_spec: self.column_spec.join(","),
-            output_csv: self.csv,
             chain: if self.chain.is_empty() {
                 None
             } else {

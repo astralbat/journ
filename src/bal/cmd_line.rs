@@ -30,8 +30,6 @@ pub struct BalArguments {
     description_filter: Vec<String>,
     #[arg(short = 'f', long = "file", value_name = "FILE", help = "Filter by file")]
     file_filter: Vec<String>,
-    #[arg(long = "csv", help = "write the output in CSV format")]
-    write_csv: bool,
     #[arg(
         short = 'o',
         help = "A comma separated list of columns to print. This can be: \
@@ -76,7 +74,6 @@ impl IntoExecCommand for BalArguments {
                 .collect(),
             description_filter: self.description_filter,
             file_filter: self.file_filter,
-            write_csv: self.write_csv,
             column_spec: self.column_spec,
             no_header: self.no_header,
             no_total: self.no_total,

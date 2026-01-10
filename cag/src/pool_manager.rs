@@ -46,10 +46,6 @@ impl<'h, 'u> PoolManager<'h> {
         }
     }
 
-    pub fn pools(&self) -> &[Pool<'h>] {
-        &self.pools
-    }
-
     pub fn unit_of_account(&self) -> &'h Unit<'h> {
         self.unit_of_account
     }

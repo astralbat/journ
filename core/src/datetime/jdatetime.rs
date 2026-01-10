@@ -52,8 +52,7 @@ impl JDateTime {
     pub fn now() -> Self {
         JDateTime {
             datetime: Tz::UTC.from_utc_datetime(&Utc::now().naive_local()),
-            precision: DateTimePrecision::Second, //datetime_format: <&'static DateTimeFormat>::default(),
-                                                  //print_utc_marker: true,
+            precision: DateTimePrecision::Second,
         }
     }
 

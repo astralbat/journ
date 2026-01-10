@@ -11,7 +11,6 @@ use journ_core::datetime::JDateTimeRange;
 use journ_core::error::JournResult;
 use journ_core::journal_entry::{EntryId, JournalEntry};
 use journ_core::metadata::Metadata;
-use journ_core::report::table::{Cell, WrapPolicy};
 use journ_core::unit::Unit;
 use journ_core::valued_amount::{PostingValuation, ValuedAmount};
 use log::trace;
@@ -446,48 +445,3 @@ impl fmt::Debug for Adjustment<'_> {
         Ok(())
     }
 }
-
-impl<'a, 'h, 'b> From<&'a Adjustment<'h>> for Cell<'b>
-where
-    'b: 'a,
-{
-    fn from(value: &'a Adjustment<'h>) -> Self {
-        let mut cells = vec![];
-        cells.push(match &value.amount_adjustments[0] {
-            AmountAdjustment::Add(amount) => Cell::from(*amount),
-            AmountAdjustment::Scale(amount) => Cell::from(*amount),
-            AmountAdjustment::Set(amount) => Cell::from(*amount),
-        });
-        for adj in &value.amount_adjustments[1..] {
-            cells.push(Cell::from(&","));
-            cells.push(match adj {
-                // The array wrapper is necessary to ensure these cells line up vertically with valuations in ValuedAmounts.
-                AmountAdjustment::Add(amount) => Cell::from([*amount]),
-                AmountAdjustment::Scale(amount) => Cell::from([*amount]),
-                AmountAdjustment::Set(amount) => Cell::from([*amount]),
-            });
-        }
-        let mut cell: Cell = cells.into();
-        cell.set_wrap_policy(WrapPolicy::With(|cell| {
-            for (i, child) in cell.iter().enumerate().take(cell.len() - 1) {
-                if *child == "," {
-                    return WrapPolicy::Position(i + 1);
-                }
-            }
-            WrapPolicy::Never
-        }));
-        cell
-    }
-}
-
-/*
-impl From<&Adjustment<'_>> for Yaml {
-    fn from(adj: &Adjustment) -> Self {
-        let mut hash = Hash::new();
-        hash.insert(Yaml::String("datetime".to_string()), Yaml::String(adj.datetime().to_string()));
-
-        let adjustments = adj.amount_adjustments.iter().map(Yaml::from).collect();
-        hash.insert(Yaml::String("adjustments".to_string()), Yaml::Array(adjustments));
-        Yaml::Hash(hash)
-    }
-}*/

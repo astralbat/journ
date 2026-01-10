@@ -8,9 +8,10 @@
 use crate::err;
 use crate::error::JournResult;
 use crate::report::expr::Expr;
-use crate::report::expr::aggregation::{AggState, CoSum, Max, Min, Sum, SumIf, Unique};
+use crate::report::expr::aggregation::{
+    AggState, CoSum, First, Last, Max, Min, Sum, SumIf, Unique,
+};
 use crate::report::expr::plan::Plan;
-use crate::report::table::Cell;
 use nom::Err as NomErr;
 use nom::bytes::complete::tag_no_case;
 use nom::combinator::{cut, map_res};
@@ -36,6 +37,8 @@ pub enum AggKind<'h> {
     CoSum(Vec<Expr<'h>>),
     Min(Vec<Expr<'h>>),
     Max(Vec<Expr<'h>>),
+    First(Vec<Expr<'h>>),
+    Last(Vec<Expr<'h>>),
     Unique(Vec<Expr<'h>>),
 }
 impl<'h> AggKind<'h> {
@@ -46,6 +49,8 @@ impl<'h> AggKind<'h> {
             "cosum" => Some(AggKind::CoSum(args)),
             "min" => Some(AggKind::Min(args)),
             "max" => Some(AggKind::Max(args)),
+            "first" => Some(AggKind::First(args)),
+            "last" => Some(AggKind::Last(args)),
             "unique" => Some(AggKind::Unique(args)),
             _ => None,
         }
@@ -68,6 +73,12 @@ impl<'h> AggKind<'h> {
             AggKind::Max(args) => {
                 Max::new(args.clone()).map(|s| Box::new(s) as Box<dyn AggState<'h>>)
             }
+            AggKind::First(args) => {
+                First::new(args.clone()).map(|s| Box::new(s) as Box<dyn AggState<'h>>)
+            }
+            AggKind::Last(args) => {
+                Last::new(args.clone()).map(|s| Box::new(s) as Box<dyn AggState<'h>>)
+            }
             AggKind::Unique(args) => {
                 Unique::new(args.clone()).map(|s| Box::new(s) as Box<dyn AggState<'h>>)
             }
@@ -84,6 +95,8 @@ impl fmt::Display for AggKind<'_> {
             AggKind::CoSum(args) => write!(f, "CoSum({})", join_args(args)),
             AggKind::Min(args) => write!(f, "Min({})", join_args(args)),
             AggKind::Max(args) => write!(f, "Max({})", join_args(args)),
+            AggKind::First(args) => write!(f, "First({})", join_args(args)),
+            AggKind::Last(args) => write!(f, "Last({})", join_args(args)),
             AggKind::Unique(args) => write!(f, "Unique({})", join_args(args)),
         }
     }
@@ -152,19 +165,6 @@ impl fmt::Display for LogicalOp {
             LogicalOp::Or => "OR",
         };
         write!(f, "{}", symbol)
-    }
-}
-
-impl From<&Expr<'_>> for Cell<'_> {
-    fn from(spec: &Expr) -> Self {
-        let s = spec.to_string();
-        // Capitalize the first letter of the column name
-        let s = if let Some(first) = s.chars().next() {
-            first.to_uppercase().to_string() + &s[1..]
-        } else {
-            s
-        };
-        Cell::from(s)
     }
 }
 

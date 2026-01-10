@@ -20,12 +20,12 @@ pub use entry_valuer::EntryValuer;
 pub use lambda_valuer::LambdaValuer;
 pub use linear_system_valuer::LinearSystemValuer;
 pub use price_db_valuer::PriceDatabaseValuer;
-use smallvec::{SmallVec, smallvec};
+use smallvec::SmallVec;
 use smartstring::alias::String as SS;
 use std::borrow::Cow;
 use std::convert::Infallible;
 use std::fmt;
-use std::ops::{Add, AddAssign, ControlFlow, Deref, FromResidual, Try};
+use std::ops::{ControlFlow, Deref, FromResidual, Try};
 pub use system_valuer::SystemValuer;
 /*
 pub trait Valuation<'h> {

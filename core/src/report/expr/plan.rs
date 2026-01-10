@@ -50,25 +50,39 @@ impl<'h> Plan<'h> {
     }
 
     /// Checks whether aggregation functions are used correctly in the plan.
-    /// - If `group_by` is empty, no aggregation functions are allowed in `column_spec`.
+    /// - If `group_by` is empty, aggregates cannot be mixed with non-aggregates.
     /// - If `group_by` is not empty, all identifiers in `column_spec` must either appear in `group_by`,
     ///   refer to an alias of another column or be used within an aggregation function.
     /// - Nested aggregation functions are not allowed.
     pub fn validate(&self) -> JournResult<()> {
         if self.group_by.is_empty() {
-            // No grouping, so no aggregation allowed
-            if self
-                .column_spec
-                .iter()
-                .chain(self.additional.values())
-                .any(|expr| expr.iter().any(|e| matches!(e, Expr::AggFunction { .. })))
-            {
-                return Err(err!("Aggregation functions are not allowed without grouping"));
+            let is_agg = |expr: &Expr| expr.iter().any(|e| matches!(e, Expr::AggFunction { .. }));
+            if self.column_spec.iter().chain(self.additional.values()).any(is_agg) {
+                if !self.column_spec.iter().all(Self::validate_expr_is_agg_or_no_identifiers) {
+                    return Err(err!(
+                        "Aggregate functions cannot be mixed with identifiers unless using --group-by"
+                    ));
+                }
             }
             Ok(())
         } else {
             self.validate_no_nested_aggregates()?;
             Ok(())
+        }
+    }
+
+    fn validate_expr_is_agg_or_no_identifiers(expr: &Expr) -> bool {
+        if matches!(expr, Expr::Identifier(_)) {
+            false
+        } else if matches!(expr, Expr::AggFunction { .. }) {
+            true
+        } else {
+            for c in expr.children() {
+                if !Self::validate_expr_is_agg_or_no_identifiers(c) {
+                    return false;
+                }
+            }
+            true
         }
     }
 
@@ -126,7 +140,7 @@ impl<'h> Plan<'h> {
                     .iter()
                     .map(|e| {
                         e.eval(&mut context)
-                            .map_err(|e| err!(e; "Unable to create key from context"))
+                            .map_err(|e| err!("Unable to create key from context").with_source(e))
                             .map(|v| (e.clone(), v))
                     })
                     .collect::<JournResult<Vec<_>>>()?,
@@ -237,6 +251,10 @@ impl<'h> Plan<'h> {
     }
 
     fn row_insert_pos(&self, rows: &Vec<RowData<'h>>, row: &RowData<'h>) -> usize {
+        // No sort expression specified; insert at the end.
+        if self.sort_exprs.is_empty() {
+            return rows.len();
+        }
         match rows.binary_search_by(|r: &RowData<'h>| {
             let cmp = r.sort_values.cmp(&row.sort_values);
             if !self.sort_ascending { cmp.reverse() } else { cmp }
@@ -244,11 +262,6 @@ impl<'h> Plan<'h> {
             Ok(i) | Err(i) => i,
         }
     }
-}
-
-pub struct PlanExecutionResults<'h> {
-    pub column_values: Vec<Vec<ColumnValue<'h>>>,
-    pub additional: HashMap<&'static str, Vec<ColumnValue<'h>>>,
 }
 
 #[derive(Default)]

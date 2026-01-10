@@ -8,25 +8,21 @@
 use crate::report::table2::fmt::RowFormatter;
 use crate::report::table2::fmt::TableCellFormatter;
 use crate::report::table2::row::Row;
-use crate::report::table2::{CellRef, SeparatorCell};
+use crate::report::table2::{CellRef, SeparatorCell, SpannedCell};
 use std::fmt;
 
 pub struct Table<'cell> {
     rows: Vec<Row<'cell>>,
-    color: bool,
+    stripe: bool,
     column_preferences: Vec<ColumnPreferences>,
 }
 
 impl<'cell> Table<'cell> {
-    pub fn color(&self) -> bool {
-        self.color
+    pub fn set_striped(&mut self, striped: bool) {
+        self.stripe = striped;
     }
 
-    pub fn set_color(&mut self, color: bool) {
-        self.color = color;
-    }
-
-    pub fn set_heading_row<C: Into<CellRef<'cell>>>(
+    pub fn append_heading_row<C: Into<CellRef<'cell>>>(
         &mut self,
         headings: impl IntoIterator<Item = C>,
     ) {
@@ -38,8 +34,26 @@ impl<'cell> Table<'cell> {
         self.push_row(row);
     }
 
+    pub fn append_chain_separator<C: Into<CellRef<'cell>>>(&mut self, title: Option<C>) {
+        match title {
+            Some(title) => {
+                self.push_separator_row('-', self.column_count());
+                let mut row: Row<'cell> = Row::default();
+                let spanned = SpannedCell::new(title, self.column_count());
+                row.append(spanned);
+                self.push_row(row);
+                self.push_separator_row('-', self.column_count());
+            }
+            None => self.push_separator_row('-', self.column_count()),
+        }
+    }
+
     pub fn push_separator_row(&mut self, separator: char, span: usize) {
         self.push_row(Row::new([Box::new(SeparatorCell::new(separator, span))]));
+    }
+
+    pub fn column_count(&self) -> usize {
+        self.rows.get(0).map(|r| r.cells.len()).unwrap_or(0)
     }
 
     pub fn rows(&self) -> &[Row<'cell>] {
@@ -67,13 +81,21 @@ impl<'cell> Table<'cell> {
         self.column_preferences[index].set_allow_expand(true);
     }
 
+    pub fn indent_column(&mut self, index: usize, indent: usize) {
+        if index >= self.column_preferences.len() {
+            self.column_preferences.resize_with(index + 1, Default::default);
+        }
+        self.column_preferences[index].set_indent(indent);
+    }
+
     pub fn print<W: fmt::Write>(&self, writer: &mut W) -> fmt::Result {
         if self.rows.iter().all(Row::is_header) {
             return Ok(());
         }
         let mut formatter = TableCellFormatter::new(writer);
-        formatter.set_color(self.color);
-        formatter.set_striped();
+        if self.stripe {
+            formatter.set_striped();
+        }
         formatter.set_max_width(term_size::dimensions().map(|(w, _)| w));
         formatter.print(&self.rows, &self.column_preferences)
     }
@@ -81,7 +103,7 @@ impl<'cell> Table<'cell> {
 
 impl Default for Table<'_> {
     fn default() -> Self {
-        Self { rows: vec![], color: atty::is(atty::Stream::Stdout), column_preferences: vec![] }
+        Self { rows: vec![], column_preferences: vec![], stripe: true }
     }
 }
 
@@ -94,6 +116,7 @@ impl fmt::Display for Table<'_> {
 #[derive(Default, Clone, Copy)]
 pub struct ColumnPreferences {
     allow_expand: bool,
+    indent: usize,
 }
 impl ColumnPreferences {
     pub fn allow_expand(&self) -> bool {
@@ -102,5 +125,13 @@ impl ColumnPreferences {
 
     pub fn set_allow_expand(&mut self, allow: bool) {
         self.allow_expand = allow;
+    }
+
+    pub fn indent(&self) -> usize {
+        self.indent
+    }
+
+    pub fn set_indent(&mut self, indent: usize) {
+        self.indent = indent;
     }
 }

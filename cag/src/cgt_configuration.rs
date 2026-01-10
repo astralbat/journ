@@ -10,7 +10,7 @@ use crate::pool_event::{AggregatedPoolEvent, PoolEvent, PoolEventKind};
 use crate::ruleset::{ActionRule, Rule, RuleSet};
 use chrono::{DateTime, Duration};
 use chrono_tz::Tz;
-use journ_core::configuration::{Configuration, Filter};
+use journ_core::configuration::{Configuration, Expression, Filter};
 use journ_core::directive::DirectiveKind;
 use journ_core::err;
 use journ_core::error::JournError;
@@ -434,8 +434,8 @@ impl FromStr for EventPattern {
 
         let valid = lower == "pooled"
             || lower.starts_with("pooled ")
-            || lower == "unpooled"
-            || lower.starts_with("unpooled ")
+            || lower == "moved"
+            || lower.starts_with("moved ")
             || lower == "matched"
             || lower.starts_with("matched ")
             || lower == "adjusted"
@@ -445,7 +445,7 @@ impl FromStr for EventPattern {
             Ok(Self(lower))
         } else {
             Err(err!(
-                "must be one of 'pooled [pool]', 'unpooled [pool]', 'matched [pool]' or 'adjusted [pool]' where [pool] is an optional name of a pool"
+                "must be one of 'pooled [pool]', 'moved [pool_to]', 'matched [pool]' or 'adjusted [pool]' where [pool] is an optional name of a pool"
             ))
         }
     }
@@ -476,9 +476,8 @@ impl<'a, 'h> Filter<PoolEvent<'h>> for EventFilter<'_> {
                     || s.starts_with("pooled ") && s.split_whitespace().nth(1) == Some(&lower_name)
             }),
             PoolEventKind::MovedDeal(..) => self.0.iter().any(|s| {
-                s.deref() == "unpooled"
-                    || s.starts_with("unpooled ")
-                        && s.split_whitespace().nth(1) == Some(&lower_name)
+                s.deref() == "moved"
+                    || s.starts_with("moved ") && s.split_whitespace().nth(1) == Some(&lower_name)
             }),
             PoolEventKind::Match(..) => self.0.iter().any(|s| {
                 s.deref() == "matched"
@@ -490,6 +489,19 @@ impl<'a, 'h> Filter<PoolEvent<'h>> for EventFilter<'_> {
                         && s.split_whitespace().nth(1) == Some(&lower_name)
             }),
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PoolFilter(pub Vec<Expression>);
+
+impl<'a, 'h> Filter<PoolEvent<'h>> for PoolFilter {
+    fn is_included(&self, event: &PoolEvent<'h>) -> bool {
+        // No filter specified; always include.
+        if self.0.is_empty() {
+            return true;
+        }
+        self.0.iter().any(|s| s.is_match(&event.pool_name()))
     }
 }
 

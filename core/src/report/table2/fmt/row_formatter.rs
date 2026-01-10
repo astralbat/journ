@@ -60,6 +60,12 @@ pub trait RowFormatter<'format>: CellFormatter {
                     // Some cells will not print anything on this cell_line so ignore the result.
                     let width: ColumnWidth =
                         columns[icol..icol + cell.hspan()].iter().map(|col| col.width()).sum();
+                    write!(
+                        self,
+                        "{:indent$}",
+                        "",
+                        indent = column_preferences.get(icol).map(|cp| cp.indent()).unwrap_or(0)
+                    )?;
                     let _ = self.format_cell(cell, cell_line, width);
                     icol += cell.hspan();
                 }

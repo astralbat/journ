@@ -23,6 +23,7 @@
 #![feature(result_option_map_or_default)]
 #![feature(slice_concat_trait)]
 #![feature(pattern)]
+#![feature(bool_to_result)]
 extern crate chrono_tz;
 #[macro_use]
 extern crate rust_decimal_macros;

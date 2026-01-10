@@ -17,7 +17,6 @@ use journ_core::error::JournResult;
 use journ_core::journal_entry::{EntryId, JournalEntry};
 use journ_core::journal_entry_flow::Flow;
 use journ_core::metadata::Metadata;
-use journ_core::report::table;
 use journ_core::unit::Unit;
 use journ_core::valued_amount::ValuedAmount;
 use journ_core::valuer::{SystemValuer, ValuationError};
@@ -374,50 +373,6 @@ impl fmt::Debug for Deal<'_> {
         fmt::Display::fmt(self, f)
     }
 }
-
-impl<'a> From<&'a Deal<'_>> for table::Cell<'a> {
-    fn from(value: &'a Deal<'_>) -> Self {
-        let cell0 = (&value.valued_amount).into();
-        let cell1 = if !value.allowable_expenses.amount().is_zero() {
-            let cell11 = if value.allowable_expenses.amount().is_negative() {
-                table::Cell::new(" -- ")
-            } else {
-                table::Cell::new(" ++ ")
-            };
-            let cell12 = value.allowable_expenses.amount().into();
-            table::Cell::from([cell11, cell12])
-        } else {
-            table::Cell::default()
-        };
-        let cell2 = match &value.taxable_gain {
-            Some(tg) => {
-                let cell21 = table::Cell::new(" == ");
-                let cell22 = tg.amount().into();
-                table::Cell::from([cell21, cell22])
-            }
-            None => table::Cell::default(),
-        };
-        [cell0, cell1, cell2].into()
-    }
-}
-
-/*
-impl From<&Deal<'_>> for Yaml {
-    fn from(deal: &Deal<'_>) -> Self {
-        let mut map = Hash::new();
-        map.insert(Yaml::String("datetime".to_string()), deal.datetime.into());
-        map.insert(Yaml::String("total".to_string()), deal.balance.valued_amount().into());
-        map.insert(Yaml::String("amount".to_string()), (&deal.valued_amount).into());
-        map.insert(Yaml::String("expenses".to_string()), (&deal.allowable_expenses).into());
-        /*
-        if let Some(parent) = deal.split_parent.as_ref() {
-            map.insert(Yaml::String("split_parent".to_string()), (&**parent).into());
-        }*/
-        map.insert(Yaml::String("required".to_string()), Yaml::Boolean(deal.required));
-        //map.insert(Yaml::String("remainder".to_string()), Yaml::Boolean(deal.is_remainder()));
-        Yaml::Hash(map)
-    }
-}*/
 
 impl PartialEq for Deal<'_> {
     fn eq(&self, other: &Self) -> bool {
