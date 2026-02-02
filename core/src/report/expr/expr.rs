@@ -9,6 +9,7 @@ use crate::datetime::JDateTime;
 use crate::err;
 use crate::error::{JournError, JournResult};
 use crate::report::expr::functions::abs::abs;
+use crate::report::expr::functions::iferror::iferror;
 use crate::report::expr::functions::*;
 use crate::report::expr::parser::{BinOp, CompareOp, LogicalOp};
 use crate::report::expr::{ColumnValue, IdentifierContext};
@@ -236,6 +237,8 @@ fn eval_scalar_function<'h, 'a>(
         now(args, context)
     } else if name.eq_ignore_ascii_case("if") {
         cond(args, context)
+    } else if name.eq_ignore_ascii_case("iferror") {
+        iferror(args, context)
     } else {
         Err(err!("Unknown function: '{}'", name))
     }

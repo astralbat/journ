@@ -164,8 +164,9 @@ impl<'h, 'p, 'l> Valuer<'h> for LambdaValuer<'h, 'p, 'l> {
                 // need to correct that here.
                 let price =
                     if got_inverse { Arc::new(prices[0].inverse()) } else { prices.pop().unwrap() };
-                let mut valuation = Valuation::new(
+                let mut valuation = Valuation::from_amount(
                     price.quote_unit().with_quantity(amount.quantity() * price.price().quantity()),
+                    amount,
                 );
                 price.sources().for_each(|s| {
                     valuation.add_source(s);
@@ -196,10 +197,11 @@ impl<'h, 'p, 'l> Valuer<'h> for LambdaValuer<'h, 'p, 'l> {
                             price.base_unit(),
                             price.price()
                         );
-                        let mut valuation = Valuation::new(
+                        let mut valuation = Valuation::from_amount(
                             price
                                 .quote_unit()
                                 .with_quantity(amount.quantity() * price.price().quantity()),
+                            amount,
                         );
                         price.sources().for_each(|s| {
                             valuation.add_source(s);

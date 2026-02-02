@@ -6,11 +6,10 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::err;
-use crate::error::JournResult;
+use crate::error::{JournError, JournResult};
 use crate::report::expr::aggregation::AggState;
 use crate::report::expr::context::IdentifierContext;
 use crate::report::expr::parser::AggKind;
-use crate::report::expr::plan::Plan;
 use crate::report::expr::{ColumnValue, Expr};
 use std::hash::Hash;
 
@@ -76,9 +75,8 @@ pub struct GroupState<'h> {
 }
 
 impl<'h> GroupState<'h> {
-    pub fn new(plan: &Plan<'h>) -> JournResult<Self> {
-        let aggs = plan.agg_functions().iter().map(AggKind::make).collect::<Result<_, _>>()?;
-        Ok(GroupState { aggs })
+    pub fn new(aggs: Vec<Box<dyn AggState<'h> + 'h>>) -> Self {
+        GroupState { aggs }
     }
 
     pub fn aggs(&self) -> &[Box<dyn AggState<'h> + 'h>] {
@@ -105,5 +103,13 @@ impl<'h> GroupState<'h> {
 
     pub fn finalize(&self) -> Vec<ColumnValue<'h>> {
         self.aggs.iter().map(|agg| agg.finalize()).collect()
+    }
+}
+
+impl<'h> TryFrom<&[AggKind<'h>]> for GroupState<'h> {
+    type Error = JournError;
+    fn try_from(spec_aggs: &[AggKind<'h>]) -> JournResult<Self> {
+        let aggs = spec_aggs.iter().map(AggKind::make).collect::<Result<_, _>>()?;
+        Ok(GroupState { aggs })
     }
 }

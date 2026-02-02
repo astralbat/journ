@@ -11,6 +11,7 @@ use crate::amounts::Amounts;
 use crate::configuration::{AccountFilter, Filter};
 use crate::datetime::{DateTimePrecision, JDate, JDateTime, JDateTimeRange};
 use crate::error::JournResult;
+use crate::parsing::amount::unit;
 use crate::report::command::arguments::Cmd;
 use crate::report::table2::{BLANK_CELL, CellRef, EllipsisCell, MultiLineCell};
 use crate::unit::{NumberFormat, Unit};
@@ -21,6 +22,7 @@ use rust_decimal::Decimal;
 use smartstring::alias::String as SS;
 use std::cmp::Ordering;
 use std::iter::Sum;
+use std::ops::AddAssign;
 use std::sync::Arc;
 use std::{fmt, iter, mem, slice};
 use yaml_rust2::Yaml;
@@ -289,7 +291,7 @@ impl<'h> ColumnValue<'h> {
         }
     }
 
-    pub fn into_cell_ref(self, show_zeros: bool) -> CellRef<'h> {
+    pub fn into_cell_ref(self, show_zeros: bool, show_multi: bool) -> CellRef<'h> {
         match self {
             ColumnValue::Undefined => CellRef::Borrowed(&BLANK_CELL),
             ColumnValue::Boolean(b) => CellRef::Owned(Box::new(b.to_string())),
@@ -307,22 +309,25 @@ impl<'h> ColumnValue<'h> {
             ColumnValue::Unit(unit) => CellRef::Owned(Box::new(unit.to_string())),
             ColumnValue::Amount(amount) => CellRef::Owned(amount.into_cell(amount.unit().format())),
             // Format numbers similar to amounts using a number format
-            ColumnValue::Number(qty) => {
-                ColumnValue::Amount(Amount::nil().with_quantity(qty)).into_cell_ref(show_zeros)
-            }
+            ColumnValue::Number(qty) => ColumnValue::Amount(Amount::nil().with_quantity(qty))
+                .into_cell_ref(show_zeros, show_multi),
             ColumnValue::ValuedAmount(va) => CellRef::Owned(va.as_cell()),
             ColumnValue::List(mut values) => {
-                values.sort();
+                if show_multi {
+                    values.sort();
 
-                // Don't include zero amounts in the list
-                CellRef::Owned(Box::new(MultiLineCell::new(
-                    values
-                        .into_iter()
-                        .filter(|cv| {
-                            cv.as_amount().map(|a| !a.is_zero() || show_zeros).unwrap_or(true)
-                        })
-                        .map(|a| a.into_cell_ref(show_zeros)),
-                )))
+                    // Don't include zero amounts in the list
+                    CellRef::Owned(Box::new(MultiLineCell::new(
+                        values
+                            .into_iter()
+                            .filter(|cv| {
+                                cv.as_amount().map(|a| !a.is_zero() || show_zeros).unwrap_or(true)
+                            })
+                            .map(|a| a.into_cell_ref(show_zeros, show_multi)),
+                    )))
+                } else {
+                    CellRef::Borrowed(&BLANK_CELL)
+                }
             }
         }
     }
@@ -449,6 +454,45 @@ impl<'h, A: Amounts<'h>> From<A> for ColumnValue<'h> {
         let vec: Vec<ColumnValue> =
             amounts.as_slice().iter().map(|a| ColumnValue::Amount(*a)).collect();
         ColumnValue::List(vec)
+    }
+}
+
+impl AddAssign for ColumnValue<'_> {
+    /// Adds one `ColumnValue` to another. We use [ColumnValue::cmp] to check whether one `ColumnValue`
+    /// is add-compatible with another - otherwise a list is formed.
+    fn add_assign(&mut self, rhs: Self) {
+        if *self == ColumnValue::Undefined {
+            *self = rhs;
+            return;
+        }
+        match (self, rhs) {
+            (ColumnValue::Number(left), ColumnValue::Number(right)) => *left += right,
+            (ColumnValue::Amount(left), ColumnValue::Amount(right))
+                if left.unit() == right.unit() =>
+            {
+                *left += right
+            }
+            (ColumnValue::Undefined, r) => unreachable!(),
+            (_, ColumnValue::Undefined) => {}
+            (ColumnValue::List(left), ColumnValue::List(right)) => {
+                'next_r: for r in right {
+                    for l in left.iter_mut() {
+                        if ColumnValue::cmp(l, &r).is_ok() {
+                            *l += r;
+                            continue 'next_r;
+                        }
+                    }
+                    left.push(r);
+                }
+            }
+            (ColumnValue::List(left), right) => {
+                match left.iter_mut().find(|l| ColumnValue::cmp(l, &right).is_ok()) {
+                    Some(l) => *l += right,
+                    None => left.push(right),
+                }
+            }
+            (l, r) => *l = ColumnValue::List(vec![l.clone(), r]),
+        }
     }
 }
 

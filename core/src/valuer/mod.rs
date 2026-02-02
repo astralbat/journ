@@ -23,48 +23,89 @@ pub use price_db_valuer::PriceDatabaseValuer;
 use smallvec::SmallVec;
 use smartstring::alias::String as SS;
 use std::borrow::Cow;
+use std::cell::LazyCell;
 use std::convert::Infallible;
-use std::fmt;
-use std::ops::{ControlFlow, Deref, FromResidual, Try};
+use std::ops::{Add, ControlFlow, Deref, DerefMut, FromResidual, Try};
+use std::{fmt, iter};
 pub use system_valuer::SystemValuer;
-/*
-pub trait Valuation<'h> {
-    fn value(&self) -> Amount<'h>;
-
-    /// Which other units (unique) were involved in the valuation.
-    fn via(&self) -> impl Iterator<Item=&'h Unit<'h>>;
-
-    fn sources(&self) -> impl Iterator<Item=&str>;
-}*/
 
 #[derive(Debug, Default, Clone)]
 pub struct Valuation<'h> {
     /// The valuation
     amount: Amount<'h>,
-    /// This valuation was via another valuation
+    /// This equivalent valuations this valuation was created from where the last
+    /// valuation in the chain is the original base amount.
     via: Option<Box<Valuation<'h>>>,
     /// The sources of the valuation
     sources: SmallVec<[SS; 2]>,
 }
 impl<'h> Valuation<'h> {
-    pub fn new(amount: Amount<'h>) -> Self {
-        Self { amount, ..Default::default() }
+    /// Creates a new valuation `from_amount`.
+    pub fn from_amount(valuation: Amount<'h>, from_amount: Amount<'h>) -> Self {
+        Self {
+            amount: valuation,
+            via: Some(Box::new(Valuation { amount: from_amount, ..Default::default() })),
+            ..Default::default()
+        }
+    }
+
+    /// The basis valuation is a valuation of itself.
+    pub fn basis(valuation: Amount<'h>) -> Self {
+        Self { amount: valuation, ..Default::default() }
     }
 
     pub fn rounded(&mut self) {
         self.amount = self.amount.rounded();
     }
 
+    /// Gets the `quote/base` price in the valuation unit.
+    pub fn price_with(&self, base_amount: Amount<'h>) -> Amount<'h> {
+        self.amount / base_amount.quantity()
+    }
+
+    /// Gets the `base/quote` in the base unit.
+    pub fn price_with_inverse(&self, base_amount: Amount<'h>) -> Amount<'h> {
+        base_amount / self.amount.quantity()
+    }
+
     pub fn value(&self) -> Amount<'h> {
         self.amount
     }
 
-    pub fn with_value(&self, amount: Amount<'h>) -> Self {
-        Self { amount, ..self.clone() }
+    /// Revalues this valuation or a component in the valuation chain. All
+    /// components are revalued relative to the change.
+    ///
+    /// Returns `Err` when the `amount`'s unit does not appear in the valuation
+    /// chain.
+    pub fn revalue(&mut self, amount: Amount<'h>) -> JournResult<()> {
+        let scalar = iter::chain(iter::once(&*self), self.via()).find_map(|via| {
+            if amount.unit() == via.unit() {
+                Some(amount.quantity() / via.quantity())
+            } else {
+                None
+            }
+        });
+        match scalar {
+            Some(scalar) => {
+                self.amount *= scalar;
+                let mut next_via = self.via.as_deref_mut();
+                while let Some(via) = next_via {
+                    via.amount *= scalar;
+                    next_via = via.via.as_deref_mut();
+                }
+                Ok(())
+            }
+            None => Err(err!("Unable to revalue")),
+        }
     }
 
+    /// Gets the other valuations in the chain for traceability where the last valuation
+    /// in the chain is the original base amount queried.
+    ///
+    /// This may be an empty `Iterator` in the case of a `basis` valuation (a base amount
+    /// was valued in its own unit); or the end of the chain was reached.
     pub fn via(&self) -> impl Iterator<Item = &Valuation<'h>> + '_ {
-        std::iter::successors(self.via.as_deref(), |next| next.via.as_deref())
+        iter::successors(self.via.as_deref(), |next| next.via.as_deref())
     }
 
     /// Sets the previous value in the Valuation chain.
@@ -95,40 +136,36 @@ impl<'h> Valuation<'h> {
         }
     }
 }
-/*
-impl<'h> Valuation for SingleValuation<'h> {
-    fn value(&self) -> &Amount<'h> {
-        &self.amount
-    }
 
-    fn via(&self) -> impl Iterator<Item=>  {
-        &self.via
-    }
-
-    fn sources(&self) -> impl Iterator<Item=&str>  {
-        self.sources.iter()
-    }
-}*/
 impl<'h> Deref for Valuation<'h> {
     type Target = Amount<'h>;
     fn deref(&self) -> &Self::Target {
         &self.amount
     }
 }
-/*
-impl<'h> Valuation<'h> for Vec<SingleValuation<'h>> {
-    fn value(&self) -> &Amount<'h> {
-        todo!()
-    }
 
-    fn via(&self) -> &[&'h Unit<'h>] {
+impl<'h> Add for &Valuation<'h> {
+    type Output = Option<Valuation<'h>>;
 
+    /// Adds two valuations. This will return `Some` if the valuations
+    /// share the same unit; `None` otherwise.
+    ///
+    /// Note that this operation may lose traceability information if both sides'
+    /// traceability is not unit compatible.
+    fn add(self, rhs: Self) -> Option<Valuation<'h>> {
+        if self.unit() != rhs.unit() {
+            None
+        } else {
+            Some(Valuation {
+                amount: self.amount + rhs.amount,
+                sources: iter::chain(self.sources.iter(), rhs.sources.iter()).cloned().collect(),
+                via: self.via.as_deref().and_then(|self_via| {
+                    rhs.via.as_deref().and_then(|rhs_via| (self_via + rhs_via).map(Box::new))
+                }),
+            })
+        }
     }
-
-    fn sources(&self) -> &[SS] {
-        todo!()
-    }
-}*/
+}
 
 #[derive(Debug)]
 pub enum ValuationError {
@@ -221,14 +258,20 @@ where
     }
 }
 
+impl<'h, T: Valuer<'h>> Valuer<'h> for LazyCell<T> {
+    fn value(&mut self, quote_unit: &'h Unit<'h>, amount: Amount<'h>) -> ValuationResult<'h> {
+        self.deref_mut().value(quote_unit, amount)
+    }
+}
+
 pub enum ValueResult<'h, O> {
     Ok(O),
     Err(JournError),
-    ValuationNeeded(&'h Unit<'h>, &'h Unit<'h>),
+    ValuationNeeded(&'h Unit<'h>, Amount<'h>),
 }
 pub enum ValueResidual<'h> {
     Err(JournError),
-    ValuationNeeded(&'h Unit<'h>, &'h Unit<'h>),
+    ValuationNeeded(&'h Unit<'h>, Amount<'h>),
 }
 
 impl<'h, O> Try for ValueResult<'h, O> {
@@ -281,21 +324,19 @@ where
         match f(entry.as_ref()) {
             ValueResult::Ok(o) => return Ok(o),
             ValueResult::Err(e) => return Err(e),
-            ValueResult::ValuationNeeded(base, quote) => {
-                match SystemValuer::from(entry.as_ref()).value(quote, base.with_quantity(1)) {
+            ValueResult::ValuationNeeded(quote_unit, amount) => {
+                match SystemValuer::from(entry.as_ref()).value(quote_unit, amount) {
                     Ok(val) => {
-                        let price = val.value();
+                        let price = val.value() * (dec!(1) / amount.quantity());
                         let entry = entry.to_mut();
-                        for pst in
-                            entry.postings_mut().filter(|pst| pst.unit() != val.value().unit())
-                        {
-                            if let Some(amount) = pst.amount_in(base) {
+                        for pst in entry.postings_mut().filter(|pst| pst.unit() != quote_unit) {
+                            if let Some(amount) = pst.amount_in(amount.unit()) {
                                 // When the amount is small, use unit valuations for increased accuracy. This matters when using the LinearSystemValuer.
                                 // We round in case the entry gets written out later.
                                 let val = if round_valuations && amount.abs() < 1 {
                                     valued_amount::PostingValuation::new_unit(price.rounded())
                                 } else {
-                                    let mut total = val.value() * amount.quantity();
+                                    let mut total = price * amount.quantity();
                                     if round_valuations {
                                         total = total.rounded();
                                     }
@@ -306,116 +347,13 @@ where
                         }
                     }
                     Err(e) => {
-                        return Err(
-                            err!("Unable to value {} in {} on entry", base, quote).with_source(e)
-                        );
+                        return Err(err!("Unable to value {} in {} on entry", amount, quote_unit)
+                            .with_source(e));
                     }
                 }
             }
         }
     }
 }
-
 #[cfg(test)]
-mod test {
-    use nalgebra::{DMatrix, DVector};
-
-    #[test]
-    fn test_linear() {
-        // Case 1
-        #[rustfmt::skip]
-            let m = DMatrix::from_row_slice(3, 2, &[
-            1.0, 0.0,
-            10.0, -2.0,
-            0.0, 0.0,
-        ]);
-        let b = DVector::from_row_slice(&[1.0, 0.0, 0.0]);
-        let decomp = m.svd(true, true);
-        let solved = decomp.solve(&b, 0.0).unwrap();
-        println!("Case 1: {}", solved);
-
-        // Case 2
-        #[rustfmt::skip]
-            let m = DMatrix::from_row_slice(2, 2, &[
-            1.0, 0.0,
-            10.0, -5.0,
-        ]);
-        let b = DVector::from_row_slice(&[1.0, 0.0]);
-        let decomp = m.svd(true, true);
-        let solved = decomp.solve(&b, 0.0).unwrap();
-        println!("Case 2: {}", solved);
-
-        // Case 3
-        #[rustfmt::skip]
-            let m = DMatrix::from_row_slice(2, 2, &[
-            1.0, 0.0,
-            12.0, -4.0
-        ]);
-        let b = DVector::from_row_slice(&[1.0, 0.0]);
-        let decomp = m.svd(true, true);
-        let solved = decomp.solve(&b, 0.0).unwrap();
-        println!("Case 3: {}", solved);
-
-        // Case 4
-        #[rustfmt::skip]
-            let m = DMatrix::from_row_slice(3, 3, &[
-            1.0, 0.0, 0.0,
-            0.0, -5.0, 2.0,
-            10.0, 0.0, -2.0
-        ]);
-        let b = DVector::from_row_slice(&[1.0, 0.0, 0.0]);
-        let decomp = m.svd(true, true);
-        let solved = decomp.solve(&b, 0.0).unwrap();
-        println!("Case 4: {}", solved);
-
-        // Case 5
-        #[rustfmt::skip]
-            let m = DMatrix::from_row_slice(4, 4, &[
-            1.0, 0.0, 0.0, 0.0,
-            8.0, 0.0, 0.0, -12.0,
-            0.0, 0.0, 16.0, -4.0,
-            8.0, -4.0, 16.0, -8.0
-        ]);
-        let b = DVector::from_row_slice(&[1.0, 0.0, 0.0, 0.0]);
-        let decomp = m.svd(true, true);
-        let solved = decomp.solve(&b, 0.0).unwrap();
-        println!("Case 5: {}", solved);
-
-        // Case 6
-        #[rustfmt::skip]
-        let m = DMatrix::from_row_slice(5, 5, &[
-            0.0, 1.0, 0.0, 0.0, 0.0,
-            8.0, 0.0, 0.0, -12.0, 0.0,
-            0.0, 0.0, 16.0, -4.0, 0.0,
-            0.0, 0.0, -32.0, 0.0, 4.0,
-            8.0, -4.0, 16.0, 0.0, -4.0,
-        ]);
-        let b = DVector::from_row_slice(&[1.0, 0.0, 0.0, 0.0, 0.0]);
-        let solved = m.svd(true, true).solve(&b, 0.0).unwrap();
-        println!("Case 6: {}", solved);
-
-        // Case 7 (incomplete system)
-        #[rustfmt::skip]
-            let m = DMatrix::from_row_slice(5, 5, &[
-            0.0, 1.0, 0.0, 0.0, 0.0,
-            8.0, -16.0, 0.0, 0.0, 0.0,
-            0.0, 0.0, 16.0, -4.0, 0.0,
-            0.0, 0.0, 16.0, 0.0, -16.0,
-            0.0, 0.0, 0.0, 0.0, 0.0
-        ]);
-        let b = DVector::from_row_slice(&[1.0, 0.0, 0.0, 0.0, 0.0]);
-        let solved = m.svd(true, true).solve(&b, 0.0).unwrap();
-        println!("Case 7: {}", solved);
-
-        // Case 8 (slightly different rates)
-        #[rustfmt::skip]
-            let m = DMatrix::from_row_slice(3, 2, &[
-            0.0, 1.0,
-            1.0, -1.111,
-            10.0, -11.12,
-        ]);
-        let b = DVector::from_row_slice(&[1.0, 0.0, 0.0]);
-        let solved = m.svd(true, true).solve(&b, 0.0).unwrap();
-        println!("Case 8: {}", solved);
-    }
-}
+mod test {}

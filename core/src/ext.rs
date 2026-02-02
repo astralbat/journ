@@ -235,7 +235,8 @@ impl StrExt for str {
         let significand = 'sig: {
             if let Some(dot_pos) = dot_pos {
                 if dot_pos + 1 < s.len() {
-                    let mut first_part = parse_128(&s[first_pos..dot_pos])?;
+                    let mut first_part =
+                        if first_pos == dot_pos { 0 } else { parse_128(&s[first_pos..dot_pos])? };
                     let mut second_part = parse_128(&s[dot_pos + 1..last_pos])?;
                     if negative {
                         first_part *= -1;

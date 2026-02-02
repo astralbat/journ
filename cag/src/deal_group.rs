@@ -324,13 +324,7 @@ impl<'h> DealGroup<'h> {
                     .value(quote_unit, deal.valued_amount().amount())
                 {
                     Ok(val) => {
-                        let mut val_clone = val.clone();
-                        total_value = total_value
-                            .map(|tv| {
-                                val_clone.set_via(tv);
-                                val_clone
-                            })
-                            .or(Some(val))
+                        total_value = total_value.and_then(|tv| &tv + &val).or(Some(val));
                     }
                     Err(ValuationError::Undetermined(reason)) => {
                         return Err(ValuationError::EvalFailure(
@@ -340,10 +334,11 @@ impl<'h> DealGroup<'h> {
                     Err(e) => return Err(e),
                 }
             }
-            let v = total_value.as_ref().unwrap().value();
-            Ok(total_value
-                .unwrap()
-                .with_value(v / total_amount.quantity() * base_amount.quantity()))
+            let mut total_value = total_value.unwrap();
+            total_value
+                .revalue(*total_value / total_amount.quantity() * base_amount.quantity())
+                .unwrap();
+            Ok(total_value)
         };
 
         if self.taxable_gain.is_none() {

@@ -22,6 +22,10 @@ impl<'h, 'e> EntryValuer<'h, 'e> {
     pub fn new(entry: &'e JournalEntry<'h>) -> Self {
         Self { entry }
     }
+
+    pub fn entry(&self) -> &'e JournalEntry<'h> {
+        self.entry
+    }
 }
 
 impl<'h, 'e> From<&'e JournalEntry<'h>> for EntryValuer<'h, 'e> {

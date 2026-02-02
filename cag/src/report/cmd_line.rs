@@ -8,6 +8,7 @@
 use crate::cgt_configuration::EventPattern;
 use crate::report::cag_command::CagCommand;
 use clap::Parser;
+use itertools::Itertools;
 use journ_core::error::JournResult;
 use journ_core::journal::Journal;
 use journ_core::report::command::IntoExecCommand;
@@ -32,9 +33,9 @@ pub struct CagArguments {
     event_filter: Vec<EventPattern>,
     #[arg(short = 'p', long = "pool", value_delimiter = ',')]
     pool_filter: Vec<String>,
-    #[arg(short = 'h', long, help = "Show only the first `head` results")]
+    #[arg(long, help = "Show only the first `head` results")]
     head: Option<usize>,
-    #[arg(short = 't', long, help = "Show only the last `tail` results")]
+    #[arg(long, help = "Show only the last `tail` results")]
     tail: Option<usize>,
     #[arg(
         long = "group-deals-by-date",
@@ -56,13 +57,24 @@ pub struct CagArguments {
         short = 'o',
         value_delimiter = ',',
         help = "A comma separated list of columns to print for each capital gains event.",
-        default_value = "EventDate.Start, Description, match.Gain as Gain"
+        default_value = "EventDate.Start.Date as Date, Description, Amount, Cost, pool.BalanceAfter.Amount, match.Gain as Gain"
     )]
     column_spec: Vec<String>,
+    #[arg(long = "where", help = "Filter the results on conditions", value_delimiter = ',')]
+    where_conditions: Vec<String>,
     #[arg(long, help = "Title to display for the table")]
     title: Option<String>,
     #[arg(short = 'H', long = "no-header", help = "do not print header row")]
     no_header: bool,
+    #[arg(long = "total", help = "Show a total row")]
+    show_total: bool,
+    #[arg(
+        long = "total-as",
+        value_delimiter = ',',
+        help = "Show a total row using the supplied column specification"
+    )]
+    #[arg(long, help = "Keep total to a single row in height in the output; do not show lists")]
+    brief_total: bool,
     #[arg(long = "yaml", help = "Write output as yaml")]
     yaml: bool,
     #[arg(
@@ -97,7 +109,14 @@ impl IntoExecCommand for CagArguments {
             yaml_map_key: self.yaml_map_key,
             title: self.title,
             no_header: self.no_header,
+            show_total: self.show_total,
+            brief_total: self.brief_total,
             column_spec: self.column_spec.join(","),
+            where_conditions: if self.where_conditions.is_empty() {
+                None
+            } else {
+                Some(self.where_conditions.join(","))
+            },
             chain: if self.chain.is_empty() {
                 None
             } else {

@@ -5,30 +5,22 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
-pub mod abs;
-pub mod concat;
-pub mod cond;
-mod date;
-mod datevalue;
-pub mod greatest;
-pub mod iferror;
-pub mod least;
-pub mod neg;
-mod now;
-pub mod num;
-pub mod round;
-pub mod text;
-pub mod value;
+use crate::err;
+use crate::error::JournResult;
+use crate::report::expr::{ColumnValue, Expr, IdentifierContext};
 
-pub use concat::concat;
-pub use cond::cond;
-pub use date::date;
-pub use datevalue::datevalue;
-pub use greatest::greatest;
-pub use least::least;
-pub use neg::neg;
-pub use now::now;
-pub use num::num;
-pub use round::round;
-pub use text::text;
-pub use value::value;
+pub fn iferror<'h>(
+    args: &[Expr<'h>],
+    context: &mut dyn IdentifierContext<'h>,
+) -> JournResult<ColumnValue<'h>> {
+    if args.len() != 2 {
+        return Err(err!("Function 'iferror' requires exactly two arguments"));
+    }
+
+    let value = args[0].eval(context)?;
+    let value_if_error = args[1].eval(context)?;
+    if value.is_undefined() {
+        return Ok(value_if_error);
+    }
+    Ok(value)
+}

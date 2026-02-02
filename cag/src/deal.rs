@@ -21,6 +21,7 @@ use journ_core::unit::Unit;
 use journ_core::valued_amount::ValuedAmount;
 use journ_core::valuer::{SystemValuer, ValuationError};
 use smallvec::SmallVec;
+use std::cell::LazyCell;
 use std::fmt;
 use std::fmt::Formatter;
 use std::ops::Add;

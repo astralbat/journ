@@ -76,11 +76,11 @@ impl<'h> EntryExpenses<'h> {
             };
             match &*accum + pst.valued_amount() {
                 Some(val) if val.units().count() == 1 && val.value_in(value_unit).is_none() => {
-                    ValueResult::ValuationNeeded(val.unit(), value_unit)?;
+                    ValueResult::ValuationNeeded(value_unit, val.amount())?;
                 }
                 Some(val) => *accum = val,
                 None => {
-                    ValueResult::ValuationNeeded(pst.unit(), value_unit)?;
+                    ValueResult::ValuationNeeded(value_unit, pst.amount())?;
                 }
             }
         }
@@ -93,14 +93,14 @@ impl<'h> EntryExpenses<'h> {
         {
             Some(sum) if sum.is_nil() => {}
             Some(sum) if sum.units().count() == 1 && sum.value_in(value_unit).is_none() => {
-                ValueResult::ValuationNeeded(sum.unit(), value_unit)?;
+                ValueResult::ValuationNeeded(value_unit, sum.amount())?;
             }
             Some(_) => {}
             None => {
                 for expense in [&acquisition_expenses, &disposal_expenses, &shared_expenses].iter()
                 {
                     if expense.value_in(value_unit).is_none() {
-                        ValueResult::ValuationNeeded(expense.unit(), value_unit)?;
+                        ValueResult::ValuationNeeded(value_unit, expense.amount())?;
                     }
                 }
             }
@@ -166,7 +166,7 @@ impl<'h> EntryExpenses<'h> {
             _ => {
                 for val in iter.clone() {
                     if val.value_in(self.value_unit).is_none() {
-                        ValueResult::ValuationNeeded(val.amount().unit(), self.value_unit)?;
+                        ValueResult::ValuationNeeded(self.value_unit, val.amount())?;
                     }
                 }
                 unreachable!()

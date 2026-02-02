@@ -93,20 +93,21 @@ impl ExecCommand for RegCommand {
         let config = journ.config();
 
         // Parse the column specification. We need a lower-case version for evaluation.
-        let plan = parse_plan(&cmd.column_spec, None, HashMap::new(), None, true)?;
+        let plan = parse_plan(&cmd.column_spec, None, false, None, HashMap::new(), None, true)?;
 
         let mut table = journ_core::report::table2::Table::default();
         // Heading Row
         let heading_style = Style::default().with_weight(Weight::Bold);
         let headings = plan
-            .column_expressions()
+            .column_spec()
+            .exprs()
             .iter()
             .map(|col| StyledCell::new(col.to_string(), heading_style))
             .collect::<Vec<_>>();
         table.append_heading_row(headings);
 
         // Allow these columns to expand. Look better.
-        for (i, col) in plan.column_expressions().iter().enumerate() {
+        for (i, col) in plan.column_spec().exprs().iter().enumerate() {
             if let Expr::Identifier(s) = &col
                 && (s.eq_ignore_ascii_case("description") || s.eq_ignore_ascii_case("account"))
             {
@@ -126,7 +127,7 @@ impl ExecCommand for RegCommand {
         // Add to the table
         for row_data in data {
             table.push_row(Row::new(
-                row_data.column_values.into_iter().map(|c| c.into_cell_ref(false)),
+                row_data.column_values.into_iter().map(|c| c.into_cell_ref(false, true)),
             ))
         }
 

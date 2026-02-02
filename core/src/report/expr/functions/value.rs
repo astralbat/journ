@@ -5,6 +5,7 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
+use crate::amount::Amount;
 use crate::err;
 use crate::error::JournResult;
 use crate::report::expr::context::IdentifierContext;
@@ -48,31 +49,34 @@ pub fn value<'h>(
             if base_amount_col.is_undefined() {
                 return Ok(ColumnValue::Undefined);
             }
-            let base_amount = base_amount_col.as_amount().ok_or(err!(
-                "Function 'value()' requires the second argument to be an `Amount` type"
-            ))?;
+            let mut total_value = Amount::nil();
+            for base_amount_val in base_amount_col.into_list() {
+                let base_amount = base_amount_val.as_amount().ok_or(err!(
+                    "Function 'value()' requires the second argument to be an `Amount` type"
+                ))?;
 
-            // The third argument is an optional datetime.
-            let datetime_col = args.get(2).map(|a| a.eval(context)).transpose()?;
-            if datetime_col.as_ref().map(|c| c.is_undefined()).unwrap_or(false) {
-                return Ok(ColumnValue::Undefined);
-            }
-            let datetime = datetime_col
-                .map(|c| {
-                    c.as_datetime().ok_or_else(|| {
-                        err!("Function 'value' requires the third argument to be a `Datetime` type")
+                // The third argument is an optional datetime.
+                let datetime_col = args.get(2).map(|a| a.eval(context)).transpose()?;
+                if datetime_col.as_ref().map(|c| c.is_undefined()).unwrap_or(false) {
+                    return Ok(ColumnValue::Undefined);
+                }
+                let datetime = datetime_col
+                    .map(|c| {
+                        c.as_datetime().ok_or_else(|| {
+                            err!("Function 'value' requires the third argument to be a `Datetime` type")
+                        })
                     })
-                })
-                .transpose()?;
+                    .transpose()?;
 
-            // Get the valuer from the context and query it.
-            let val = context.valuer(datetime)?.value(quote_unit, base_amount)?;
-            let value = val.value();
-            context.append_identifier(
-                "valueSource",
-                val.into_sources().into_iter().map(ColumnValue::String).collect(),
-            );
-            Ok(ColumnValue::Amount(value))
+                // Get the valuer from the context and query it.
+                let val = context.valuer(datetime)?.value(quote_unit, base_amount)?;
+                total_value += val.value();
+                context.append_identifier(
+                    "valueSource",
+                    val.into_sources().into_iter().map(ColumnValue::String).collect(),
+                );
+            }
+            Ok(ColumnValue::Amount(total_value))
         }
         None => Err(err!("Function 'value()' is not supported in this context")),
     }

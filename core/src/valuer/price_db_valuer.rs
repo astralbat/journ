@@ -33,7 +33,7 @@ impl<'h> Valuer<'h> for PriceDatabaseValuer {
                     amount.unit(),
                     quote_unit,
                 ) {
-                    return Ok(Valuation::new(price.price() * amount.quantity()));
+                    return Ok(Valuation::from_amount(price.price() * amount.quantity(), amount));
                 }
             }
             Err(ValuationError::Undetermined(err!("No price found in database")))

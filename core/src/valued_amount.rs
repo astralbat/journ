@@ -375,7 +375,7 @@ impl<'h> ValuedAmount<'h> {
         self.valuations
             .iter()
             .flatten()
-            .map(|v| Valuation::new(v.value_with_primary(self.amount())))
+            .map(|v| Valuation::from_amount(v.value_with_primary(self.amount()), self.amount()))
     }
 
     pub fn posting_valuations(&self) -> impl Iterator<Item = &PostingValuation<'h>> + Clone {
@@ -444,15 +444,17 @@ impl<'h> ValuedAmount<'h> {
     }
 
     pub fn total_valuer(&self) -> impl Valuer<'h> + '_ {
-        move |quote_unit: &'h Unit<'h>, amount: Amount<'h>| {
-            let base_amount = self.value_in(amount.unit());
+        move |quote_unit: &'h Unit<'h>, from_amount: Amount<'h>| {
+            let base_amount = self.value_in(from_amount.unit());
             let quote_amount = self.value_in(quote_unit);
             if let (Some(base_amount), Some(quote_amount)) = (base_amount, quote_amount) {
-                if base_amount.is_zero() || amount.is_zero() {
-                    return Ok(Valuation::new(quote_unit.with_quantity(0)));
+                if base_amount.is_zero() || from_amount.is_zero() {
+                    return Ok(Valuation::from_amount(quote_unit.with_quantity(0), from_amount));
                 }
-                let mut valuation =
-                    Valuation::new(quote_amount / base_amount.quantity() * amount.quantity());
+                let mut valuation = Valuation::from_amount(
+                    quote_amount / base_amount.quantity() * from_amount.quantity(),
+                    from_amount,
+                );
                 valuation.add_source("@@ Entry");
                 return Ok(valuation);
             }
@@ -461,16 +463,20 @@ impl<'h> ValuedAmount<'h> {
     }
 
     pub fn unit_valuer(&self) -> impl Valuer<'h> + '_ {
-        move |in_unit: &'h Unit<'h>, amount: Amount<'h>| {
+        move |in_unit: &'h Unit<'h>, from_amount: Amount<'h>| {
             for val in self.posting_valuations().filter(|v| v.is_unit()) {
-                let val = val.value_with_primary(*self.amount_expr);
+                //let val = val.value_with_primary(*self.amount_expr);
 
-                if amount.unit() == self.unit() && val.unit() == in_unit {
-                    let mut valuation = Valuation::new(val);
+                if from_amount.unit() == self.unit() && val.unit() == in_unit {
+                    let mut valuation =
+                        Valuation::from_amount(val.value() * from_amount.quantity(), from_amount);
                     valuation.add_source("@ Entry");
                     return Ok(valuation);
-                } else if amount.unit() == in_unit && val.unit() == self.unit() {
-                    let mut valuation = Valuation::new(amount / val.quantity());
+                } else if in_unit == self.unit() && from_amount.unit() == val.unit() {
+                    let mut valuation = Valuation::from_amount(
+                        in_unit.with_quantity(from_amount.quantity() / val.value().quantity()),
+                        from_amount,
+                    );
                     valuation.add_source("@ Entry");
                     return Ok(valuation);
                 }
@@ -505,7 +511,7 @@ impl<'h> ValuedAmount<'h> {
     ) -> ValuationResult<'h> {
         match self.value_in(in_unit) {
             Some(value) => {
-                let mut valuation = Valuation::new(value);
+                let mut valuation = Valuation::from_amount(value, self.amount());
                 valuation.add_source("Entry");
                 Ok(valuation)
             }

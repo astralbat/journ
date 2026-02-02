@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025. Mark Barrett
+ * Copyright (c) 2025-2026. Mark Barrett
  * This file is part of Journ.
  * Journ is free software: you can redistribute it and/or modify it under the terms of the GNU Affero General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
@@ -50,7 +50,10 @@ impl<'h, 'e> EvalContext<'h> for CagContext<'h, 'e> {
 }
 
 impl<'h> ValuerContext<'h> for CagContext<'h, '_> {
-    fn valuer<'a>(&'a self, datetime: Option<JDateTime>) -> JournResult<Box<dyn Valuer<'h> + 'a>> {
+    fn valuer<'a>(&'a self, datetime: Option<JDateTime>) -> JournResult<Box<dyn Valuer<'h> + 'a>>
+    where
+        'h: 'a,
+    {
         let sys_valuer = match datetime {
             Some(datetime) => SystemValuer::on_date(self.journal.config().clone(), datetime),
             None => SystemValuer::on_date(
@@ -81,6 +84,12 @@ where
             "dealDate" => Value(ColumnValue::DatetimeRange(self.event.deal_datetime())),
             "description" => Value(ColumnValue::String(self.event.description().iter().join(",").into())),
             "unit" => Value(ColumnValue::Unit(self.event.unit())),
+            "amount" => {
+                Value(ColumnValue::Amount(self.event.balance_after().amount() - self.event.balance_before().amount()))
+            },
+            "cost" => {
+                Value(ColumnValue::Amount(self.event.balance_after().cost() - self.event.balance_before().cost()))
+            },
             "pool" => Pool(self.event),
             "acquired" => {
                 match self.event.acquired() {

@@ -35,7 +35,7 @@ impl<'h> AggState<'h> for SumIf<'h> {
                 err!("Function 'sumif' requires the first argument to evaluate to a `Boolean` type")
             })?;
         if cond_result {
-            self.inner.add(context)?;
+            AggState::add(&mut self.inner, context)?;
         }
         Ok(())
     }

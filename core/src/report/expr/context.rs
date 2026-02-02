@@ -80,7 +80,15 @@ pub trait IdentifierContext<'h>: EvalContext<'h> {
 }
 
 pub trait ValuerContext<'h>: IdentifierContext<'h> {
-    fn valuer<'a>(&'a self, date: Option<JDateTime>) -> JournResult<Box<dyn Valuer<'h> + 'a>>;
+    fn valuer<'a>(&'a self, date: Option<JDateTime>) -> JournResult<Box<dyn Valuer<'h> + 'a>>
+    where
+        'h: 'a,
+    {
+        match date {
+            Some(date) => Ok(Box::new(SystemValuer::on_date(self.config().clone(), date))),
+            None => Ok(Box::new(SystemValuer::on_date(self.config().clone(), JDateTime::now()))),
+        }
+    }
 }
 
 pub struct LateContext<'h, 'j> {
@@ -154,40 +162,35 @@ impl<'h, 'j> IdentifierContext<'h> for LateContext<'h, 'j> {
     }
 }
 
-impl<'h> ValuerContext<'h> for LateContext<'h, '_> {
-    fn valuer<'a>(&'a self, date: Option<JDateTime>) -> JournResult<Box<dyn Valuer<'h> + 'a>> {
-        match date {
-            Some(date) => Ok(Box::new(SystemValuer::on_date(self.journal.config().clone(), date))),
-            None => {
-                Ok(Box::new(SystemValuer::on_date(self.journal.config().clone(), JDateTime::now())))
-            }
-        }
-    }
-}
+impl<'h> ValuerContext<'h> for LateContext<'h, '_> {}
 
-pub struct TotalContext<'h> {
-    journal: &'h Journal<'h>,
+pub struct TotalContext<'h, 'j> {
+    journal: &'j Journal<'h>,
     aggregate_values: Vec<ColumnValue<'h>>,
     variables: HashMap<SS, ColumnValue<'h>>,
 }
-impl<'h> TotalContext<'h> {
-    pub fn new(
-        journal: &'h Journal<'h>,
-        aggregate_values: Vec<ColumnValue<'h>>,
-    ) -> TotalContext<'h> {
+impl<'h, 'j> TotalContext<'h, 'j> {
+    pub fn new(journal: &'j Journal<'h>, aggregate_values: Vec<ColumnValue<'h>>) -> Self {
         TotalContext { journal, aggregate_values, variables: HashMap::new() }
     }
 }
-impl<'h> EvalContext<'h> for TotalContext<'h> {
+impl<'h> EvalContext<'h> for TotalContext<'h, '_> {
     fn config(&self) -> &Configuration<'h> {
         self.journal.config()
+    }
+
+    fn as_valuer_context(&self) -> Option<&dyn ValuerContext<'h>> {
+        Some(self)
+    }
+    fn as_valuer_context_mut(&mut self) -> Option<&mut dyn ValuerContext<'h>> {
+        Some(self)
     }
 
     fn eval_aggregate(&self, index: usize) -> Option<ColumnValue<'h>> {
         self.aggregate_values.get(index).cloned()
     }
 }
-impl<'h> IdentifierContext<'h> for TotalContext<'h> {
+impl<'h> IdentifierContext<'h> for TotalContext<'h, '_> {
     fn variables(&self) -> &HashMap<SS, ColumnValue<'h>> {
         &self.variables
     }
@@ -196,6 +199,8 @@ impl<'h> IdentifierContext<'h> for TotalContext<'h> {
         &mut self.variables
     }
 }
+
+impl<'h> ValuerContext<'h> for TotalContext<'h, '_> {}
 
 pub struct PostingContext<'h> {
     journal: &'h Journal<'h>,
@@ -286,7 +291,10 @@ impl<'h> IdentifierContext<'h> for PostingContext<'h> {
 }
 
 impl<'h> ValuerContext<'h> for PostingContext<'h> {
-    fn valuer<'a>(&'a self, datetime: Option<JDateTime>) -> JournResult<Box<dyn Valuer<'h> + 'a>> {
+    fn valuer<'a>(&'a self, datetime: Option<JDateTime>) -> JournResult<Box<dyn Valuer<'h> + 'a>>
+    where
+        'h: 'a,
+    {
         let sys_valuer = match datetime {
             Some(datetime) => SystemValuer::on_date(self.journal().config().clone(), datetime),
             None => SystemValuer::from(self.entry()),

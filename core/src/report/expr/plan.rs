@@ -8,41 +8,48 @@
 use crate::err;
 use crate::error::JournResult;
 use crate::journal::Journal;
-use crate::report::expr::parser::AggKind;
+use crate::report::expr::column_spec::ColumnSpec;
 use crate::report::expr::{
-    ColumnValue, Expr, GroupKey, GroupState, IdentifierContext, LateContext,
+    ColumnValue, Expr, GroupKey, GroupState, IdentifierContext, LateContext, TotalContext,
 };
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 
 pub struct Plan<'h> {
-    column_spec: Vec<Expr<'h>>,
+    column_spec: ColumnSpec<'h>,
+    where_conditions: Vec<Expr<'h>>,
     group_by: Vec<Expr<'h>>,
+    show_total: bool,
     // Any extra fields that need be evaluated that aren't columns
     additional: HashMap<&'static str, Expr<'h>>,
-    agg_functions: Vec<AggKind<'h>>,
     sort_exprs: Vec<Expr<'h>>,
     sort_ascending: bool,
 }
 
 impl<'h> Plan<'h> {
     pub fn new(
-        column_spec: Vec<Expr<'h>>,
+        column_spec: ColumnSpec<'h>,
+        where_conditions: Vec<Expr<'h>>,
+        show_total: bool,
         group_by: Vec<Expr<'h>>,
         additional: HashMap<&'static str, Expr<'h>>,
-        agg_functions: Vec<AggKind<'h>>,
         sort_exprs: Vec<Expr<'h>>,
         sort_ascending: bool,
     ) -> Self {
-        Plan { column_spec, group_by, agg_functions, additional, sort_exprs, sort_ascending }
+        Plan {
+            column_spec,
+            where_conditions,
+            show_total,
+            group_by,
+            additional,
+            sort_exprs,
+            sort_ascending,
+        }
     }
 
-    pub fn column_expressions(&self) -> &[Expr<'h>] {
+    /// The specification for the data rows.
+    pub fn column_spec(&self) -> &ColumnSpec<'h> {
         &self.column_spec
-    }
-
-    pub fn agg_functions(&self) -> &[AggKind<'h>] {
-        &self.agg_functions
     }
 
     pub fn group_by(&self) -> &[Expr<'h>] {
@@ -56,14 +63,20 @@ impl<'h> Plan<'h> {
     /// - Nested aggregation functions are not allowed.
     pub fn validate(&self) -> JournResult<()> {
         if self.group_by.is_empty() {
+            /*
             let is_agg = |expr: &Expr| expr.iter().any(|e| matches!(e, Expr::AggFunction { .. }));
-            if self.column_spec.iter().chain(self.additional.values()).any(is_agg) {
-                if !self.column_spec.iter().all(Self::validate_expr_is_agg_or_no_identifiers) {
+            if self.column_spec.exprs().iter().chain(self.additional.values()).any(is_agg) {
+                if !self
+                    .column_spec
+                    .exprs()
+                    .iter()
+                    .all(Self::validate_expr_is_agg_or_no_identifiers)
+                {
                     return Err(err!(
                         "Aggregate functions cannot be mixed with identifiers unless using --group-by"
                     ));
                 }
-            }
+            }*/
             Ok(())
         } else {
             self.validate_no_nested_aggregates()?;
@@ -87,7 +100,7 @@ impl<'h> Plan<'h> {
     }
 
     fn validate_no_nested_aggregates(&self) -> JournResult<()> {
-        for expr in self.column_spec.iter().chain(self.additional.values()) {
+        for expr in self.column_spec.exprs().iter().chain(self.additional.values()) {
             if expr.iter().any(|e| {
                 matches!(e, Expr::AggFunction { .. })
                     && e.children().any(|inner| matches!(inner, Expr::AggFunction { .. }))
@@ -112,7 +125,7 @@ impl<'h> Plan<'h> {
         // Either we are executing in a grouping way or we are not. These two modes cannot
         // be mixed. Also, when aggregate functions have been specified but no group-by clause -
         // the whole dataset effectively becomes a single group.
-        if !self.group_by.is_empty() || !self.agg_functions.is_empty() {
+        if !self.group_by.is_empty() || !self.column_spec.agg_functions().is_empty() {
             self.execute_with_groups(journ, items, context_fn)
         } else {
             self.execute_without_groups(items, context_fn)
@@ -123,8 +136,7 @@ impl<'h> Plan<'h> {
         &self,
         items: impl Iterator<Item = E>,
         mut context_fn: F,
-        mut total_group: Option<&mut GroupState<'h>>,
-    ) -> JournResult<HashMap<GroupKey<'h>, GroupState<'h>>>
+    ) -> JournResult<(HashMap<GroupKey<'h>, GroupState<'h>>, GroupState<'h>)>
     where
         C: IdentifierContext<'h> + 'e,
         F: FnMut(E) -> C,
@@ -132,6 +144,7 @@ impl<'h> Plan<'h> {
     {
         // Aggregate events into groups
         let mut groups: HashMap<GroupKey, GroupState> = HashMap::new();
+        let mut total_group = GroupState::try_from(self.column_spec.agg_functions())?;
         for item in items {
             let mut context = context_fn(item);
 
@@ -147,14 +160,14 @@ impl<'h> Plan<'h> {
             );
             let group = match groups.entry(key) {
                 Entry::Occupied(e) => e.into_mut(),
-                Entry::Vacant(e) => e.insert(GroupState::new(self)?),
+                Entry::Vacant(e) => {
+                    e.insert(GroupState::try_from(self.column_spec.agg_functions())?)
+                }
             };
             group.add(&mut context)?;
-            if let Some(total) = total_group.as_mut() {
-                total.add(&mut context)?;
-            }
+            total_group.add(&mut context)?;
         }
-        Ok(groups)
+        Ok((groups, total_group))
     }
 
     fn execute_with_groups<'e, 'j, E, F, C>(
@@ -168,10 +181,10 @@ impl<'h> Plan<'h> {
         F: FnMut(E) -> C,
         E: 'e,
     {
-        let groups = self.execute_to_groups(items, context_fn, None)?;
+        let (groups, total_group) = self.execute_to_groups(items, context_fn)?;
 
         let mut rows = Vec::new();
-        for (key, group) in groups {
+        'next_row: for (key, group) in groups {
             let mut context = LateContext::new(journ, key.clone(), group.finalize());
             let mut row_data = RowData::default();
 
@@ -183,7 +196,8 @@ impl<'h> Plan<'h> {
             }
 
             for (additional_key, col) in self
-                .column_expressions()
+                .column_spec()
+                .exprs()
                 .iter()
                 .map(|e| (None, e))
                 .chain(self.additional.iter().map(|(k, v)| (Some(*k), v)))
@@ -203,7 +217,33 @@ impl<'h> Plan<'h> {
                     None => row_data.push_column_value(value),
                 }
             }
+
+            for cond in self.where_conditions.iter() {
+                match cond.eval(&mut context)? {
+                    ColumnValue::Boolean(bool) => {
+                        if !bool {
+                            continue 'next_row;
+                        }
+                    }
+                    val => {
+                        return Err(err!("Unable to evaluate where condition: '{}'", cond)
+                            .with_source(err!("Value is not a boolean: '{}'", val)));
+                    }
+                }
+            }
+
             rows.insert(self.row_insert_pos(&rows, &row_data), row_data);
+        }
+        // Evaluate total row
+        if self.show_total {
+            let mut total_context = TotalContext::new(journ, total_group.finalize());
+            let mut row_data = RowData::default();
+            for col in self.column_spec.exprs() {
+                row_data.push_column_value(
+                    col.eval(&mut total_context).unwrap_or_else(|_| ColumnValue::StringRef("")),
+                );
+            }
+            rows.push(row_data);
         }
         Ok(rows)
     }
@@ -231,7 +271,8 @@ impl<'h> Plan<'h> {
             }
 
             for (additional_key, col) in self
-                .column_expressions()
+                .column_spec()
+                .exprs()
                 .iter()
                 .map(|e| (None, e))
                 .chain(self.additional.iter().map(|(k, v)| (Some(*k), v)))

@@ -11,9 +11,10 @@ use crate::report::expr::Expr;
 use crate::report::expr::aggregation::{
     AggState, CoSum, First, Last, Max, Min, Sum, SumIf, Unique,
 };
+use crate::report::expr::column_spec::ColumnSpec;
 use crate::report::expr::plan::Plan;
 use nom::Err as NomErr;
-use nom::bytes::complete::tag_no_case;
+use nom::bytes::complete::{tag_no_case, take_while};
 use nom::combinator::{cut, map_res};
 use nom::error::{VerboseError, context, convert_error};
 use nom::{
@@ -181,8 +182,8 @@ fn string_literal(input: &str) -> IResult<&str, &str, VerboseError<&str>> {
     context(
         "string literal (use quotes, e.g. \"Assets..\")",
         alt((
-            delimited(char('"'), take_while1(|c: char| c != '"'), char('"')),
-            delimited(char('\''), take_while1(|c: char| c != '\''), char('\'')),
+            delimited(char('"'), take_while(|c: char| c != '"'), char('"')),
+            delimited(char('\''), take_while(|c: char| c != '\''), char('\'')),
         )),
     )(input)
 }
@@ -407,17 +408,17 @@ fn column_spec<'h>(
 }
 
 // Parse the full column list: col1, col2, expr as "Alias", ...
-pub fn parse_columns(input: &'_ str) -> JournResult<(Vec<Expr<'_>>, Vec<AggKind<'_>>)> {
+pub fn parse_columns(input: &'_ str) -> JournResult<ColumnSpec<'_>> {
     let agg_functions = RefCell::new(Vec::new());
     match separated_list0(ws(char(',')), ws(column_spec(&agg_functions)))(input) {
-        Ok(("", cols)) => Ok((cols, agg_functions.take())),
+        Ok(("", cols)) => Ok(ColumnSpec::new(cols, agg_functions.take())),
         Ok((remaining, _)) => Err(err!("Unexpected input after parsing columns: '{}'", remaining)),
         Err(NomErr::Error(e)) | Err(NomErr::Failure(e)) => Err(err!(convert_error(input, e))),
         Err(NomErr::Incomplete(_)) => Err(err!("Incomplete input while parsing columns")),
     }
 }
 
-pub fn parse_non_aggregate<'h>(input: &'h str) -> JournResult<Vec<Expr<'h>>> {
+pub fn parse_non_aggregate(input: &str) -> JournResult<Vec<Expr>> {
     let agg_functions = RefCell::new(Vec::new());
     let res = match separated_list0(ws(char(',')), ws(column_spec(&agg_functions)))(input) {
         Ok(("", col)) => Ok(col),
@@ -434,12 +435,19 @@ pub fn parse_non_aggregate<'h>(input: &'h str) -> JournResult<Vec<Expr<'h>>> {
 
 pub fn parse_plan<'h>(
     column_spec: &'h str,
+    where_conditions: Option<&'h str>,
+    show_total: bool,
     group_by: Option<&'h str>,
     additional: HashMap<&'static str, &'h str>,
     sort_spec: Option<&'h str>,
     sort_ascending: bool,
 ) -> JournResult<Plan<'h>> {
-    let (columns, agg_functions) = parse_columns(column_spec)?;
+    let column_spec = parse_columns(column_spec)?;
+    let where_conditions = where_conditions
+        .map(|wc| {
+            parse_non_aggregate(wc).map_err(|e| err!("Unable to parse --where").with_source(e))
+        })
+        .transpose()?;
     let group_by_expr = group_by
         .map(|s| {
             parse_non_aggregate(s).map_err(|e| err!("Unable to parse --group-by").with_source(e))
@@ -456,10 +464,11 @@ pub fn parse_plan<'h>(
         additional_expr.insert(k, parse_non_aggregate(v)?.remove(0));
     }
     let plan = Plan::new(
-        columns,
+        column_spec,
+        where_conditions.unwrap_or_default(),
+        show_total,
         group_by_expr.unwrap_or_default(),
         additional_expr,
-        agg_functions,
         sort_exprs.unwrap_or_default(),
         sort_ascending,
     );

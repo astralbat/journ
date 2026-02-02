@@ -13,6 +13,7 @@ pub mod functions;
 mod group;
 pub mod parser;
 mod plan;
+mod column_spec;
 
 pub use column_value::ColumnValue;
 pub use context::{

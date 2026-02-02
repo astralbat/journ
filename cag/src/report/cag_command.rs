@@ -47,7 +47,10 @@ pub struct CagCommand {
     pub(super) yaml_map_key: Option<String>,
     pub(super) title: Option<String>,
     pub(super) no_header: bool,
+    pub(super) show_total: bool,
+    pub(super) brief_total: bool,
     pub(super) column_spec: String,
+    pub(super) where_conditions: Option<String>,
     pub(super) chain: Option<Box<CagCommand>>,
 }
 
@@ -84,7 +87,7 @@ impl CagCommand {
         &'a self,
         mut table: Table<'a>,
         column_expressions: &[Expr],
-        rows: Vec<RowData<'a>>,
+        mut rows: Vec<RowData<'a>>,
     ) -> Table<'a> {
         let chain_pos = Cmd::chain_position();
         if chain_pos > 0 {
@@ -100,8 +103,20 @@ impl CagCommand {
             table.append_heading_row(headings);
         }
 
+        let mut total_row = None;
+        if self.show_total {
+            total_row = Some(rows.remove(rows.len() - 1));
+        }
         for row in rows {
-            table.push_row(Row::new(row.column_values.into_iter().map(|v| v.into_cell_ref(false))));
+            table.push_row(Row::new(
+                row.column_values.into_iter().map(|v| v.into_cell_ref(false, true)),
+            ));
+        }
+        if let Some(total) = total_row {
+            table.push_separator_row('-', column_expressions.len());
+            table.push_row(Row::new(
+                total.column_values.into_iter().map(|v| v.into_cell_ref(false, !self.brief_total)),
+            ));
         }
         table
     }
@@ -306,6 +321,8 @@ impl ExecCommand for CagCommand {
         }
         let plan = parse_plan(
             &self.column_spec,
+            self.where_conditions.as_ref().map(String::as_str),
+            self.show_total,
             self.group_by.as_deref(),
             additional,
             self.order_by_spec.as_ref().map(String::as_str),
@@ -354,12 +371,12 @@ impl ExecCommand for CagCommand {
         {
             let table =
                 chained.and_then(ChainingResult::into_table).unwrap_or_else(|| self.create_table());
-            ChainingResult::Table(self.append_table(table, plan.column_expressions(), data))
+            ChainingResult::Table(self.append_table(table, plan.column_spec().exprs(), data))
         } else {
             let yaml =
                 chained.and_then(ChainingResult::into_yaml).unwrap_or_else(|| self.create_yaml());
 
-            ChainingResult::Yaml(self.append_yaml(yaml, plan.column_expressions(), data))
+            ChainingResult::Yaml(self.append_yaml(yaml, plan.column_spec().exprs(), data))
         };
 
         // Move to next chain

@@ -5,68 +5,57 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
-use crate::amount::Amount;
 use crate::err;
-use crate::error::{JournError, JournResult};
+use crate::error::JournResult;
 use crate::report::expr::aggregation::AggState;
 use crate::report::expr::context::IdentifierContext;
 use crate::report::expr::{ColumnValue, Expr};
-use smallvec::SmallVec;
 
 #[derive(Debug, PartialEq)]
 pub struct Sum<'h> {
     expr: Expr<'h>,
-    totals: SmallVec<[Amount<'h>; 2]>,
+    total: Option<ColumnValue<'h>>,
 }
 impl<'h> Sum<'h> {
     pub fn new(mut args: Vec<Expr<'h>>) -> JournResult<Self> {
         if args.len() != 1 {
             return Err(err!("Function 'sum' requires exactly one argument"));
         }
-        Ok(Self { expr: args.pop().unwrap(), totals: SmallVec::new() })
+        Ok(Self { expr: args.pop().unwrap(), total: None })
     }
 }
 
 impl<'h> AggState<'h> for Sum<'h> {
     fn add(&mut self, context: &mut dyn IdentifierContext<'h>) -> JournResult<()> {
-        self.expr
-            .eval(context)?
-            .as_list()
-            .iter()
-            .try_fold(&mut self.totals, |acc, v| {
-                let amount = v
-                    .as_amount()
-                    .or(v.as_undefined().map(|_| Amount::nil()))
-                    .ok_or_else(|| err!("Sum() can only sum `Amount` types"))?;
-                if !amount.is_nil() {
-                    *acc += amount;
-                }
-                Ok::<_, JournError>(acc)
-            })
-            .map(|_| ())
+        let b = self.expr.eval(context)?;
+
+        match self.total.take() {
+            Some(mut total) => {
+                total += b;
+                self.total = Some(total);
+            }
+            None => self.total = Some(b),
+        }
+        Ok(())
     }
 
     fn merge(&mut self, other: &dyn AggState<'h>) -> JournResult<()> {
         let b = other.finalize();
 
-        b.as_list()
-            .iter()
-            .try_fold(&mut self.totals, |acc, v| {
-                let amount =
-                    v.as_amount().ok_or_else(|| err!("Sum() can only sum `Amount` types"))?;
-                if !amount.is_nil() {
-                    *acc += amount;
-                }
-                Ok::<_, JournError>(acc)
-            })
-            .map(|_| ())
+        match self.total.take() {
+            Some(mut total) => {
+                total += b;
+                self.total = Some(total)
+            }
+            None => self.total = Some(b),
+        }
+        Ok(())
     }
 
     fn finalize(&self) -> ColumnValue<'h> {
-        match self.totals.len() {
-            0 => ColumnValue::Amount(Amount::nil()),
-            1 => ColumnValue::Amount(self.totals[0]),
-            _ => ColumnValue::List(self.totals.iter().map(|a| ColumnValue::Amount(*a)).collect()),
+        match &self.total {
+            None => ColumnValue::Undefined,
+            Some(t) => t.clone(),
         }
     }
 }
