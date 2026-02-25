@@ -7,7 +7,6 @@
  */
 use crate::bindings_pyo3::{PyLedgerError, PyLedgerResult};
 use crate::posting::Posting;
-use journ_core::amount::AmountExpr;
 use journ_core::journal::Journal as CoreJournal;
 use journ_core::journal_entry::EntryObject;
 use journ_core::journal_entry::JournalEntry as CoreJournalEntry;
@@ -81,12 +80,7 @@ impl JournalEntry {
             "  ",
             account,
             money
-                .map(|a| {
-                    ValuedAmount::new_in(
-                        AmountExpr::new(a, "  ", None),
-                        &crate::bindings_pyo3::ALLOCATOR,
-                    )
-                })
+                .map(|a| ValuedAmount::new_in(a, &crate::bindings_pyo3::ALLOCATOR))
                 .unwrap_or(ValuedAmount::nil()),
             None,
             None,

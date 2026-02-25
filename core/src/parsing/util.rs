@@ -47,11 +47,12 @@ where
 }
 
 /// Convenience function to map a string output/remainder into `&str`.
+#[cfg(test)]
 pub fn str_res<O>(res: (&str, O)) -> (&str, &str)
 where
     O: fmt::Display,
 {
-    let res_to_str = |res: O| crate::alloc::HERD.get().alloc(res.to_string()).as_str();
+    let res_to_str = |res: O| res.to_string().intern();
     (res.0, res_to_str(res.1))
 }
 

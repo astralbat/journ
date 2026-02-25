@@ -239,7 +239,7 @@ fn parse<'h>(
     let file_name = herd_allocator.alloc(PathBuf::from(file_path.file_name().unwrap()));
     PythonEnvironment::startup();
     match TextBlock::from_file(file_name.as_path(), herd_allocator, None)
-        .and_then(|block| Journal::parse(args, file_name.as_path(), block, herd_allocator))
+        .and_then(|block| Journal::parse(args, Some(file_name.as_path()), block, herd_allocator))
     {
         Ok(journ) => {
             info!(

@@ -241,6 +241,12 @@ impl<'a> PartialEq<&'a str> for JournError {
     }
 }
 
+impl<'a> PartialEq<JournError> for JournError {
+    fn eq(&self, other: &JournError) -> bool {
+        self.msg.to_string() == other.msg.to_string()
+    }
+}
+
 impl From<&'static str> for JournError {
     fn from(value: &'static str) -> Self {
         Self::new(value)

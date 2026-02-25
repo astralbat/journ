@@ -7,7 +7,7 @@
  */
 use crate::account::Account;
 use crate::alloc::HerdAllocator;
-use crate::amount::{Amount, AmountExpr};
+use crate::amount::Amount;
 use crate::journal_entry::EntryId;
 use crate::parsing::text_block::TextBlock;
 use crate::unit::Unit;
@@ -15,41 +15,47 @@ use crate::valued_amount::{PostingValuation, ValuedAmount};
 use crate::valuer::Valuation;
 use std::cell::Cell;
 use std::fmt;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PostingId<'h> {
-    entry_id: EntryId<'h>,
+    entry_id: Option<EntryId<'h>>,
     id: u32,
 }
 
 impl<'h> PostingId<'h> {
-    pub fn allocate(entry_id: EntryId<'h>) -> PostingId<'h> {
+    pub fn dangling() -> Self {
+        Self { entry_id: None, id: 0 }
+    }
+
+    pub fn attach(&mut self, entry_id: EntryId<'h>) {
         thread_local! {
-            static POSTING_COUNTER: Cell<u32> = Cell::new(0);
+            static POSTING_COUNTER: Cell<u32> = Cell::new(1);
         }
         let new_id = POSTING_COUNTER.with(|k| {
             let prev_id = k.get();
             k.set(prev_id + 1);
             prev_id + 1
         });
-        PostingId { entry_id, id: new_id }
+        self.id = new_id;
+        self.entry_id = Some(entry_id);
     }
+
     pub fn entry_id(&self) -> EntryId<'h> {
-        self.entry_id
+        self.entry_id.expect("EntryId not initialized")
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct Posting<'h> {
-    posting_id: OnceLock<PostingId<'h>>,
+    posting_id: PostingId<'h>,
     /// The block from which this posting was parsed, if it was parsed.
     text_block: Option<&'h TextBlock<'h>>,
     // Account spacing prefix.
     account_spacing: &'h str,
     account: Arc<Account<'h>>,
     valued_amount: ValuedAmount<'h>,
-    balance_assertion: Option<AmountExpr<'h>>,
+    balance_assertion: Option<Amount<'h>>,
     comment: Option<&'h str>,
     amount_elided: bool, // If the amount was elided
 }
@@ -60,11 +66,11 @@ impl<'h> Posting<'h> {
         account_spacing: &'h str,
         account: Arc<Account<'h>>,
         valued_amount: ValuedAmount<'h>,
-        balance_assertion: Option<AmountExpr<'h>>,
+        balance_assertion: Option<Amount<'h>>,
         comment: Option<&'h str>,
     ) -> Self {
         Self {
-            posting_id: OnceLock::new(),
+            posting_id: PostingId::dangling(),
             text_block,
             amount_elided: valued_amount.is_nil(),
             account_spacing,
@@ -75,12 +81,17 @@ impl<'h> Posting<'h> {
         }
     }
 
-    pub(crate) fn set_entry_id(&mut self, entry_id: EntryId<'h>) {
-        self.posting_id.set(PostingId::allocate(entry_id)).expect("Entry ID has already been set");
+    /// Attaches this posting to the entry specified by `entry_id`.
+    pub(crate) fn attach(&mut self, entry_id: EntryId<'h>) {
+        self.posting_id.attach(entry_id);
+    }
+
+    pub(super) fn detach(&mut self) {
+        self.posting_id = PostingId::dangling();
     }
 
     pub fn id(&self) -> PostingId<'h> {
-        *self.posting_id.get().expect("Entry ID has not been set")
+        self.posting_id
     }
 
     /// The block from which this posting was parsed.
@@ -153,8 +164,7 @@ impl<'h> Posting<'h> {
     ) {
         if self.valued_amount.is_nil() {
             // Todo: Set a good pretext here in case the elision has changed and this gets written out.
-            self.valued_amount =
-                ValuedAmount::new_in(AmountExpr::new(amount, " ", None), allocator);
+            self.valued_amount = ValuedAmount::new_in(amount, allocator);
         }
         self.valued_amount.set_amount(amount);
         self.amount_elided = elided;
@@ -162,7 +172,7 @@ impl<'h> Posting<'h> {
 
     /// Gets the balance assertion if one was set. (<Account> <Amount> = <assertion>)
     pub fn balance_assertion(&self) -> Option<Amount<'h>> {
-        self.balance_assertion.as_ref().map(|a| **a)
+        self.balance_assertion.as_ref().map(|a| *a)
     }
 
     pub fn valuations(&self) -> impl Iterator<Item = Valuation<'h>> {
@@ -233,7 +243,8 @@ impl<'h> Posting<'h> {
     pub fn write<W: fmt::Write>(&self, w: &mut W, include_elided: bool) -> fmt::Result {
         write!(w, "{}{}", self.account_spacing, self.account)?;
         if !self.valued_amount.is_nil() && (include_elided || !self.amount_elided) {
-            self.valued_amount.write(w, include_elided)?;
+            write!(w, "  ")?;
+            self.valued_amount.write(w)?;
         }
         if let Some(ba) = &self.balance_assertion {
             write!(w, "{ba}")?;

@@ -7,6 +7,7 @@
  */
 use crate::cgt_configuration::{EventFilter, EventPattern, PoolFilter};
 use crate::computer::CapitalGainsComputer;
+use crate::pool::PoolBalance;
 use crate::report::cmd_line::CagArguments;
 use crate::report::expr::context::CagContext;
 use clap::Parser;
@@ -20,7 +21,7 @@ use journ_core::report::command::chained_result::ChainingResult;
 use journ_core::report::command::cmd_line::BeginAndEndCommand;
 use journ_core::report::command::{ChainableCommand, ExecCommand, IntoExecCommand};
 use journ_core::report::expr::parser::parse_plan;
-use journ_core::report::expr::{Expr, RowData};
+use journ_core::report::expr::{ColumnValue, Expr, IdentifierContext, RowData};
 use journ_core::report::table2::{Row, StyledCell, Table};
 use journ_core::report::term_style::{Style, Weight};
 use journ_core::unit::Unit;
@@ -90,8 +91,12 @@ impl CagCommand {
         mut rows: Vec<RowData<'a>>,
     ) -> Table<'a> {
         let chain_pos = Cmd::chain_position();
+
         if chain_pos > 0 {
-            table.append_chain_separator(self.title.as_ref());
+            table.append_chain_separator();
+        }
+        if let Some(title) = &self.title {
+            table.append_title_row(title, rows.iter().map(|r| r.column_count()).max().unwrap_or(1));
         }
         // Heading Row
         if !self.no_header {
@@ -330,6 +335,7 @@ impl ExecCommand for CagCommand {
         )?;
         let event_filter = self.event_filter();
         let pool_filter = self.pool_filter();
+        let mut balance: Vec<PoolBalance<'h>> = vec![];
         let data = plan.execute(
             &*journ,
             capital_gains
@@ -337,7 +343,28 @@ impl ExecCommand for CagCommand {
                 .iter()
                 .filter(|e| event_filter.is_included(e))
                 .filter(|e| pool_filter.is_included(e)),
-            |e| CagContext::new(journ, e),
+            |e| {
+                let bal_diff = e.balance_after() - e.balance_before();
+                let bal = match balance
+                    .iter_mut()
+                    .find(|b| b.amount().unit() == bal_diff.amount().unit())
+                {
+                    Some(bal) => {
+                        *bal = &*bal + &bal_diff;
+                        &*bal
+                    }
+                    None => {
+                        balance.push(bal_diff);
+                        balance.get(balance.len() - 1).unwrap()
+                    }
+                };
+                let mut context = CagContext::new(journ, e);
+                context.set_identifier(
+                    "balance",
+                    ColumnValue::ValuedAmount(bal.valued_amount().clone()),
+                );
+                context
+            },
         )?;
 
         // The data rows are limited by --head and/or --tail.

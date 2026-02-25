@@ -12,8 +12,8 @@ use crate::journal_obj::JournalObj;
 use crate::parsing::input::{BlockInput, ConfigInput, LocatedInput, TextBlockInput, TextInput};
 use crate::parsing::text_block::{TextBlock, block, block_remainder1};
 use crate::parsing::util::{blank_lines0, double_space, spaced_word};
-use crate::parsing::{IParseResult, entry};
-use crate::{err, impl_journal_obj_common, parse_block};
+use crate::parsing::{IParseResult, block_parse, entry};
+use crate::{err, impl_journal_obj_common};
 use nom::bytes::complete::tag;
 use nom::character::complete::{space0, space1};
 use nom::combinator::{map, opt, recognize};
@@ -143,10 +143,9 @@ impl<'h> Metadata<'h> {
     }
 
     fn inner(&self) -> &MetadataInner<'h> {
-        self.inner.get_or_init(MetadataInner::init(
-            self.block.get().expect("Illegal metadata state"),
-            &self.config,
-        ))
+        self.inner.get_or_init(|| {
+            MetadataInner::init(self.block.get().expect("Illegal metadata state"), &self.config)
+        })
     }
 
     pub fn key(&self) -> &MetadataKey<'h> {
@@ -164,8 +163,8 @@ impl<'h> Metadata<'h> {
     pub fn pretext(&self) -> Option<&'h str> {
         self.block.get().map(|block| {
             let (_rem, out) =
-                parse_block!(block, Self::pretext_parser, self.config.clone()).unwrap();
-            out.text()
+                block_parse(block, self.config.clone(), Self::pretext_parser).unwrap();
+            out.1
         })
     }
 
@@ -175,13 +174,13 @@ impl<'h> Metadata<'h> {
             TextBlockInput<'h, RefCell<Configuration<'h>>>,
         ) -> IParseResult<'h, TextBlockInput<'h, RefCell<Configuration>>, O>,
     {
-        let (_rem, out) = parse_block!(
+        let (_rem, out) = block_parse(
             self.block(),
+            self.config.clone(),
             preceded(tuple((Self::pretext_parser, Self::key_parser)), parser),
-            self.config.clone()
         )
         .map_err(|e| self.err(block_context_error, None).with_source(e))?;
-        Ok(out)
+        Ok(out.1)
     }
 
     /// Reads each sub-block of the value, attempting to interpret them as metadata
@@ -329,16 +328,11 @@ struct MetadataInner<'h> {
 }
 
 impl<'h> MetadataInner<'h> {
-    pub fn init(
-        block: &'h TextBlock<'h>,
-        config: &Configuration<'h>,
-    ) -> impl FnOnce() -> MetadataInner<'h> {
-        move || {
-            let (_rem, (key, value)) =
+    pub fn init(block: &'h TextBlock<'h>, config: &Configuration<'h>) -> MetadataInner<'h> {
+        let (_rem, (_config, (key, value))) =
                 // There has been enough prevalidation during main parsing to assert that this won't fail
-                parse_block!(block, tuple((preceded(Metadata::pretext_parser, Metadata::key_parser), Metadata::value_parser)), config.clone()).unwrap();
-            Self { key, value }
-        }
+                block_parse(block, config.clone(), tuple((preceded(Metadata::pretext_parser, Metadata::key_parser), Metadata::value_parser))).unwrap();
+        Self { key, value }
     }
 
     /*

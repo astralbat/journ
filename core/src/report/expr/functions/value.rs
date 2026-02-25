@@ -41,11 +41,10 @@ pub fn value<'h>(
                 })?;
 
             // The second argument is evaluated as the base amount that needs to be valued.
-            let base_amount_col = args
-                .get(1)
-                .map(|a| a.eval(context))
-                .transpose()?
-                .unwrap_or_else(|| context.eval_identifier("amount").unwrap());
+            let base_amount_col =
+                args.get(1).map(|a| a.eval(context)).transpose()?.unwrap_or_else(|| {
+                    context.eval_identifier("amount").unwrap_or(ColumnValue::Undefined)
+                });
             if base_amount_col.is_undefined() {
                 return Ok(ColumnValue::Undefined);
             }

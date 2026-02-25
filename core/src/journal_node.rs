@@ -336,7 +336,8 @@ impl<'h> JournalNode<'h> {
     }
 
     /// Appends a new entry directive to the end of the node.
-    pub(crate) fn append_entry(&self, entry: JournalEntry<'h>) -> &'h JournalEntry<'h> {
+    pub(crate) fn append_entry(&self, mut entry: JournalEntry<'h>) -> &'h JournalEntry<'h> {
+        entry.attach(self.node_id);
         let alloc_entry: &'h JournalEntry<'h> = self.allocator.alloc(entry);
         self.append_directive(DirectiveKind::Entry(alloc_entry));
         alloc_entry
@@ -419,18 +420,21 @@ impl<'h> JournalNode<'h> {
     }
 
     /// Inserts a JournalEntry within the specified file and in the correct date position.
-    pub(crate) fn insert_entry(&self, entry: JournalEntry<'h>) -> &'h JournalEntry<'h> {
+    pub(crate) fn insert_entry(&self, mut entry: JournalEntry<'h>) -> &'h JournalEntry<'h> {
+        entry.attach(self.node_id);
         let entry: &'h JournalEntry<'h> = self.allocator.alloc(entry);
         self.insert_directive(DirectiveKind::Entry(entry));
         entry
     }
 
+    /// Returns `(old_entry, new_entry)`.
     pub fn replace_entry(
         &self,
-        entry: JournalEntry<'h>,
+        mut new_entry: JournalEntry<'h>,
         allocator: &'h HerdAllocator<'h>,
     ) -> (&'h JournalEntry<'h>, &'h JournalEntry<'h>) {
-        let entry = allocator.alloc(entry);
+        new_entry.attach(self.node_id);
+        let entry = allocator.alloc(new_entry);
         for seg in self.segments() {
             for dir in seg.directives().iter_mut() {
                 if let DirectiveKind::Entry(curr_entry) = dir.kind()
@@ -457,6 +461,16 @@ impl<'h> JournalNode<'h> {
                 }
             })
         }
+    }
+
+    pub fn remove_directive(&self, mut index: usize) -> Option<Directive<'h>> {
+        for seg in self.segments() {
+            match seg.remove_directive(index) {
+                Some(dir) => return Some(dir),
+                None => index -= seg.directives().len(),
+            }
+        }
+        None
     }
 
     /// Gets all directives in their included order.
@@ -648,15 +662,14 @@ mod tests {
 
         // Check they are inserted in the correct order
         let jn = journ.root();
-        jn.insert_directive(e2);
-        jn.insert_directive(e1);
-        jn.insert_directive(e4);
-        jn.insert_directive(e3);
-        let directives = jn.directives();
-        assert_eq!(directives.len(), 4);
-        assert_eq!(directives[0], e1_clone);
-        assert_eq!(directives[1], e2_clone);
-        assert_eq!(directives[2], e3_clone);
-        assert_eq!(directives[3], e4_clone);
+        jn.insert_directive(e2.into_inner().1);
+        jn.insert_directive(e1.into_inner().1);
+        jn.insert_directive(e4.into_inner().1);
+        jn.insert_directive(e3.into_inner().1);
+        let mut directives = jn.all_directives_iter().map(|(_seg, dir)| dir);
+        assert_eq!(directives.next(), Some(&e1_clone));
+        assert_eq!(directives.next(), Some(&e2_clone));
+        assert_eq!(directives.next(), Some(&e3_clone));
+        assert_eq!(directives.next(), Some(&e4_clone));
     }
 }

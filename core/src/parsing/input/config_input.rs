@@ -49,11 +49,9 @@ macro_rules! refcell_impl2 {
     };
 }
 refcell_impl2!(LocatedSpan<&'h str, Rc<RefCell<Configuration<'h>>>>);
-impl<'h, 's, 'e, 'p> ConfigInput<'h> for TextBlockInput<'h, &'p JournalParseNode<'h, 's, 'e>>
+impl<'h, 's, 'p> ConfigInput<'h> for TextBlockInput<'h, &'p JournalParseNode<'h, 's>>
 where
-    'h: 'e,
-    'e: 's,
-    's: 'p,
+    'h: 's,
 {
     fn config(&self) -> impl Deref<Target = Configuration<'h>> {
         self.extra.config().borrow()

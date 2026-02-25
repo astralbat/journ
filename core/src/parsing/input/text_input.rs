@@ -59,7 +59,7 @@ impl<'h> TextInput<'h> for LocatedSpan<&'h str> {
     }
 }
 
-impl<'h, 'p, 's, 'e> TextInput<'h> for LocatedSpan<&'h str, &'p JournalParseNode<'h, 's, 'e>>
+impl<'h, 'p, 's, 'e> TextInput<'h> for LocatedSpan<&'h str, &'s JournalParseNode<'h, 's>>
 where
     'h: 'e,
     'e: 'e,

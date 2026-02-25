@@ -11,7 +11,6 @@ use crate::amounts::Amounts;
 use crate::configuration::{AccountFilter, Filter};
 use crate::datetime::{DateTimePrecision, JDate, JDateTime, JDateTimeRange};
 use crate::error::JournResult;
-use crate::parsing::amount::unit;
 use crate::report::command::arguments::Cmd;
 use crate::report::table2::{BLANK_CELL, CellRef, EllipsisCell, MultiLineCell};
 use crate::unit::{NumberFormat, Unit};
@@ -34,7 +33,7 @@ pub enum ColumnValue<'h> {
     Boolean(bool),
     Account(Arc<Account<'h>>),
     Unit(&'h Unit<'h>),
-    Description(&'h str),
+    Description(SS),
     String(SS),
     StringRef(&'h str),
     Date(JDate),
@@ -337,7 +336,8 @@ impl<'h> ColumnValue<'h> {
             ColumnValue::Undefined => Yaml::Null,
             ColumnValue::Boolean(b) => Yaml::Boolean(b),
             ColumnValue::String(s) => Yaml::String(s.to_string()),
-            ColumnValue::StringRef(s) | ColumnValue::Description(s) => Yaml::String(s.to_string()),
+            ColumnValue::StringRef(s) => Yaml::String(s.to_string()),
+            ColumnValue::Description(s) => Yaml::String(s.to_string()),
             ColumnValue::Date(_) => Yaml::String(self.as_reporting_string()),
             ColumnValue::Datetime(_) => Yaml::String(self.as_reporting_string()),
             ColumnValue::DatetimeRange(_) => Yaml::String(self.as_reporting_string()),
@@ -404,7 +404,8 @@ impl fmt::Display for ColumnValue<'_> {
             ColumnValue::Undefined => write!(f, "UNDEFINED"),
             ColumnValue::Boolean(b) => write!(f, "{}", b),
             ColumnValue::String(s) => write!(f, "{}", s),
-            ColumnValue::StringRef(s) | ColumnValue::Description(s) => write!(f, "{}", s),
+            ColumnValue::StringRef(s) => write!(f, "{}", s),
+            ColumnValue::Description(s) => write!(f, "{}", s),
             ColumnValue::Account(acc) => write!(f, "{}", acc),
             ColumnValue::Unit(unit) => write!(f, "{}", unit),
             ColumnValue::Date(_date) => write!(f, "{}", self.as_reporting_string()),
@@ -472,7 +473,7 @@ impl AddAssign for ColumnValue<'_> {
             {
                 *left += right
             }
-            (ColumnValue::Undefined, r) => unreachable!(),
+            (ColumnValue::Undefined, _r) => unreachable!(),
             (_, ColumnValue::Undefined) => {}
             (ColumnValue::List(left), ColumnValue::List(right)) => {
                 'next_r: for r in right {

@@ -35,7 +35,7 @@ pub struct Journal<'h> {
 impl<'h> Journal<'h> {
     pub fn parse(
         args: &Arguments,
-        filename: &'h Path,
+        filename: Option<&'h Path>,
         text_block: TextBlock<'h>,
         allocator: &'h HerdAllocator<'h>,
     ) -> JournResult<Journal<'h>> {
@@ -45,7 +45,7 @@ impl<'h> Journal<'h> {
         let node = allocator.alloc(JournalNode::new(
             None,
             node_id,
-            Some(filename),
+            filename,
             JournalNodeKind::Entry,
             TextBlockInput::new(
                 LocatedSpan::new(allocated_block.text()),

@@ -130,7 +130,7 @@ impl<'h> CapitalGainsEntryMetadata<'h> {
             let (input, mut expenses) = if let Ok((rem, _)) =
                 preceded::<_, _, _, (), _, _>(space0, tag("--"))(input.clone())
             {
-                let (rem, mut expenses) = entry::valued_amount(rem)?;
+                let (rem, expenses) = entry::valued_amount(rem)?;
                 // Base amount is inferred. The amount we have is the total cost, so subtract the expenses to get the base cost.
                 if valued_amount.amount().is_positive() {
                     return Err(NomErr::Error(IParseError::new(
@@ -139,17 +139,13 @@ impl<'h> CapitalGainsEntryMetadata<'h> {
                     )));
                 }
 
-                expenses.set_pretext("");
-
                 // The expenses are negative when using --.
                 //expenses.negate();
                 (rem, expenses)
             } else if let Ok((rem, _)) =
                 preceded::<_, _, _, (), _, _>(space0, tag("++"))(input.clone())
             {
-                let (rem, mut expenses) = entry::valued_amount(rem)?;
-                expenses.set_pretext("");
-
+                let (rem, expenses) = entry::valued_amount(rem)?;
                 if valued_amount.amount().is_negative() {
                     return Err(NomErr::Error(IParseError::new(
                         "Expenses should be appended with '--' when the deal represents a disposal",
@@ -309,17 +305,17 @@ impl<'h> CapitalGainsEntryMetadata<'h> {
     {
         let add_parser = |input| {
             let (rem, amount) = amount::amount_expr(input)?;
-            Ok((rem, AmountAdjustment::Add(amount.amount())))
+            Ok((rem, AmountAdjustment::Add(amount)))
         };
         let scalar_parser = |input| {
             let (rem, amount) =
                 preceded(tuple((space0, tag("*"), space0)), amount::amount_expr)(input)?;
-            Ok((rem, AmountAdjustment::Scale(*amount)))
+            Ok((rem, AmountAdjustment::Scale(amount)))
         };
         let set_quantity_parser = |input| {
             let (rem, amount) =
                 preceded(tuple((space0, tag("="), space0)), amount::amount_expr)(input)?;
-            Ok((rem, AmountAdjustment::Set(*amount)))
+            Ok((rem, AmountAdjustment::Set(amount)))
         };
         tag_err(IErrorMsg::AMOUNT, alt((add_parser, scalar_parser, set_quantity_parser)))
     }

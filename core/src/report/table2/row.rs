@@ -23,6 +23,10 @@ impl<'c> Row<'c> {
         Self { cells, header: false }
     }
 
+    pub fn column_count(&self) -> usize {
+        self.cells.iter().map(|c| c.hspan()).sum()
+    }
+
     pub fn is_header(&self) -> bool {
         self.header
     }

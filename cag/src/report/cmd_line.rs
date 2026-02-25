@@ -8,7 +8,6 @@
 use crate::cgt_configuration::EventPattern;
 use crate::report::cag_command::CagCommand;
 use clap::Parser;
-use itertools::Itertools;
 use journ_core::error::JournResult;
 use journ_core::journal::Journal;
 use journ_core::report::command::IntoExecCommand;
@@ -57,7 +56,7 @@ pub struct CagArguments {
         short = 'o',
         value_delimiter = ',',
         help = "A comma separated list of columns to print for each capital gains event.",
-        default_value = "EventDate.Start.Date as Date, Description, Amount, Cost, pool.BalanceAfter.Amount, match.Gain as Gain"
+        default_value = "EventDate.Start.Date as Event-Date, DealDate.Start.Date as Deal-Date, Pool, Description, Amount, Cost, match.Gain as Gain, Balance"
     )]
     column_spec: Vec<String>,
     #[arg(long = "where", help = "Filter the results on conditions", value_delimiter = ',')]

@@ -14,7 +14,7 @@ use crate::pool_event::{MatchDetails, PoolEvent, PoolEventKind};
 use chrono::DateTime;
 use chrono_tz::Tz;
 use journ_core::alloc::HerdAllocator;
-use journ_core::amount::{Amount, AmountExpr};
+use journ_core::amount::Amount;
 use journ_core::configuration::Configuration;
 use journ_core::datetime::JDateTimeRange;
 use journ_core::err;
@@ -183,7 +183,7 @@ impl<'h> Pool<'h> {
             self.name,
             event_datetime,
             match from_pool {
-                Some(pool) => PoolEventKind::MovedDeal(DealHolding::Group(group), pool),
+                Some(pool) => PoolEventKind::MovedTo(DealHolding::Group(group), pool),
                 None => PoolEventKind::PooledDeal(DealHolding::Group(group)),
             },
             bal_before,
@@ -394,10 +394,7 @@ impl<'h> PoolBalance<'h> {
         uoa: &'h Unit<'h>,
         herd_allocator: &'h HerdAllocator<'h>,
     ) -> Self {
-        PoolBalance {
-            inner: ValuedAmount::new_in(AmountExpr::from(unit.with_quantity(0)), herd_allocator),
-            uoa,
-        }
+        PoolBalance { inner: ValuedAmount::new_in(unit.with_quantity(0), herd_allocator), uoa }
     }
 
     pub fn is_zero(&self) -> bool {

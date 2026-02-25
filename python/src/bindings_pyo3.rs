@@ -16,7 +16,7 @@ use chrono_tz::Tz;
 use env_logger::Builder;
 use journ_core::alloc::HerdAllocator;
 use journ_core::configuration::AlwaysIncluded;
-use journ_core::datetime::date_and_time::{DateAndTime, JDateTime, JDateTimeRange};
+use journ_core::datetime::{DateAndTime, DateTimePrecision, JDateTime, JDateTimeRange};
 use journ_core::err;
 use journ_core::error::JournError;
 use journ_core::journal_node::NodeId;
@@ -24,6 +24,7 @@ use journ_core::module::MODULES;
 use journ_core::parsing::text_block::TextBlock;
 use journ_core::python::mod_ledger;
 use journ_core::report::balance::AccountBalances;
+use journ_core::report::command::arguments::{Arguments, Cmd};
 use journ_core::unit::{RoundingStrategy, UnitFormat};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -123,9 +124,7 @@ impl Journal {
     #[new]
     fn new(filename: &str) -> PyLedgerResult<Self> {
         //let allocator = HerdAllocator::new(&HERD);
-        let args = journ_core::report::command::arguments::Arguments::set(
-            journ_core::report::command::arguments::Arguments::default(),
-        );
+        let args = Cmd::set_args(Arguments::default());
         let filename = &**ALLOCATOR.alloc(PathBuf::from(filename));
 
         if MODULES.lock().unwrap().is_empty() {
@@ -192,8 +191,10 @@ impl Journal {
         callback: &Bound<'py, PyAny>,
     ) -> PyResult<()> {
         let journal = self.journal.lock().unwrap();
-        let chrono_start: DateTime<Tz> = start_time.extract()?;
-        let chrono_end: DateTime<Tz> = end_time.extract()?;
+        let chrono_start =
+            JDateTime::new(start_time.extract::<DateTime<Tz>>()?, DateTimePrecision::Second);
+        let chrono_end =
+            JDateTime::new(end_time.extract::<DateTime<Tz>>()?, DateTimePrecision::Second);
 
         for entry in journal.entry_range(chrono_start..chrono_end) {
             let entry = JournalEntry::new(
@@ -215,8 +216,10 @@ impl Journal {
         description: &str,
     ) -> PyResult<Vec<JournalEntry>> {
         let journal = self.journal.lock().unwrap();
-        let chrono_start: DateTime<Tz> = start_time.extract()?;
-        let chrono_end: DateTime<Tz> = end_time.extract()?;
+        let chrono_start =
+            JDateTime::new(start_time.extract::<DateTime<Tz>>()?, DateTimePrecision::Second);
+        let chrono_end =
+            JDateTime::new(end_time.extract::<DateTime<Tz>>()?, DateTimePrecision::Second);
 
         let mut entries = vec![];
         for entry in journal.find_entries(chrono_start..chrono_end, description) {
@@ -245,7 +248,10 @@ impl Journal {
                     let chrono_start: DateTime<Tz> = t
                         .extract()
                         .map_err(|e| PyLedgerError(err!("Invalid start time: {}", e)))?;
-                    std::ops::Bound::Included(chrono_start)
+                    std::ops::Bound::Included(JDateTime::new(
+                        chrono_start,
+                        DateTimePrecision::Second,
+                    ))
                 }
                 None => std::ops::Bound::Unbounded,
             },
@@ -253,7 +259,7 @@ impl Journal {
                 Some(t) => {
                     let chrono_end: DateTime<Tz> =
                         t.extract().map_err(|e| PyLedgerError(err!("Invalid end time: {}", e)))?;
-                    std::ops::Bound::Excluded(chrono_end)
+                    std::ops::Bound::Excluded(JDateTime::new(chrono_end, DateTimePrecision::Second))
                 }
                 None => std::ops::Bound::Unbounded,
             },
@@ -292,26 +298,23 @@ impl Journal {
             py_datetime.extract().map_err(|e| PyLedgerError(err!("Invalid datetime: {}", e)))?;
         let dt = DateAndTime::new(
             JDateTimeRange::new(
-                JDateTime::from_datetime(
+                JDateTime::new(
                     chrono_date.with_timezone(&config.timezone()),
-                    Some(config.date_format()),
-                    if write_time { Some(config.time_format()) } else { None },
+                    if write_time { DateTimePrecision::Second } else { DateTimePrecision::Day },
                 ),
                 None,
             ),
-            match aux_datetime {
-                Some(aux) => {
+            aux_datetime
+                .map(|aux| {
                     let aux_date: DateTime<Tz> = aux
                         .extract()
                         .map_err(|e| PyLedgerError(err!("Invalid aux datetime: {}", e)))?;
-                    Some(JDateTime::from_datetime(
+                    Ok::<_, PyLedgerError>(JDateTime::new(
                         aux_date.with_timezone(&config.timezone()),
-                        Some(config.date_format()),
-                        if write_time { Some(config.time_format()) } else { None },
+                        if write_time { DateTimePrecision::Second } else { DateTimePrecision::Day },
                     ))
-                }
-                None => None,
-            },
+                })
+                .transpose()?,
         );
 
         description.insert_str(0, "  ");

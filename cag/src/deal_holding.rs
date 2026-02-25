@@ -14,7 +14,7 @@ use crate::pool::PoolBalance;
 use chrono::DateTime;
 use chrono_tz::Tz;
 use journ_core::alloc::HerdAllocator;
-use journ_core::amount::{Amount, AmountExpr, Quantity};
+use journ_core::amount::{Amount, Quantity};
 use journ_core::configuration::Configuration;
 use journ_core::datetime::{DateTimePrecision, JDateTime, JDateTimeRange};
 use journ_core::err;
@@ -172,7 +172,7 @@ impl<'h> DealHolding<'h> {
             Average(AverageDealHolding::new(
                 group.entries().next().unwrap().date_and_time().datetime_range(),
                 ValuedAmount::new_in(
-                    AmountExpr::from(group.unit().with_quantity(0)),
+                    group.unit().with_quantity(0),
                     group.entries().next().unwrap().config().allocator(),
                 ),
                 ValuedAmount::nil(),

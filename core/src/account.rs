@@ -51,6 +51,10 @@ impl<'h> Account<'h> {
         &self.units
     }
 
+    pub(crate) fn units_mut(&mut self) -> &mut Vec<&'h Unit<'h>> {
+        &mut self.units
+    }
+
     pub fn push_unit(&mut self, unit: &'h Unit<'h>) {
         self.units.push(unit);
     }

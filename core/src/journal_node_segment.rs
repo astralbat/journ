@@ -56,6 +56,14 @@ impl<'h> JournalNodeSegment<'h> {
         self.directives.lock().unwrap()
     }
 
+    pub fn remove_directive(&self, index: usize) -> Option<Directive<'h>> {
+        let mut directives = self.directives.lock().unwrap();
+        if directives.len() <= index {
+            return None;
+        }
+        Some(directives.remove(index))
+    }
+
     pub(crate) fn set_directives(&self, directives: Vec<Directive<'h>>) {
         let mut guard = self.directives.lock().unwrap();
         *guard = directives;

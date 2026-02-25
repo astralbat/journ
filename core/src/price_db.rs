@@ -12,7 +12,7 @@ use crate::journal_node::JournalNode;
 use crate::price::Price;
 use crate::unit::Unit;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, MappedMutexGuard, Mutex, MutexGuard};
 
 #[derive(Debug, Default)]
 pub struct PriceDatabase<'h> {
@@ -51,8 +51,8 @@ impl<'h> PriceDatabase<'h> {
     }
 
     #[cfg(test)]
-    pub fn prices(&self) -> MutexGuard<(Vec<Arc<Price<'h>>>, bool)> {
-        self.prices_init()
+    pub fn prices(&self) -> MappedMutexGuard<'_, Vec<Arc<Price<'h>>>> {
+        MutexGuard::map(self.prices_init(), |(prices, _initialised)| prices)
     }
 
     /// Finds the price whose time is closest as possible to the `target` time and having
@@ -156,10 +156,9 @@ impl<'h> PriceDatabase<'h> {
     {
         let prices_lock = self.prices_init();
         let prices = &prices_lock.0;
-        let i = match prices.binary_search_by_key(&key.datetime(), |p| *p.datetime()) {
-            Ok(pos) => pos,
-            Err(pos) => pos,
-        };
+        let i = prices
+            .binary_search_by_key(&key.datetime(), |p| *p.datetime())
+            .unwrap_or_else(|pos| pos);
         let mut left_offset = 0;
         let mut right_offset = 0;
         loop {
@@ -231,14 +230,13 @@ impl<'h> PriceDatabase<'h> {
 
 #[cfg(test)]
 mod tests {
-    use crate::datetime::date_and_time::JDateTime;
+    use crate::datetime::{DateTimePrecision, JDateTime};
     use crate::price::Price;
     use crate::price_db::PriceDatabase;
     use crate::unit::Unit;
     use crate::*;
     use chrono::*;
     use chrono_tz::Tz;
-    use smallvec::smallvec;
     use std::ops::Add;
     use std::sync::Arc;
 
@@ -246,45 +244,37 @@ mod tests {
     fn test_price_db() {
         let price_db = PriceDatabase::default();
 
-        let config = config!();
-        let time = Tz::UTC.from_utc_datetime(&NaiveDateTime::new(
-            NaiveDate::from_ymd(2000, 1, 1),
-            NaiveTime::from_hms(0, 0, 0),
-        ));
+        let time = JDateTime::new(
+            Tz::UTC.from_utc_datetime(&NaiveDateTime::new(
+                NaiveDate::from_ymd_opt(2000, 1, 1).unwrap(),
+                NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
+            )),
+            DateTimePrecision::Second,
+        );
         let base_curr = &*Box::leak(Box::new(Unit::new("£")));
         let quote_curr = &*Box::leak(Box::new(Unit::new("$")));
 
         // Exact Time
-        price_db.put(Arc::new(Price::new(
-            JDateTime::from_datetime(time, Some(config.date_format()), Some(config.time_format())),
-            base_curr,
-            amount!("$2"),
-            None,
-        )));
+        price_db.put(Arc::new(Price::new(time, base_curr, amount!("$2"), None)));
         assert_eq!(
-            price_db.get_closest(time, 0, base_curr, quote_curr).unwrap().map(|p| p.price()),
+            price_db.get_closest(time, 0, base_curr, quote_curr).map(|p| p.price()),
             Some(amount!("$2"))
         );
 
         // Another entry 30 mins later. Check the first entry is still there and that the closest 16 minutes is the new one.
         price_db.put(Arc::new(Price::new(
-            JDateTime::from_datetime(
-                time.add(Duration::minutes(30)),
-                Some(config.date_format()),
-                Some(config.time_format()),
-            ),
+            time.add(Duration::minutes(30)),
             base_curr,
             amount!("$3"),
             None,
         )));
         assert_eq!(
-            price_db.get_closest(time, 1, base_curr, quote_curr).unwrap().map(|p| p.price()),
+            price_db.get_closest(time, 1, base_curr, quote_curr).map(|p| p.price()),
             Some(amount!("$2"))
         );
         assert_eq!(
             price_db
                 .get_closest(time.add(Duration::minutes(16)), 30 * 60, base_curr, quote_curr)
-                .unwrap()
                 .map(|p| p.price()),
             Some(amount!("$3"))
         );

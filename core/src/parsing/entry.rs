@@ -6,10 +6,10 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::account::Account;
-use crate::amount::AmountExpr;
+use crate::amount::Amount;
 use crate::datetime::DateAndTime;
 use crate::datetime::{JDate, JDateTime, JDateTimeRange, JTime};
-use crate::error::parsing::{IErrorMsg, IParseError, tag_err};
+use crate::error::parsing::{IErrorMsg, IParseError, promote, tag_err};
 use crate::journal_entry::{EntryObject, JournalEntry};
 use crate::match_blocks;
 use crate::metadata::Metadata;
@@ -127,11 +127,11 @@ where
 {
     let total_val = map(
         pair(recognize(tuple((space0::<I, _>, tag("@@"), space0))), amount_expr),
-        |(pretext, expr)| PostingValuation::new_total(expr.with_pretext(pretext.text()), false),
+        |(_pretext, expr)| PostingValuation::new_total(expr, false),
     );
     let unit_val = map(
         pair(recognize(tuple((space0::<I, _>, tag("@"), space0))), amount_expr),
-        |(pretext, expr)| PostingValuation::new_unit(expr.with_pretext(pretext.text())),
+        |(_pretext, expr)| PostingValuation::new_unit(expr),
     );
 
     let allocator = input.config().allocator();
@@ -159,7 +159,7 @@ where
             // This is the internal representation for total valuations.
             if val.is_total() && expr.is_negative() {
                 let negated = -val.value();
-                val = PostingValuation::new_total(val.into_expr().with_amount(negated), false)
+                val = PostingValuation::new_total(negated, false)
             }
 
             acc.set_valuation(val);
@@ -168,13 +168,13 @@ where
     Ok((rem, res?))
 }
 
-fn balance_assertion<'h, I>(input: I) -> IParseResult<'h, I, AmountExpr<'h>>
+fn balance_assertion<'h, I>(input: I) -> IParseResult<'h, I, Amount<'h>>
 where
     I: TextInput<'h> + ConfigInput<'h>,
 {
     map(
         pair(recognize(tuple((space0::<I, _>, tag("="), space0))), amount_expr),
-        |(pretext, expr)| expr.with_pretext(pretext.text()),
+        |(_pretext, expr)| expr,
     )(input)
 }
 
@@ -250,7 +250,19 @@ where
 
 pub static E_ENTRY_EXPECTED: &str = "Entry expected";
 
-pub fn entry<'h, 's, 'e, 'p, I>(
+pub fn entry<'h, 's, 'e, 'p, I>(input: I) -> JParseResult<I, JournalEntry<'h>>
+where
+    'h: 'e,
+    'e: 's,
+    's: 'p,
+    I: TextInput<'h> + ConfigInput<'h> + NodeInput<'h, 's, 'p> + BlockInput<'h> + LocatedInput<'h>,
+{
+    let (_rem, (date, input)) =
+        promote("Unable to read entry date", entry_date_and_remainder)(input)?;
+    entry_with_date(input, date)
+}
+
+pub fn entry_with_date<'h, 's, 'e, 'p, I>(
     input: I,
     date_and_time: DateAndTime,
 ) -> JParseResult<I, JournalEntry<'h>>
@@ -258,11 +270,7 @@ where
     'h: 'e,
     'e: 's,
     's: 'p,
-    I: TextInput<'h>
-        + ConfigInput<'h>
-        + NodeInput<'h, 's, 'e, 'p>
-        + BlockInput<'h>
-        + LocatedInput<'h>,
+    I: TextInput<'h> + ConfigInput<'h> + NodeInput<'h, 's, 'p> + BlockInput<'h> + LocatedInput<'h>,
 {
     let parse_node = input.parse_node();
 
@@ -321,7 +329,7 @@ mod tests {
             timeformat hh:mm:ss
             timezone Australia/Sydney
         "# });
-        let mut dt = |s: &'static str| parse!(s, date_and_time, &mut config).0;
+        let mut dt = |s: &'static str| parse!(s, date_and_time, &mut config);
 
         let parsed = dt("01/01/2000 00:00:00").unwrap().1.datetime_from();
         assert_eq!(parsed.naive_utc().hour(), 13);
@@ -337,7 +345,7 @@ mod tests {
         let mut config = config!(indoc! { r#"
             timezone Australia/Sydney
         "# });
-        let mut dt = |s: &'static str| parse!(s, date_and_time, &mut config).0;
+        let mut dt = |s: &'static str| parse!(s, date_and_time, &mut config);
 
         let date = dt("2000-01-01 00:00:00Z").unwrap().1.datetime_from();
         assert_eq!(date.naive_utc().hour(), 0);
@@ -365,7 +373,9 @@ mod tests {
 
     #[test]
     fn test_posting() {
-        let parse = |s: &'static str| parse!(s, posting).map(str_res);
+        let parse = |s: &'static str| {
+            parse_block!(s, posting).map(|(rem, (_config, out))| (rem, out)).map(str_res)
+        };
 
         assert_eq!(parse(" ACC"), Ok(("", " ACC")));
         assert_eq!(parse("  ACC     $10"), Ok(("", "  ACC     $10")));
@@ -376,21 +386,56 @@ mod tests {
 
     #[test]
     fn test_metadata() {
-        let parse = |s: &'static str| parse!(s, metadata);
-        let md = |p, k, i, v: Option<&'static str>| Metadata::new(p, k, i, v);
+        let parse = |s: &'static str| parse_block!(s, metadata);
 
-        assert_eq!(parse(" +k  v"), Ok(("", md(" +", "k", "  ", Some("v")))));
+        let res = parse(" +k  v");
+        assert!(res.is_ok());
+        let (rem, out) = res.unwrap();
+        assert_eq!(rem.len(), 0);
+        let (_config, md) = out;
+        assert_eq!(md.key(), "k");
+        assert_eq!(md.value(), Some("v"));
+
+        let res = parse(" +key with spaces  v");
+        assert!(res.is_ok());
+        let (rem, out) = res.unwrap();
+        assert_eq!(rem.len(), 0);
+        let (_config, md) = out;
+        assert_eq!(md.key(), "key with spaces");
+        assert_eq!(md.value(), Some("v"));
+
+        let res = parse(" +key  v\ndirective");
+        assert!(res.is_ok());
+        let (rem, out) = res.unwrap();
+        assert_eq!(rem, "\ndirective");
+        let (_config, md) = out;
+        assert_eq!(md.key(), "key");
+        assert_eq!(md.value(), Some("v"));
+
+        let res = parse(" +key  v\n  directive");
+        assert!(res.is_ok());
+        let (rem, out) = res.unwrap();
+        assert_eq!(rem, "\ndirective");
+        let (_config, md) = out;
+        assert_eq!(md.key(), "key");
+        assert_eq!(md.value(), Some("v\n  directive"));
+    }
+
+    #[test]
+    fn test_entry() {
+        let ent = |s: &'static str| {
+            let entry_res = parse_node!(s, entry);
+            assert!(entry_res.is_ok());
+            entry_res.unwrap().1
+        };
+
+        assert_eq!(ent("2000-01-01  desc").description(), "desc");
         assert_eq!(
-            parse(" +key with spaces  v"),
-            Ok(("", md(" +", "key with spaces", "  ", Some("v"))))
-        );
-        assert_eq!(parse(" +key  v"), Ok(("", md(" +", "key", "  ", Some("v")))));
-        assert_eq!(
-            parse(" +key  v\ndirective"),
-            Ok(("directive", md(" +", "key", "  ", Some("v"))))
+            ent("2000-01-01  desc\n  AccB  £0").postings().next().unwrap().account().name(),
+            "AccB"
         );
 
-        let metadata = parse(" +key  v\n   directive").unwrap().1;
-        assert_eq!(metadata.properties().get(0), Some(&md("   ", "directive", "", None)));
+        // Entry config is updated
+        assert!(entry!("2000-01-01\n  AccC  $0").config().get_unit("$").is_some());
     }
 }

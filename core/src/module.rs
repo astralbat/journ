@@ -88,15 +88,14 @@ pub trait ModuleDirectiveObj:
     fn as_any(&self) -> &dyn Any;
 }
 
-pub type ModuleDirectiveInput<'h, 's, 'e, 'p> =
-    TextBlockInput<'h, &'p JournalParseNode<'h, 's, 'e>>;
+pub type ModuleDirectiveInput<'h, 's, 'p> = TextBlockInput<'h, &'p JournalParseNode<'h, 's>>;
 
 pub trait ModuleDirective: Send {
     fn name(&self) -> &'static str;
     fn parse<'h, 's, 'e, 'p>(
         &self,
-        input: ModuleDirectiveInput<'h, 's, 'e, 'p>,
-    ) -> JParseResult<ModuleDirectiveInput<'h, 's, 'e, 'p>, Directive<'h>>
+        input: ModuleDirectiveInput<'h, 's, 'p>,
+    ) -> JParseResult<ModuleDirectiveInput<'h, 's, 'p>, Directive<'h>>
     where
         'h: 'e,
         'e: 's;

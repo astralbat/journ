@@ -165,11 +165,16 @@ impl PythonEnvironment {
         prepare_freethreaded_python();
     }
 
-    pub fn run_code(code: &CStr, ji: u32) -> JournResult<()> {
+    pub fn run_code(code: &str, ji: u32) -> JournResult<()> {
         Self::wait_for();
         Python::with_gil(|py| {
             let globals = PythonEnvironment::journal_dict(py, ji, None);
-            py.run(code, Some(&globals), None).map_err(|e| context_err(e, py))
+            py.run(
+                &CString::new(code).map_err(|_| err!("Error converting code to CStr: {}", code))?,
+                Some(&globals),
+                None,
+            )
+            .map_err(|e| context_err(e, py))
         })
     }
 

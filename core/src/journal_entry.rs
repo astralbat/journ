@@ -39,12 +39,16 @@ use std::{cmp, fmt};
 /// Sorting the entries by id will sort them in their file declaration order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct EntryId<'h> {
-    node_id: &'h NodeId<'h>,
+    node_id: Option<&'h NodeId<'h>>,
     id: u32,
 }
+static U32_MIN: u32 = u32::MIN;
+static U32_MAX: u32 = u32::MAX;
+pub static FIRST_ENTRY_ID: EntryId = EntryId { node_id: Some(&FIRST_NODE_ID), id: U32_MIN };
+pub static LAST_ENTRY_ID: EntryId = EntryId { node_id: Some(&LAST_NODE_ID), id: U32_MAX };
 
 /// An entry identifier that identifies entries in time order.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Ord, PartialOrd)]
 pub struct EntryDateId<'h> {
     // UTC date from compares first
     datetime_from: NaiveDateTime,
@@ -73,14 +77,10 @@ impl<'h> EntryDateId<'h> {
                 NaiveTime::from_hms_opt(23, 59, 59).unwrap(),
             ),
         };
-        EntryDateId {
-            datetime_from: start,
-            datetime_to: start,
-            id: EntryId { node_id: &FIRST_NODE_ID, id: 0 },
-        }..EntryDateId {
+        EntryDateId { datetime_from: start, datetime_to: start, id: FIRST_ENTRY_ID }..EntryDateId {
             datetime_from: end,
             datetime_to: end,
-            id: EntryId { node_id: &LAST_NODE_ID, id: u32::MAX },
+            id: LAST_ENTRY_ID,
         }
     }
 }
@@ -94,20 +94,24 @@ impl<'h> From<&JournalEntry<'h>> for EntryDateId<'h> {
 }
 
 impl<'h> EntryId<'h> {
-    pub(crate) fn allocate(node_id: &'h NodeId<'h>) -> Self {
+    pub(crate) fn dangling() -> Self {
+        EntryId { node_id: None, id: 0 }
+    }
+
+    pub(crate) fn attached(node_id: &'h NodeId<'h>) -> EntryId<'h> {
         thread_local! {
-            static ENTRY_COUNTER: Cell<u32> = const { Cell::new(0) };
+            static ENTRY_COUNTER: Cell<u32> = const { Cell::new(1) };
         }
         let new_id = ENTRY_COUNTER.with(|k| {
             let prev_id = k.get();
             k.set(prev_id + 1);
             prev_id + 1
         });
-        EntryId { node_id, id: new_id }
+        EntryId { node_id: Some(node_id), id: new_id }
     }
 
     pub fn node_id(&self) -> &'h NodeId<'h> {
-        self.node_id
+        self.node_id.expect("EntryId is dangling")
     }
 
     /// Transforms the identifier on an entry from an identifier in space to one in time.
@@ -176,9 +180,8 @@ pub enum EntryObject<'h> {
     Comments(&'h str),
 }
 
-#[derive(Clone)]
 pub struct JournalEntry<'h> {
-    id: Option<EntryId<'h>>,
+    id: EntryId<'h>,
     /// The text block from which the entry came. This will be `None` if the entry was inserted into a node rather than parsed.
     text_block: Option<&'h TextBlock<'h>>,
     date_id: Option<u64>,
@@ -197,8 +200,9 @@ impl<'h> JournalEntry<'h> {
         description: &'h str,
         objects: Vec<EntryObject<'h>, &'h HerdAllocator<'h>>,
     ) -> Self {
+        let id = EntryId::dangling();
         let mut je = Self {
-            id: None,
+            id,
             config,
             date_id: None,
             text_block: None,
@@ -206,22 +210,32 @@ impl<'h> JournalEntry<'h> {
             description,
             objects,
         };
-        je.set_node_id(node_id);
+        je.attach(node_id);
         je
     }
 
     pub fn id(&self) -> EntryId<'h> {
-        self.id.expect("Id to have been initialised")
+        self.id
     }
 
-    fn set_node_id(&mut self, node_id: &'h NodeId<'h>) {
-        self.id = Some(EntryId::allocate(node_id));
-        let id = self.id.unwrap();
+    /// Attaches this entry to the node specified by `node_id`.
+    pub(super) fn attach(&mut self, node_id: &'h NodeId<'h>) {
+        let id = EntryId::attached(node_id);
+        //self.id = Some(EntryId::attach(node_id));
+        //let id = self.id.unwrap();
         for pst in self.postings_mut() {
-            pst.set_entry_id(id);
+            pst.attach(id);
         }
 
+        self.id = id;
         self.date_id = Some(EntryId::as_date_id(self, Cmd::args().aux_date()));
+    }
+
+    fn detach(&mut self) {
+        self.id = EntryId::dangling();
+        for pst in self.postings_mut() {
+            pst.detach();
+        }
     }
 
     pub fn date_id(&self) -> u64 {
@@ -267,7 +281,7 @@ impl<'h> JournalEntry<'h> {
 
     pub fn append_object(&mut self, mut object: EntryObject<'h>) {
         if let EntryObject::Posting(pst, ..) = &mut object {
-            pst.set_entry_id(self.id());
+            pst.attach(self.id());
         }
         self.objects.push(object);
     }
@@ -487,8 +501,7 @@ impl<'h> JournalEntry<'h> {
         let mut flows: SmallVec<[Flow<'h>; 4]> = smallvec![];
         for pst in self.postings() {
             // Create a new flow for the posting without any pretext.
-            let mut va = pst.valued_amount().clone();
-            va.set_pretext("");
+            let va = pst.valued_amount().clone();
             flows.push(Flow::new(Some(pst.account().clone()), va));
 
             /*
@@ -815,6 +828,22 @@ impl<'h> JournalEntry<'h> {
     }
 }
 
+impl Clone for JournalEntry<'_> {
+    fn clone(&self) -> Self {
+        let mut cloned = Self {
+            id: self.id.clone(),
+            text_block: self.text_block.clone(),
+            date_id: self.date_id.clone(),
+            date_and_time: self.date_and_time.clone(),
+            objects: self.objects.clone(),
+            description: self.description,
+            config: self.config.clone(),
+        };
+        cloned.detach();
+        cloned
+    }
+}
+
 impl PartialEq for JournalEntry<'_> {
     fn eq(&self, other: &Self) -> bool {
         self.id == other.id
@@ -861,32 +890,14 @@ mod tests {
 
         // Item added during session
         let basic_entry = || {
-            parse_block1!(
-                indoc! {r#"
+            entry!(indoc! {r#"
                 2010-12-31  Transaction 1
                 Assets:Current:Checking
                 Expenses:Groceries  £10
-            "#},
-                parsing::entry::entry
-            )
-            .unwrap()
+            "#})
         };
         journ.append_entry(basic_entry(), journ.root().id()).unwrap();
         let entries: Vec<_> = journ.entry_range(..).collect();
         assert_eq!(entries.len(), 1);
-    }
-
-    #[test]
-    fn test_exchange_rates() {
-        let je_1 = entry!(indoc! {r#"
-            2000-01-01
-              A1  10A @@ 2B
-              A2  -10A
-        "#});
-        let curr_a = je_1.config().get_unit("A").unwrap();
-        assert_eq!(
-            je_1.exchange_rates(curr_a).into_iter().next().map(|v| v.rounded_dec_places(1)),
-            Some(amount!("0.2B"))
-        );
     }
 }

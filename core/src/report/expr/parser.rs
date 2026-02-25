@@ -418,7 +418,7 @@ pub fn parse_columns(input: &'_ str) -> JournResult<ColumnSpec<'_>> {
     }
 }
 
-pub fn parse_non_aggregate(input: &str) -> JournResult<Vec<Expr>> {
+pub fn parse_non_aggregate<'h>(input: &'h str) -> JournResult<Vec<Expr<'h>>> {
     let agg_functions = RefCell::new(Vec::new());
     let res = match separated_list0(ws(char(',')), ws(column_spec(&agg_functions)))(input) {
         Ok(("", col)) => Ok(col),

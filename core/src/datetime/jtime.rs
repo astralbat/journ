@@ -5,12 +5,12 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
-use crate::datetime::DateTimeFormat;
+use crate::datetime::{DateTimeFormat, DateTimePrecision};
 use crate::error::parsing::IParseError;
 use crate::parsing::IParseResult;
 use crate::parsing::input::TextInput;
 use chrono::NaiveTime;
-use chrono::format::{Parsed, parse_and_remainder};
+use chrono::format::{DelayedFormat, Item, Parsed, parse_and_remainder};
 use nom::{Err as NomErr, InputLength};
 use std::cmp::Ordering;
 use std::hash::Hash;
@@ -53,6 +53,14 @@ impl JTime {
 
             Ok((rem, Self::new(time)))
         }
+    }
+
+    pub fn format_with_precision<'h, 'a>(
+        &'a self,
+        format: &'a DateTimeFormat<'h>,
+        precision: DateTimePrecision,
+    ) -> DelayedFormat<impl Iterator<Item = &'a Item<'h>> + Clone + 'a> {
+        format.format(None, Some(self.time), precision)
     }
 }
 

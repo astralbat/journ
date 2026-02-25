@@ -11,7 +11,6 @@ use crate::deal_holding::DealHolding;
 use crate::module_init::MODULE_NAME;
 use crate::pool::PoolBalance;
 use journ_core::alloc::HerdAllocator;
-use journ_core::amount::AmountExpr;
 use journ_core::datetime::JDateTimeRange;
 use journ_core::error::JournResult;
 use journ_core::journal_entry::{EntryId, JournalEntry};
@@ -21,7 +20,6 @@ use journ_core::unit::Unit;
 use journ_core::valued_amount::ValuedAmount;
 use journ_core::valuer::{SystemValuer, ValuationError};
 use smallvec::SmallVec;
-use std::cell::LazyCell;
 use std::fmt;
 use std::fmt::Formatter;
 use std::ops::Add;
@@ -169,7 +167,7 @@ impl<'h> Deal<'h> {
             None,
             entry,
             SmallVec::new(),
-            ValuedAmount::new_in(AmountExpr::from(unit.with_quantity(0)), allocator),
+            ValuedAmount::new_in(unit.with_quantity(0), allocator),
             None,
             false,
             uoa,

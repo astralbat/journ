@@ -15,18 +15,22 @@ pub mod text_block;
 mod unit_directive;
 pub mod util;
 
+use crate::alloc::HerdAllocator;
 use crate::configuration::Configuration;
 use crate::error::parsing::IParseError;
 use crate::error::{JournError, JournResult};
+use crate::journal_node::{JournalNode, JournalNodeKind, NodeId};
 use crate::parsing::input::TextBlockInput;
 use crate::parsing::parser::JournalParseNode;
 use crate::parsing::text_block::TextBlock;
+use bumpalo_herd::Herd;
 use nom::{Err as NomErr, Finish, IResult};
 use nom_locate::LocatedSpan;
 use std::cell::RefCell;
 use std::fmt;
 use std::ops::DerefMut;
 use std::rc::Rc;
+use std::thread::Scope;
 
 /// A note on lifetimes:
 /// * `'h` is the lifetime of the heap allocator.
@@ -34,7 +38,7 @@ use std::rc::Rc;
 /// * `'s` is the lifetime of the thread scope.
 
 pub type StringInput<'h, 'p, 's> = LocatedSpan<&'h str, Rc<RefCell<Configuration<'h>>>>;
-pub type TextFileInput<'h, 's, 'e, 'p> = LocatedSpan<&'h str, &'p JournalParseNode<'h, 's, 'e>>;
+pub type TextFileInput<'h, 's, 'e, 'p> = LocatedSpan<&'h str, &'s JournalParseNode<'h, 's>>;
 
 //pub type IParseResult<'h, I, T> =
 //    Result<(I, T), NomErr<JournError<'h, InputErr<'h, <I as TextInput<'h>>::Error>>>>;
@@ -62,11 +66,11 @@ where
     Ok((fragment, (out, extra.into_inner())))
 }
 
-fn block_parse<'h, O, E, F>(
+pub fn block_parse<'h, O, E, F>(
     block: &'h TextBlock<'h>,
     config: Configuration<'h>,
     mut func: F,
-) -> JournResult<(&'h str, (O, Configuration<'h>))>
+) -> JournResult<(&'h str, (Configuration<'h>, O))>
 where
     E: Into<JournError>,
     F: FnMut(
@@ -88,7 +92,7 @@ where
 
     let (rem, out) = func(block_input).finish().map_err(Into::into)?;
     let (fragment, extra) = rem.inner.into_fragment_and_extra();
-    Ok((fragment, (out, extra.into_inner())))
+    Ok((fragment, (extra.into_inner(), out)))
 }
 
 /*
@@ -110,34 +114,145 @@ where
     Ok((fragment, (out, extra.into_inner())))
 }*/
 
+pub fn parse<
+    'h,
+    O,
+    E: Into<JournError>,
+    F: FnMut(LocatedSpan<&'h str>) -> IResult<LocatedSpan<&'h str>, O, E>,
+>(
+    expr: &'h str,
+    mut func: F,
+) -> JournResult<(&'h str, O)> {
+    let input = LocatedSpan::new(expr);
+    func(input).finish().map(|(rem, out)| (*rem.fragment(), out)).map_err(|e| e.into())
+}
+
+pub fn parse_with_config<'h, O, E: Into<JournError>, F>(
+    expr: &'h str,
+    mut func: F,
+    config: &Configuration<'h>,
+) -> JournResult<(&'h str, O)>
+where
+    F: FnMut(
+        LocatedSpan<&'h str, RefCell<Configuration<'h>>>,
+    ) -> IResult<LocatedSpan<&'h str, RefCell<Configuration<'h>>>, O, E>,
+{
+    let config = config.clone();
+    let input = LocatedSpan::new_extra(expr, RefCell::new(config));
+    func(input).finish().map(|(rem, out)| (*rem.fragment(), out)).map_err(|e| e.into())
+}
+
+pub fn parse_with_config_mut<'h, O, E: Into<JournError>, F>(
+    expr: &'h str,
+    mut func: F,
+    config: &mut Configuration<'h>,
+) -> JournResult<(&'h str, O)>
+where
+    F: FnMut(
+        LocatedSpan<&'h str, RefCell<Configuration<'h>>>,
+    ) -> IResult<LocatedSpan<&'h str, RefCell<Configuration<'h>>>, O, E>,
+{
+    let config_owned = config.clone();
+    let input = LocatedSpan::new_extra(expr, RefCell::new(config_owned));
+    let (rem, out) = func(input).finish().map_err(|e| e.into())?;
+    let (frag, extra) = rem.into_fragment_and_extra();
+    *config = extra.into_inner();
+    Ok((frag, out))
+}
+
+#[cfg(test)]
+pub fn parse_block_with_config_mut<'h, O, E: Into<JournError>, F>(
+    expr: &'h str,
+    func: F,
+    config: &mut Configuration<'h>,
+) -> JournResult<(&'h str, (Configuration<'h>, O))>
+where
+    F: FnMut(
+        TextBlockInput<'h, RefCell<Configuration<'h>>>,
+    ) -> IResult<TextBlockInput<'h, RefCell<Configuration<'h>>>, O, E>,
+{
+    let config_owned = config.clone();
+    let block = config_owned.alloc(TextBlock::from(expr));
+    block_parse(block, config_owned, func)
+}
+
+#[cfg(test)]
+pub fn node_input<'h, 's>(
+    text: &'h str,
+    config: Option<&mut Configuration<'h>>,
+    scope: &'s Scope<'s, 'h>,
+) -> JournalParseNode<'h, 's>
+where
+    'h: 's,
+{
+    let herd = Box::leak(Box::new(Herd::new()));
+    let allocator = herd.get().alloc(HerdAllocator::new(herd));
+    let tb = &*allocator.alloc(TextBlock::from(text));
+    let node_id = allocator.alloc(NodeId::new_root());
+    let node = allocator.alloc(JournalNode::new(
+        None,
+        node_id,
+        None,
+        JournalNodeKind::Entry,
+        tb.as_input(allocator),
+        allocator,
+    ));
+    let parse_node_config: Configuration<'h> = match config {
+        Some(config) => config.clone(),
+        None => Configuration::new(allocator, node_id),
+    };
+    JournalParseNode::new_root(node, parse_node_config, scope)
+}
+
 /// Parses a string with the supplied function and a configuration.
 /// A configuration is required unless testing.
 #[macro_export]
+#[cfg(any(test, feature = "testing"))]
 macro_rules! parse {
     ($str:expr, $func:expr, $config:expr) => {{
-        use $crate::parsing::OwnedOrMutConfigParseHelper;
-        $config.handle_str($str, $func)
+        $crate::parsing::parse_with_config_mut($str, $func, $config)
+        //use $crate::parsing::OwnedOrMutConfigParseHelper;
+        //$config.handle_str($str, $func)
     }};
     ($str:expr, $func:expr) => {{
         use $crate::config;
         let config = config!();
-        parse!($str, $func, config)
+        $crate::parsing::parse_with_config($str, $func, &config)
+        //parse!($str, $func, config)
     }};
 }
 
 /// `$config` should be a `Arc<Configuration>` type that may get modified as a result of the parser's actions.
 #[macro_export]
+#[cfg(any(test, feature = "testing"))]
 macro_rules! parse_block {
     ($block:expr, $func:expr, $config:expr) => {{
-        use $crate::parsing::OwnedOrMutConfigParseHelper;
-        $config.handle_block($block, $func)
+        $crate::parsing::parse_block_with_config_mut($block, $func, $config)
+        //use $crate::parsing::OwnedOrMutConfigParseHelper;
+        //$config.handle_block($block, $func)
     }};
     ($str:expr, $func:expr) => {{
         use $crate::config;
         let mut config = config!();
-        parse_block!($str, $func, config)
+        $crate::parsing::parse_block_with_config_mut($str, $func, &mut config)
+        //parse_block!($str, $func, config)
     }};
 }
+
+/*
+#[macro_export]
+#[cfg(any(test, feature = "testing"))]
+macro_rules! parse_node {
+    ($str:expr) => {{
+        use $crate::parsing::node_input;
+        node_input($str, None)
+    }};
+
+    ($str:expr, $config:expr) => {{
+        use $crate::parsing::node_input;
+        node_input($str, Some($config))
+    }};
+}*/
 
 pub trait OwnedOrMutConfigParseHelper<'h> {
     fn handle_str<F, O, E>(self, str: &'h str, func: F) -> JournResult<(&'h str, O)>
@@ -172,7 +287,7 @@ impl<'h> OwnedOrMutConfigParseHelper<'h> for Configuration<'h> {
         ) -> IResult<TextBlockInput<'h, RefCell<Configuration<'h>>>, O, E>,
         E: Into<JournError>,
     {
-        let (rem, (out, _config)) = block_parse(block, self, func)?;
+        let (rem, (_config, out)) = block_parse(block, self, func)?;
         Ok((rem, out))
     }
 }
@@ -199,7 +314,7 @@ impl<'h> OwnedOrMutConfigParseHelper<'h> for &mut Configuration<'h> {
         E: Into<JournError>,
     {
         let config = self.clone();
-        let (rem, (out, config)) = block_parse(block, config, func)?;
+        let (rem, (config, out)) = block_parse(block, config, func)?;
         *self = config;
         Ok((rem, out))
     }
@@ -276,6 +391,7 @@ macro_rules! match_parsers {
     }}
 }
 
+/*
 /// Creates a new `JournalFileParseNode` from the supplied expression.
 #[macro_export]
 macro_rules! parse_node {
@@ -305,4 +421,4 @@ macro_rules! parse_node {
             $crate::journal_node::JournalNodeKind::Entry
         )
     }};
-}
+}*/

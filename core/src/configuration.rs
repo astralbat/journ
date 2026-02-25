@@ -532,20 +532,25 @@ impl<'h> Configuration<'h> {
         }
     }
 
-    pub fn merge_account(&mut self, account: Arc<Account<'h>>) -> Arc<Account<'h>> {
-        let mut_base = self.get_mut();
+    pub fn merge_account(&mut self, mut account: Account<'h>) -> Arc<Account<'h>> {
+        for unit in account.units_mut() {
+            if let Some(secondary) = self.get_unit(unit.primary_code()) {
+                *unit = self.allocator().alloc(Self::merge_units(unit, secondary));
+            }
+        }
 
+        let mut_base = self.get_mut();
         match mut_base.accounts.get(account.name_exact()) {
             Some(acc) => {
                 let secondary = Arc::clone(acc);
-                let merged = self.merge_accounts(&account, &secondary);
+                let merged = self.merge_accounts(&Arc::new(account), &secondary);
                 let ret = Arc::clone(&merged);
-                self.get_mut().accounts.insert(account.name_exact().to_string(), merged);
+                self.get_mut().accounts.insert(merged.name_exact().to_string(), merged);
                 ret
             }
             None => {
-                let ret = Arc::clone(&account);
-                mut_base.accounts.insert(account.name_exact().to_string(), account);
+                let ret = Arc::new(account);
+                mut_base.accounts.insert(ret.name_exact().to_string(), Arc::clone(&ret));
                 ret
             }
         }

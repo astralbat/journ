@@ -6,21 +6,22 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::adjustment::Adjustment;
-use crate::cgt_configuration::{EventFilter, MatchMethod};
+use crate::cgt_configuration::MatchMethod;
 use crate::deal_holding::DealHolding;
 use crate::pool::PoolBalance;
+use itertools::Itertools;
 use journ_core::amount::Amount;
-use journ_core::configuration::Filter;
 use journ_core::datetime::JDateTimeRange;
 use journ_core::metadata::Metadata;
 use journ_core::unit::Unit;
 use journ_core::valued_amount::ValuedAmount;
 use linked_hash_set::LinkedHashSet;
-use std::borrow::Cow;
+use smartstring::alias::String as SS;
+use std::fmt;
+use std::fmt::Write;
 use std::ops::{Add, Neg};
 use std::sync::atomic;
 use std::sync::atomic::AtomicUsize;
-use std::{fmt, iter};
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct MatchDetails<'h> {
@@ -178,8 +179,12 @@ pub enum PoolEventKind<'h> {
     Adjustment(Adjustment<'h>),
     /// A deal was added to the pool
     PooledDeal(DealHolding<'h>),
+    /// A deal was moved from the specified `DealHolding` and to the specified pool name
+    MovedFrom(DealHolding<'h>, &'h str),
+    /// A deal was moved out of the specified `DealHolding` and matched with the specified pool name
+    MatchedFrom(DealHolding<'h>, &'h str),
     /// A deal was moved to the specified `DealHolding`, and from the specified pool name
-    MovedDeal(DealHolding<'h>, &'h str),
+    MovedTo(DealHolding<'h>, &'h str),
     /// An acquisition was matched against a disposal
     Match(MatchDetails<'h>),
 }
@@ -191,7 +196,9 @@ impl fmt::Display for PoolEventKind<'_> {
                 let rem = if dh.split_parent().is_some() { "(remainder) " } else { "" };
                 write!(f, "Pooled {}{}", rem, dh.total())
             }
-            PoolEventKind::MovedDeal(dh, from) => write!(f, "Moved {} from {from}", dh.total()),
+            PoolEventKind::MovedFrom(dh, to) => write!(f, "Moved {} to {to}", dh.total()),
+            PoolEventKind::MatchedFrom(dh, to) => write!(f, "Matched from {} to {to}", dh.total()),
+            PoolEventKind::MovedTo(dh, from) => write!(f, "Moved {} from {from}", dh.total()),
             PoolEventKind::Match(details) => {
                 write!(
                     f,
@@ -280,14 +287,17 @@ impl Ord for PoolEventKind<'_> {
             match kind {
                 PoolEventKind::Adjustment(_) => 0,
                 PoolEventKind::PooledDeal(_) => 1,
-                PoolEventKind::MovedDeal(..) => 2,
-                PoolEventKind::Match(_) => 3,
+                PoolEventKind::MatchedFrom(..) => 2,
+                PoolEventKind::MovedFrom(..) => 3,
+                PoolEventKind::MovedTo(..) => 4,
+                PoolEventKind::Match(_) => 5,
             }
         }
         ordinal(self).cmp(&ordinal(other))
     }
 }
 
+/*
 impl<'h> Add for PoolEventKind<'h> {
     type Output = Option<PoolEventKind<'h>>;
 
@@ -300,8 +310,8 @@ impl<'h> Add for PoolEventKind<'h> {
                 (self_deal + rhs_deal).ok().map(PoolEventKind::PooledDeal)
             }
             (
-                PoolEventKind::MovedDeal(self_deal, self_from),
-                PoolEventKind::MovedDeal(rhs_deal, rhs_from),
+                PoolEventKind::MovedFrom(self_deal, self_from),
+                PoolEventKind::MovedFrom(rhs_deal, rhs_from),
             ) => {
                 if self_deal.unit() != rhs_deal.unit() {
                     return None;
@@ -320,7 +330,7 @@ impl<'h> Add for PoolEventKind<'h> {
             _ => None,
         }
     }
-}
+}*/
 
 pub struct PoolEvent<'h> {
     /// A unique, incrementing sequence number to be able to correctly determine order when comparing events.
@@ -359,7 +369,9 @@ impl<'h> PoolEvent<'h> {
     pub fn unit(&self) -> &'h Unit<'h> {
         match &self.event_kind {
             PoolEventKind::PooledDeal(dh) => dh.unit(),
-            PoolEventKind::MovedDeal(dh, _) => dh.unit(),
+            PoolEventKind::MovedFrom(dh, _)
+            | PoolEventKind::MovedTo(dh, _)
+            | PoolEventKind::MatchedFrom(dh, _) => dh.unit(),
             PoolEventKind::Match(details) => details.originator().unit(),
             PoolEventKind::Adjustment(adj) => adj.unit(),
         }
@@ -391,7 +403,9 @@ impl<'h> PoolEvent<'h> {
     pub fn deal_datetime(&self) -> JDateTimeRange {
         match &self.event_kind {
             PoolEventKind::PooledDeal(dh) => dh.datetime(),
-            PoolEventKind::MovedDeal(dh, _) => dh.datetime(),
+            PoolEventKind::MovedFrom(dh, _)
+            | PoolEventKind::MovedTo(dh, _)
+            | PoolEventKind::MatchedFrom(dh, _) => dh.datetime(),
             PoolEventKind::Match(details) => details.originator.datetime(),
             PoolEventKind::Adjustment(adj) => adj.datetime(),
         }
@@ -507,23 +521,48 @@ impl<'h> PoolEvent<'h> {
         }
     }
 
-    pub fn description(&self) -> LinkedHashSet<&'h str> {
-        match &self.event_kind {
-            PoolEventKind::PooledDeal(dh) => dh.description(),
-            PoolEventKind::MovedDeal(dh, _) => dh.description(),
-            PoolEventKind::Match(details) => details.originator().description(),
-            PoolEventKind::Adjustment(adj) => {
-                let mut desc = LinkedHashSet::new();
-                desc.insert(adj.entry().description().trim_start());
-                desc
+    pub fn description(&self) -> SS {
+        let mut ss = SS::new();
+        write!(ss, "{} ", self.event_symbolic_description()).unwrap();
+        write!(
+            ss,
+            "{}",
+            match &self.event_kind {
+                PoolEventKind::PooledDeal(dh) => dh.description(),
+                PoolEventKind::MovedFrom(dh, _)
+                | PoolEventKind::MovedTo(dh, _)
+                | PoolEventKind::MatchedFrom(dh, _) => dh.description(),
+                PoolEventKind::Match(details) => details.originator().description(),
+                PoolEventKind::Adjustment(adj) => {
+                    let mut desc = LinkedHashSet::new();
+                    desc.insert(adj.entry().description().trim_start());
+                    desc
+                }
             }
+            .iter()
+            .join(", ")
+        )
+        .unwrap();
+        ss
+    }
+
+    pub fn event_symbolic_description(&self) -> &'static str {
+        match &self.event_kind {
+            PoolEventKind::PooledDeal(..) => "-->",
+            PoolEventKind::MovedFrom(..) => "<--",
+            PoolEventKind::MatchedFrom(..) => "<==",
+            PoolEventKind::MovedTo(..) => "-->",
+            PoolEventKind::Match(_) => "==>",
+            PoolEventKind::Adjustment(_) => "@@@",
         }
     }
 
     pub fn metadata_by_key(&self, key: &str) -> LinkedHashSet<&Metadata<'h>> {
         match &self.event_kind {
             PoolEventKind::PooledDeal(dh) => dh.metadata_by_key(key),
-            PoolEventKind::MovedDeal(dh, _) => dh.metadata_by_key(key),
+            PoolEventKind::MovedFrom(dh, _)
+            | PoolEventKind::MovedTo(dh, _)
+            | PoolEventKind::MatchedFrom(dh, _) => dh.metadata_by_key(key),
             PoolEventKind::Match(details) => details.sell_holding().metadata_by_key(key),
             PoolEventKind::Adjustment(adj) => {
                 adj.entry().metadata_by_key(key).into_iter().collect()
@@ -691,6 +730,7 @@ impl Ord for PoolEvent<'_> {
     }
 }
 
+/*
 impl<'h> Add<Self> for PoolEvent<'h> {
     type Output = Result<PoolEvent<'h>, (PoolEvent<'h>, PoolEvent<'h>)>;
 
@@ -758,8 +798,9 @@ impl<'h> Add<Self> for PoolEvent<'h> {
         };
         Ok(self)
     }
-}
+}*/
 
+/*
 #[derive(Clone, PartialEq, Eq)]
 pub enum AggregatedPoolEvent<'h, 'e> {
     One(&'e PoolEvent<'h>),
@@ -1342,7 +1383,7 @@ impl<'h, 'e> From<Vec<&'e PoolEvent<'h>>> for AggregatedPoolEvent<'h, 'e> {
             AggregatedPoolEvent::Many(events.into_iter().map(AggregatedPoolEvent::One).collect())
         }
     }
-}
+}*/
 
 /*
 impl<'h, 'e, 'a> From<&'a AggregatedPoolEvent<'h, 'e>> for Vec<Row<'a>>
@@ -1409,6 +1450,7 @@ where
     }
 }*/
 
+/*
 impl Add for AggregatedPoolEvent<'_, '_> {
     type Output = Self;
 
@@ -1430,4 +1472,4 @@ impl Add for AggregatedPoolEvent<'_, '_> {
             }
         }
     }
-}
+}*/

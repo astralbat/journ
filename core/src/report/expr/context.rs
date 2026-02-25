@@ -273,7 +273,7 @@ impl<'h> IdentifierContext<'h> for PostingContext<'h> {
         } else if identifier.eq_ignore_ascii_case("datetime_mid") {
             Some(ColumnValue::Datetime(self.entry.date_and_time().average()))
         } else if identifier.eq_ignore_ascii_case("description") {
-            Some(ColumnValue::Description(self.entry.description()))
+            Some(ColumnValue::Description(self.entry.description().into()))
         } else if identifier.eq_ignore_ascii_case("amount") {
             Some(ColumnValue::Amount(self.posting.amount()))
         } else if identifier.starts_with('+') {

@@ -8,7 +8,6 @@
 use crate::ExecCommand;
 use journ_core::account::Account;
 use journ_core::configuration::{AccountFilter, DescriptionFilter, FileFilter, Filter, UnitFilter};
-use journ_core::err;
 use journ_core::error::JournResult;
 use journ_core::journal::Journal;
 use journ_core::journal_entry::JournalEntry;
@@ -17,14 +16,12 @@ use journ_core::posting::Posting;
 use journ_core::report::command::arguments::{Cmd, Command, DateTimeFormatCommand};
 use journ_core::report::command::chained_result::ChainingResult;
 use journ_core::report::command::cmd_line::BeginAndEndCommand;
+use journ_core::report::expr::PostingContext;
 use journ_core::report::expr::parser::parse_plan;
-use journ_core::report::expr::{
-    ColumnValue, GroupKey, GroupState, LateContext, PostingContext, TotalContext,
-};
-use journ_core::report::table2::{CellRef, StyledCell};
+use journ_core::report::table2::{Row, StyledCell};
 use journ_core::report::term_style::{Style, Weight};
 use journ_core::unit::Unit;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
 #[derive(Default, Debug)]
 pub struct BalCommand {
@@ -39,6 +36,8 @@ pub struct BalCommand {
     pub(super) no_total: bool,
     pub(super) show_zeros: bool,
     pub(super) group_by: String,
+    pub(super) order_by_spec: Option<String>,
+    pub(super) order_ascending: bool,
     pub(super) column_spec: String,
 }
 
@@ -120,8 +119,8 @@ impl ExecCommand for BalCommand {
             !self.no_total,
             Some(self.group_by()),
             HashMap::new(),
-            None,
-            true,
+            self.order_by_spec.as_ref().map(String::as_str),
+            self.order_ascending,
         )?;
 
         let mut table = journ_core::report::table2::Table::default();
@@ -137,6 +136,32 @@ impl ExecCommand for BalCommand {
             table.append_heading_row(headings);
         }
 
+        let data = plan.execute(&*journ, self.filtered_postings(journ)(), |(entry, pst)| {
+            PostingContext::new(journ, entry, pst)
+        })?;
+
+        // Add to the table
+        let row_count = data.len();
+        let total_row_index = if self.no_total { None } else { Some(row_count - 1) };
+        let row_count_exc_total = if total_row_index.is_some() { row_count - 1 } else { row_count };
+        for (i, row_data) in data.into_iter().enumerate() {
+            if Some(i) == total_row_index {
+                table.push_separator_row('-', plan.column_spec().exprs().len())
+            }
+            let all_zero = row_data
+                .column_values
+                .iter()
+                .all(|cv| cv.as_amount().map(|a| a.is_zero()).unwrap_or(true));
+            // Don't show if all amounts are zero unless show_zeros option is used. Override when
+            // only one data row.
+            if !all_zero || self.show_zeros || row_count_exc_total == 1 {
+                table.push_row(Row::new(
+                    row_data.column_values.into_iter().map(|c| c.into_cell_ref(false, true)),
+                ))
+            }
+        }
+
+        /*
         let (groups, total_group) = plan
             .execute_to_groups(self.filtered_postings(journ)(), |(entry, pst)| {
                 PostingContext::new(journ, entry, pst)
@@ -210,7 +235,7 @@ impl ExecCommand for BalCommand {
             }
             table.push_row(total_row);
             table.push_separator_row('=', plan.column_spec().exprs().len());
-        }
+        }*/
 
         // Print the table
         let mut output = String::new();
@@ -225,94 +250,5 @@ impl ExecCommand for BalCommand {
         config.price_databases().into_iter().for_each(|db| db.write_file().unwrap());
 
         Ok(())
-    }
-}
-
-/// A partitioning scheme for filters that have been specified multiple times.
-/// For example, if the user specifies:
-/// --account "Assets:Bank..,Assets:Savings.." --account "Assets:Property.." or
-/// --unit "USD" --unit "EUR"
-/// then we create and iterate over two partitions of the grouped data.
-struct FilterPartitions<'h> {
-    groups: HashMap<GroupKey<'h>, GroupState<'h>>,
-    account_filters: Vec<AccountFilter>,
-    unit_filters: Vec<UnitFilter>,
-}
-impl<'h> FilterPartitions<'h> {
-    pub fn new(
-        cmd: &BalCommand,
-        groups: HashMap<GroupKey<'h>, GroupState<'h>>,
-    ) -> JournResult<Self> {
-        // All filter partitions must have the same number of partitions, or be empty
-        let mut all_filters = vec![cmd.account_filter.clone(), cmd.unit_filter.clone()];
-        let max_len = all_filters.iter().map(Vec::len).max().unwrap_or(0);
-        all_filters.iter_mut().for_each(|f| {
-            if f.len() != max_len {
-                f.push(f.last().cloned().unwrap_or_default());
-            }
-        });
-
-        Ok(Self {
-            groups,
-            account_filters: cmd
-                .account_filter
-                .iter()
-                .rev()
-                .map(|accounts| AccountFilter::new(accounts.iter()))
-                .collect(),
-            unit_filters: cmd
-                .unit_filter
-                .iter()
-                .rev()
-                .map(|units| UnitFilter::new(units.iter()))
-                .collect(),
-        })
-    }
-}
-impl<'h> Iterator for FilterPartitions<'h> {
-    type Item = BTreeMap<GroupKey<'h>, GroupState<'h>>;
-    fn next(&mut self) -> Option<Self::Item> {
-        // If there are no more filters, we are done, though the group may not be empty.
-        if self.account_filters.is_empty() {
-            return None;
-        }
-        let account_filter = self.account_filters.pop().unwrap_or_default();
-        let unit_filter = self.unit_filters.pop().unwrap_or_default();
-
-        let mut partitioned_groups: BTreeMap<GroupKey<'h>, GroupState<'h>> = BTreeMap::new();
-        let mut new_groups = HashMap::new();
-        for (key, state) in self.groups.drain() {
-            let mut include = true;
-
-            // Account filter include
-            include &= key.values().iter().map(|v| &v.1).any(|v| {
-                v.as_list().into_iter().flatten().any(|cv| {
-                    cv.as_account().map(|a| account_filter.is_included(a)).unwrap_or(false)
-                })
-            });
-
-            // Unit filter include
-            let unit_in_key = key.values().iter().map(|v| &v.1).any(|v| {
-                v.as_list()
-                    .into_iter()
-                    .flatten()
-                    .any(|cv| cv.as_unit().map(|u| unit_filter.is_included(u)).unwrap_or(false))
-            });
-            let unit_in_state = state
-                .aggs()
-                .iter()
-                .flat_map(|agg| agg.finalize().into_iter())
-                .any(|cv| cv.as_unit().map(|u| unit_filter.is_included(u)).unwrap_or(false));
-            include &= unit_in_key || unit_in_state;
-
-            if include {
-                partitioned_groups.insert(key, state);
-            } else {
-                new_groups.insert(key, state);
-            }
-        }
-        self.groups = new_groups;
-
-        if partitioned_groups.is_empty() { self.next() } else { Some(partitioned_groups) }
     }
 }

@@ -18,7 +18,6 @@ use crate::valuer::{
 };
 use itertools::Itertools;
 use std::cell::OnceCell;
-use std::collections::{HashSet, VecDeque};
 use std::iter;
 use std::sync::Arc;
 
@@ -63,7 +62,6 @@ struct SystemValuerInner<'h, 'e> {
     config: Configuration<'h>,
     linear_system_valuer: LinearSystemValuer<'h>,
     datetime: JDateTime,
-    tried_base_units: HashSet<&'h Unit<'h>>,
 }
 impl<'h> SystemValuerInner<'h, '_> {
     pub fn on_date(config: Configuration<'h>, datetime: JDateTime) -> Self {
@@ -72,7 +70,6 @@ impl<'h> SystemValuerInner<'h, '_> {
             config,
             linear_system_valuer: LinearSystemValuer::new(iter::empty()),
             datetime,
-            tried_base_units: HashSet::new(),
         }
     }
 }
@@ -88,7 +85,6 @@ impl<'h, 'e> From<&'e JournalEntry<'h>> for SystemValuerInner<'h, 'e> {
             linear_system_valuer: LinearSystemValuer::from(entry),
             config: entry.config().clone(),
             datetime: entry.date_and_time().average(),
-            tried_base_units: HashSet::new(),
         }
     }
 }
@@ -193,6 +189,12 @@ impl<'h> Valuer<'h> for SystemValuerInner<'h, '_> {
                                             break Ok(lsv);
                                         }
                                         Err(_) => {
+                                            if lambda_val.via().any(|v| v.unit() == via.unit()) {
+                                                return Err(ValuationError::Undetermined(err!(
+                                                    "Already valued via {}",
+                                                    via.unit()
+                                                )));
+                                            }
                                             lambda_val.set_via(via);
                                             via_opt = Some(lambda_val);
                                         }

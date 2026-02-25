@@ -6,13 +6,14 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::amount::{Amount, Quantity};
+use crate::err;
 use crate::error::JournError;
 use crate::error::parsing::promote;
 use crate::metadata::Metadata;
 use crate::parsing;
+use crate::parsing::parse;
 use crate::price_db::PriceDatabase;
 use crate::python::lambda::Lambda;
-use crate::{err, parse};
 use rust_decimal::Decimal;
 use smartstring::alias::String as SS;
 use std::cell::RefCell;
@@ -629,6 +630,13 @@ impl NumberFormat {
         Ok(())
     }
 
+    #[cfg(test)]
+    pub fn format(&self, quantity: Quantity, full_precision: bool) -> String {
+        let mut buf = String::new();
+        self.write(quantity, full_precision, &mut buf).unwrap();
+        buf
+    }
+
     /// Modifies `decimal_s` by removing thousands separators.
     pub fn remove_thousands(&self, decimal_s: &str) -> Rc<RefCell<String>> {
         NUMBER_BUF.with(|buf| {
@@ -1015,12 +1023,12 @@ impl FromStr for UnitFormat {
     type Err = JournError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        parse!(
+        parse(
             s,
             promote::<_, JournError, _, _>(
                 "Cannot parse unit format",
-                parsing::amount::unit_format(true)
-            )
+                parsing::amount::unit_format(true),
+            ),
         )
         .map(|r| r.1)
     }
@@ -1044,7 +1052,7 @@ impl<'h> Units<'h> {
 #[cfg(test)]
 mod tests {
     use crate::parsing::amount::unit_format;
-    use crate::unit::NumberFormat;
+    use crate::unit::{NumberFormat, RoundingStrategy};
     use crate::*;
 
     #[test]
@@ -1054,14 +1062,15 @@ mod tests {
 
     #[test]
     fn test_thousands_separate() {
-        let nf = NumberFormat::parse("1,000.00", true);
-        assert_eq!("30,000".to_string(), *nf.add_thousands_separators(&mut "30000".to_string()));
-        assert_eq!("7,000".to_string(), *nf.add_thousands_separators(&mut "7000".to_string()));
+        assert_eq!(
+            NumberFormat::parse("1,000.00", true).format(dec!(30000), true),
+            "30,000".to_string()
+        );
     }
 
     #[test]
     fn test_number_format() {
-        assert_eq!(NumberFormat::parse("1.#", true).format(dec!(1.5)), "1.5".to_string());
+        assert_eq!(NumberFormat::parse("1.#", true).format(dec!(1.5), true), "1.5".to_string());
     }
 
     #[test]
@@ -1069,32 +1078,72 @@ mod tests {
         let def_format = |s: &str| parse!(s, unit_format(true)).unwrap().1;
         let non_def_format = |s: &str| parse!(s, unit_format(false)).unwrap().1;
 
-        assert_eq!(def_format("£ 1").format(amount!("£1")), "£ 1");
-        assert_eq!(def_format("£1,000.00").format(amount!("£1,000")), "£1,000.00");
-        assert_eq!(def_format("-£1,000.00").format(amount!("GBP-1,000")), "-£1,000.00");
-        assert_eq!(def_format("(£1,000.00)").format(amount!("GBP-1,000")), "(£1,000.00)");
-
-        assert_eq!(non_def_format("1 BTC").format(amount!("1 ABC")), "1 ABC");
-        assert_eq!(def_format("1 BTC").format(amount!("1 ABC")), "1 BTC");
+        assert_eq!(def_format("£ 1").format(dec!(1), "£", RoundingStrategy::default()), "£ 1");
+        assert_eq!(
+            def_format("£1,000.00").format(dec!(1000), "£", RoundingStrategy::default()),
+            "£1,000.00"
+        );
+        assert_eq!(
+            def_format("-£1,000.00").format(dec!(-1000), "GBP", RoundingStrategy::default()),
+            "-£1,000.00"
+        );
+        assert_eq!(
+            def_format("(£1,000.00)").format(dec!(-1000), "GBP", RoundingStrategy::default()),
+            "(£1,000.00)"
+        );
 
         assert_eq!(
-            def_format("1,000.12345678 BTC").format(amount!("1,000 ABC")),
+            non_def_format("1 BTC").format(dec!(1), "ABC", RoundingStrategy::default()),
+            "1 ABC"
+        );
+        assert_eq!(
+            def_format("1 BTC").format(dec!(1), "ABC", RoundingStrategy::default()),
+            "1 BTC"
+        );
+
+        assert_eq!(
+            def_format("1,000.12345678 BTC").format(dec!(1000), "ABC", RoundingStrategy::default()),
             "1,000.00000000 BTC"
         );
-        assert_eq!(def_format("1,000.12###### BTC").format(amount!("1,000 ABC")), "1,000.00 BTC");
         assert_eq!(
-            def_format("668,127.66219 BTC").format(amount!("668,127.66219 ABC")),
+            def_format("1,000.12###### BTC").format(dec!(1000), "ABC", RoundingStrategy::default()),
+            "1,000.00 BTC"
+        );
+        assert_eq!(
+            def_format("668,127.66219 BTC").format(
+                dec!(668127.66219),
+                "ABC",
+                RoundingStrategy::default()
+            ),
             "668,127.66219 BTC"
         );
-        assert_eq!(def_format("-1,000.###kg Gold").format(amount!("0.001kg Gold")), "0.001kg Gold");
         assert_eq!(
-            def_format("668,127 \"AB0-1\"").format(amount!("668,127 \"AB0-1\"")),
+            def_format("-1,000.###kg Gold").format(
+                dec!(0.001),
+                "kg Gold",
+                RoundingStrategy::default()
+            ),
+            "0.001kg Gold"
+        );
+        assert_eq!(
+            def_format("668,127 \"AB0-1\"").format(
+                dec!(668_127),
+                "\"AB0-1\"",
+                RoundingStrategy::default()
+            ),
             "668,127 \"AB0-1\""
         );
         assert_eq!(
-            def_format("-0.00000015 ABC").format(amount!("-0.00000015 ABC")),
+            def_format("-0.00000015 ABC").format(
+                dec!(-0.00000015),
+                "ABC",
+                RoundingStrategy::default()
+            ),
             "-0.00000015 ABC"
         );
-        assert_eq!(def_format("0.####### ABC").format(amount!("0 ABC")), "0 ABC");
+        assert_eq!(
+            def_format("0.####### ABC").format(dec!(0), "ABC", RoundingStrategy::default()),
+            "0 ABC"
+        );
     }
 }

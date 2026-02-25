@@ -34,7 +34,7 @@ static CURR_CMD: OnceLock<Mutex<&'static dyn ExecCommand>> = OnceLock::new();
 pub struct Cmd;
 impl Cmd {
     pub fn args() -> &'static Arguments {
-        ARGS.get().expect("Arguments not initialized")
+        ARGS.get_or_init(|| Arguments::default())
     }
 
     pub fn set_args(args: Arguments) -> &'static Arguments {

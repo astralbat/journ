@@ -28,15 +28,10 @@ pub const E_INVALID_UNIT_RANKING: &str = "Unit ranking must be a positive intege
 pub const E_INVALID_VALUE_EXPRESSION: &str = "Unit value expression must be a valid lambda";
 pub const E_UNKNOWN_UNIT_KEY: &str = "Unknown unit configuration parameter";
 
-pub fn unit_definition_body<'h, 's, 'e, 'p, I>(input: I) -> JParseResult<I, &'h Unit<'h>>
+pub fn unit_definition_body<'h, 's, 'p, I>(input: I) -> JParseResult<I, &'h Unit<'h>>
 where
-    I: TextInput<'h>
-        + ConfigInput<'h>
-        + NodeInput<'h, 's, 'e, 'p>
-        + BlockInput<'h>
-        + LocatedInput<'h>,
-    'h: 'e,
-    'e: 's,
+    I: TextInput<'h> + ConfigInput<'h> + NodeInput<'h, 's, 'p> + BlockInput<'h> + LocatedInput<'h>,
+    'h: 's,
     's: 'p,
 {
     // Read the unit codes
@@ -59,11 +54,7 @@ where
 
 pub fn unit_directive_body<'h, 's, 'e, 'p, I>(input: I) -> JParseResult<I, Directive<'h>>
 where
-    I: TextInput<'h>
-        + ConfigInput<'h>
-        + NodeInput<'h, 's, 'e, 'p>
-        + BlockInput<'h>
-        + LocatedInput<'h>,
+    I: TextInput<'h> + ConfigInput<'h> + NodeInput<'h, 's, 'p> + BlockInput<'h> + LocatedInput<'h>,
     'h: 'e,
     'e: 's,
     's: 'p,
@@ -73,15 +64,10 @@ where
     Ok((rem, Directive::new(Some(input.block()), DirectiveKind::Unit(unit))))
 }
 
-pub fn units_directive<'h, 's, 'e, 'p, I>(input: I) -> JParseResult<I, Directive<'h>>
+pub fn units_directive<'h, 's, 'p, I>(input: I) -> JParseResult<I, Directive<'h>>
 where
-    I: TextInput<'h>
-        + NodeInput<'h, 's, 'e, 'p>
-        + BlockInput<'h>
-        + ConfigInput<'h>
-        + LocatedInput<'h>,
-    'h: 'e,
-    'e: 's,
+    I: TextInput<'h> + NodeInput<'h, 's, 'p> + BlockInput<'h> + ConfigInput<'h> + LocatedInput<'h>,
+    'h: 's,
     's: 'p,
 {
     let node = input.parse_node();
@@ -90,26 +76,26 @@ where
     let mut metadata = vec![];
 
     let rem = match_blocks!(input.clone(),
-        param_value("rounding") => |input| {
-            let rounding = promote("Rounding mode must be one of: 'up', 'down', 'halfup', 'halfdown' or 'halfeven'", map_res(line_value, |v: I| RoundingStrategy::from_str(v.text())))(input)?.1;
-            def_unit.set_rounding_strategy(rounding);
-            Ok(())
-        },
-        param_value("value") => |input| {
-            let lambda_expr = promote(E_INVALID_VALUE_EXPRESSION, map_res(multiline_value_string, |i| Lambda::from_str(&i)))(input)?.1;
-            def_unit.set_conversion_expression(Some(lambda_expr));
-            Ok(())
-        },
-        param_value("prices") => |input: I| {
-            let (_, (block, path)) = stream(input)?;
-            let pd = Arc::new(PriceDatabase::new(node.branch_kind(block, path, JournalNodeKind::Prices)));
-            PythonLedgerModule::set_default_price_database(&pd, node.node().id().journal_incarnation());
-            def_unit.set_prices(Some(pd));
-            Ok(())
-        },
-        util::comment => |_| Ok(()),
-        entry::metadata => |m| Ok(metadata.push(m))
-    )?.0;
+            param_value("rounding") => |input| {
+                let rounding = promote("Rounding mode must be one of: 'up', 'down', 'halfup', 'halfdown' or 'halfeven'", map_res(line_value, |v: I| RoundingStrategy::from_str(v.text())))(input)?.1;
+                def_unit.set_rounding_strategy(rounding);
+                Ok(())
+            },
+            param_value("value") => |input| {
+                let lambda_expr = promote(E_INVALID_VALUE_EXPRESSION, map_res(multiline_value_string, |i| Lambda::from_str(&i)))(input)?.1;
+                def_unit.set_conversion_expression(Some(lambda_expr));
+                Ok(())
+            },
+            param_value("prices") => |input: I| {
+                let (_, (block, path)) = stream(input)?;
+                let pd = Arc::new(PriceDatabase::new(node.branch_kind(block, path, JournalNodeKind::Prices)));
+                PythonLedgerModule::set_default_price_database(&pd, node.node().id().journal_incarnation());
+                def_unit.set_prices(Some(pd));
+                Ok(())
+            },
+            util::comment => |_| Ok(()),
+            entry::metadata => |m| Ok(metadata.push(m))
+        )?.0;
     def_unit.set_metadata(metadata);
     let def_unit = input.config_mut().merge_default_unit(&def_unit, input.parse_node().allocator());
     units.set_default_unit(Some(def_unit));
@@ -123,14 +109,11 @@ fn read_unit<'h, 's, 'e, 'p, 'a, I>(
     primary: Option<&'h Unit<'h>>,
 ) -> impl FnMut(I) -> JParseResult<I, &'h Unit<'h>> + 'a
 where
-    I: TextInput<'h>
-        + ConfigInput<'h>
-        + NodeInput<'h, 's, 'e, 'p>
-        + BlockInput<'h>
-        + LocatedInput<'h>,
+    I: TextInput<'h> + ConfigInput<'h> + NodeInput<'h, 's, 'p> + BlockInput<'h> + LocatedInput<'h>,
     'h: 'e,
     'e: 's,
     's: 'p,
+    's: 'a,
 {
     move |input: I| {
         let node = input.parse_node();
@@ -189,5 +172,76 @@ where
             )?.0;
         unit.set_metadata(metadata);
         Ok((rem, node.allocator().alloc(unit)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::python::lambda::Lambda;
+    use crate::unit::RoundingStrategy;
+    use crate::{journ, parse, parsing};
+    use indoc::indoc;
+    use std::str::FromStr;
+
+    #[test]
+    fn test_unit_directive() {
+        let journ = journ!(indoc! {r#"
+              unit euros, EE, E
+                name Euro
+                format -€1.000,00
+                ranking 1
+                rounding halfeven
+                value d, b, q ->
+                  1
+                prices
+                  P 2000-01-01 10:11:12Z "€" "$1.00"
+           "#});
+
+        let config = journ.config();
+        assert!(config.get_unit("euros").is_some());
+        let unit = config.get_unit("euros").unwrap();
+
+        assert!(config.get_unit("E").is_some());
+        assert!(config.get_unit("EE").is_some());
+        assert_eq!(unit.name(), Some(&"Euro".to_string()));
+        assert_eq!(unit.conversion_ranking(), Some(1));
+        assert_eq!(
+            unit.format(),
+            &parse!("-€1.000,00", parsing::amount::unit_format(true)).unwrap().1
+        );
+        assert_eq!(
+            unit.conversion_expression(),
+            Some(Lambda::from_str("d, b, q -> 1").unwrap()).as_ref()
+        );
+        assert!(unit.prices().is_some());
+        assert_eq!(unit.prices().unwrap().prices().len(), 1, "Price DB contains one price");
+
+        let mut buf = Vec::new();
+        unit.prices().unwrap().prices().iter().next().unwrap().write(&mut buf, config).unwrap();
+        assert_eq!(String::from_utf8(buf).unwrap().as_str(), "P 2000-01-01 10:11:12Z \"€\" $1.00")
+    }
+
+    #[test]
+    fn test_default_unit_directive() {
+        let journ = journ!("default unit rounding halfeven");
+        assert_eq!(journ.config().default_unit().rounding_strategy(), RoundingStrategy::HalfEven);
+
+        let journ = journ!(indoc! { r#"
+        default unit value d, b, q ->
+                      1
+          prices
+           P 2000-01-01 10:11:12Z "€" "$1.00""# });
+
+        let config = journ.config();
+        let unit = config.default_unit();
+        assert_eq!(
+            unit.conversion_expression(),
+            Some(Lambda::from_str("d, b, q -> 1").unwrap()).as_ref()
+        );
+        assert!(unit.prices().is_some());
+        assert_eq!(unit.prices().unwrap().prices().len(), 1, "Price DB contains one price");
+        let mut buf = Vec::new();
+        unit.prices().unwrap().prices().iter().next().unwrap().write(&mut buf, config).unwrap();
+        assert_eq!(String::from_utf8(buf).unwrap().as_str(), "P 2000-01-01 10:11:12Z \"€\" $1.00")
     }
 }

@@ -57,8 +57,8 @@ impl ModuleDirective for CgtDirective {
     }
     fn parse<'h, 's, 'e, 'p>(
         &self,
-        input: ModuleDirectiveInput<'h, 's, 'e, 'p>,
-    ) -> JParseResult<ModuleDirectiveInput<'h, 's, 'e, 'p>, Directive<'h>>
+        input: ModuleDirectiveInput<'h, 's, 'p>,
+    ) -> JParseResult<ModuleDirectiveInput<'h, 's, 'p>, Directive<'h>>
     where
         'h: 'e,
         'e: 's,
@@ -67,27 +67,27 @@ impl ModuleDirective for CgtDirective {
         let (rem, input) = rest(input)?;
 
         match_blocks!(input,
-            param_value("roundDealValues") => |input: ModuleDirectiveInput<'h, 's, 'e, 'p>| {
+            param_value("roundDealValues") => |input: ModuleDirectiveInput<'h, 's, 'p>| {
                 config.set_round_deal_values(
                     bool::from_str(input.text()).map_err(|e| NomErr::Error(input.into_err(E_BAD_ROUNDDEALS).with_source(e)))?,
                 );
                 Ok(())
             },
-            param_value("assignExpenses") => |input: ModuleDirectiveInput<'h, 's, 'e, 'p>| {
+            param_value("assignExpenses") => |input: ModuleDirectiveInput<'h, 's, 'p>| {
                 config.set_assign_expenses(AssignExpenses::from_str(input.text()).map_err(NomErr::Error)?);
                 Ok(())
             },
-            param_value("timezone") => |input: ModuleDirectiveInput<'h, 's, 'e, 'p>| {
+            param_value("timezone") => |input: ModuleDirectiveInput<'h, 's, 'p>| {
                 config.set_timezone(Tz::from_str(input.text()).map_err(|e| NomErr::Error(input.into_err("Invalid timezone").with_source(e)))?);
                 Ok(())
             },
-            param_value("unitOfAccount") => |input: ModuleDirectiveInput<'h, 's, 'e, 'p>| {
+            param_value("unitOfAccount") => |input: ModuleDirectiveInput<'h, 's, 'p>| {
                 let (input, unit_code) = promote(IErrorMsg::UNIT, amount::unit)(input)?;
                 let allocator = input.config().allocator();
                 let unit = input.config_mut().merge_unit(&Unit::new(unit_code), allocator);
                 let mut value_date = None;
                 match_blocks!(input,
-                    param_value("revalueDate") => |input: ModuleDirectiveInput<'h, 's, 'e, 'p>| {
+                    param_value("revalueDate") => |input: ModuleDirectiveInput<'h, 's, 'p>| {
                         let tz = input.config().timezone();
                         value_date = Some(promote(IErrorMsg::DATE, entry::datetime(tz))(input)?.1.datetime());
                         Ok(())
@@ -96,15 +96,15 @@ impl ModuleDirective for CgtDirective {
                 config.set_unit_of_account_change(Some(UnitOfAccountChange::new(unit.code().to_string(), value_date)));
                 Ok(())
             },
-            param_value("pool") => |input: ModuleDirectiveInput<'h, 's, 'e, 'p>| {
+            param_value("pool") => |input: ModuleDirectiveInput<'h, 's, 'p>| {
                 config.set_pool(read_pool(input)?.1);
                 Ok(())
             },
-            param_value("rules") => |input: ModuleDirectiveInput<'h, 's, 'e, 'p>| {
+            param_value("rules") => |input: ModuleDirectiveInput<'h, 's, 'p>| {
                 config.set_ruleset(promote("Invalid rules", ruleset::ruleset)(input)?.1);
                 Ok(())
             },
-            rest => |input: ModuleDirectiveInput<'h, 's, 'e, 'p>| {
+            rest => |input: ModuleDirectiveInput<'h, 's, 'p>| {
                 Err(NomErr::Failure(input.into_err(
                     "Invalid capitalgains directive"
                 )))
@@ -175,4 +175,36 @@ where
         }
     )?;
     Ok((rem, pool_config))
+}
+
+#[cfg(test)]
+mod tests {
+    use indoc::indoc;
+    use journ_core::journ;
+
+    #[test]
+    fn test_cgt_directive() {
+        let journ = journ!(indoc! {r#"
+            capitalGains
+              rounddeals true
+              pools
+                pool 1D
+                  unitofaccount £
+                  maxAge 1
+                  method fifo
+                pool 30D
+                  maxAge 30
+                  method fifo
+                  matchWhen b,s ->
+                    s.date() < b.date()
+                pool
+
+            capitalgains pool 1D maxAge 2
+        "#});
+
+        let config = journ.config();
+        let cgt_config = config.module_config("capital_gains");
+        assert!(cgt_config.round_deals());
+        assert_eq!(cgt_config.pools().first().unwrap().max_age(), Some(2));
+    }
 }

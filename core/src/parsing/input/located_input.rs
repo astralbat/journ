@@ -88,11 +88,9 @@ impl_located_input2!(TextBlockInput<'h, &RefCell<dyn DerefMutAndDebug<'h, 's, Co
 impl_located_input2!(TextBlockInput<'h, RefCell<Configuration<'h>>>);
 impl_located_input2!(TextBlockInput<'h, RefCell<&mut Configuration<'h>>>);
 
-impl<'h, 's, 'e, 'p> LocatedInput<'h> for LocatedSpan<&'h str, &'p JournalParseNode<'h, 's, 'e>>
+impl<'h, 's, 'p> LocatedInput<'h> for LocatedSpan<&'h str, &'p JournalParseNode<'h, 's>>
 where
-    'h: 'e,
-    'e: 's,
-    's: 'p,
+    'h: 's,
 {
     fn file(&self) -> Option<&'h str> {
         self.extra.node().nearest_filename().map(|f| f.to_str().unwrap())
@@ -115,11 +113,9 @@ where
     }
 }
 
-impl<'h, 's, 'e, 'p> LocatedInput<'h> for TextBlockInput<'h, &'p JournalParseNode<'h, 's, 'e>>
+impl<'h, 's, 'p> LocatedInput<'h> for TextBlockInput<'h, &'p JournalParseNode<'h, 's>>
 where
-    'h: 'e,
-    'e: 's,
-    's: 'p,
+    'h: 's,
 {
     fn file(&self) -> Option<&'h str> {
         self.inner.extra.node().nearest_filename().map(|f| f.to_str().unwrap())

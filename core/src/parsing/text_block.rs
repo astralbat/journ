@@ -362,7 +362,7 @@ impl<'h> PartialOrd for TextBlock<'h> {
 
 impl<'h> From<&'h str> for TextBlock<'h> {
     fn from(text: &'h str) -> Self {
-        TextBlock::new_root(text, None)
+        TextBlock::new_root(text, Some(TextBlockLocation::new(None, 1, 0)))
     }
 }
 

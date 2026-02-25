@@ -6,7 +6,7 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::alloc::HerdAllocator;
-use crate::amount::{Amount, AmountExpr, Quantity};
+use crate::amount::{Amount, Quantity};
 use crate::err;
 use crate::money_util::MoneyPot;
 use crate::report::table2;
@@ -33,7 +33,7 @@ impl<'h> PostingValuation<'h> {
     ///
     /// # Panics
     /// If the amount is not positive.
-    pub fn new_unit<A: Into<AmountExpr<'h>>>(amount: A) -> Self {
+    pub fn new_unit<A: Into<Amount<'h>>>(amount: A) -> Self {
         let expr = amount.into();
         assert!(expr.is_positive(), "unit valuations must be positive");
 
@@ -41,11 +41,8 @@ impl<'h> PostingValuation<'h> {
     }
 
     /// Creates a new total valuation. The `amount` must not be negative.
-    pub fn new_total<A: Into<AmountExpr<'h>>>(amount: A, elided: bool) -> PostingValuation<'h> {
-        let mut expr = amount.into();
-        if expr.pretext().is_empty() {
-            expr = expr.with_pretext(" @@")
-        }
+    pub fn new_total<A: Into<Amount<'h>>>(amount: A, elided: bool) -> PostingValuation<'h> {
+        let expr = amount.into();
 
         PostingValuation { inner: Total(expr, elided) }
     }
@@ -58,8 +55,8 @@ impl<'h> PostingValuation<'h> {
     }
     pub fn value(&self) -> Amount<'h> {
         match &self.inner {
-            Unit(m) => **m,
-            Total(m, _) => **m,
+            Unit(m) => *m,
+            Total(m, _) => *m,
         }
     }
 
@@ -69,19 +66,19 @@ impl<'h> PostingValuation<'h> {
     /// The returned value will be of the correct sign.
     pub fn value_with_primary(&self, primary: Amount<'h>) -> Amount<'h> {
         match &self.inner {
-            Unit(m) => **m * primary.quantity(),
-            Total(m, _) => **m,
+            Unit(m) => *m * primary.quantity(),
+            Total(m, _) => *m,
         }
     }
 
-    pub fn into_expr(self) -> AmountExpr<'h> {
+    pub fn into_expr(self) -> Amount<'h> {
         match self.inner {
             Unit(m) => m,
             Total(m, _) => m,
         }
     }
 
-    pub fn expr(&self) -> &AmountExpr<'h> {
+    pub fn expr(&self) -> &Amount<'h> {
         match &self.inner {
             Unit(m) => m,
             Total(m, _) => m,
@@ -104,24 +101,18 @@ impl<'h> PostingValuation<'h> {
     }
 
     /// Write the valuation. We write the amount with full precision.
-    fn write<W: fmt::Write>(&self, w: &mut W, include_elided: bool) -> fmt::Result {
+    fn write<W: fmt::Write>(&self, w: &mut W) -> fmt::Result {
         match &self.inner {
-            Unit(m) => m.write(w, true),
-            Total(m, elided) => {
-                if include_elided || !elided {
-                    m.write(w, true)
-                } else {
-                    Ok(())
-                }
-            }
+            Unit(m) => write!(w, " @ {}", m.format_precise()),
+            Total(m, _) => write!(w, " @@ {}", m.format_precise()),
         }
     }
 }
 #[derive(Clone, Hash)]
 enum ValuationInner<'h> {
-    Unit(AmountExpr<'h>),
+    Unit(Amount<'h>),
     /// `Total(amount, elided)`
-    Total(AmountExpr<'h>, bool),
+    Total(Amount<'h>, bool),
 }
 
 impl PartialEq for PostingValuation<'_> {
@@ -136,7 +127,7 @@ impl PartialEq for PostingValuation<'_> {
 
 impl fmt::Display for PostingValuation<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.write(f, false)
+        self.write(f)
     }
 }
 
@@ -157,11 +148,11 @@ impl<'h> From<&PostingValuation<'h>> for Yaml {
         match &val.inner {
             Unit(m) => {
                 map.insert(Yaml::String("type".to_string()), Yaml::String("unit".to_string()));
-                map.insert(Yaml::String("amount".to_string()), (&**m).into());
+                map.insert(Yaml::String("amount".to_string()), (&*m).into());
             }
             Total(m, _elided) => {
                 map.insert(Yaml::String("type".to_string()), Yaml::String("total".to_string()));
-                map.insert(Yaml::String("amount".to_string()), (&**m).into());
+                map.insert(Yaml::String("amount".to_string()), (&*m).into());
             }
         }
         Yaml::Hash(map)
@@ -173,7 +164,7 @@ impl<'h> From<&PostingValuation<'h>> for Yaml {
 pub struct ValuedAmount<'h> {
     // First amount stored separately to avoid Vec allocation in common case
     // where only one amount is parsed.
-    amount_expr: AmountExpr<'h>,
+    amount: Amount<'h>,
     // Store in an option only for the nil case.
     valuations: Option<Vec<PostingValuation<'h>, &'h HerdAllocator<'h>>>,
 }
@@ -181,23 +172,17 @@ pub struct ValuedAmount<'h> {
 impl<'h> ValuedAmount<'h> {}
 
 impl<'h> ValuedAmount<'h> {
-    pub fn new_in(amount: AmountExpr<'h>, allocator: &'h HerdAllocator<'h>) -> Self {
-        ValuedAmount { amount_expr: amount, valuations: Some(Vec::new_in(allocator)) }
+    pub fn new_in(amount: Amount<'h>, allocator: &'h HerdAllocator<'h>) -> Self {
+        ValuedAmount { amount: amount, valuations: Some(Vec::new_in(allocator)) }
     }
 
     /// A ValuedAmount with no units and a zero amount.
     pub fn nil() -> Self {
-        ValuedAmount {
-            amount_expr: AmountExpr::new(Amount::nil(), "", None::<&'h str>),
-            valuations: None,
-        }
+        ValuedAmount { amount: Amount::nil(), valuations: None }
     }
 
     pub fn zero(unit: &'h Unit<'h>, allocator: &'h HerdAllocator<'h>) -> Self {
-        ValuedAmount {
-            amount_expr: AmountExpr::new(unit.with_quantity(0), "", None::<&'h str>),
-            valuations: Some(Vec::new_in(allocator)),
-        }
+        ValuedAmount { amount: unit.with_quantity(0), valuations: Some(Vec::new_in(allocator)) }
     }
 
     pub fn from_amounts<I: IntoIterator<Item = Amount<'h>>>(
@@ -208,16 +193,16 @@ impl<'h> ValuedAmount<'h> {
         let mut amount = None;
         for (i, v) in values.into_iter().enumerate() {
             if i == 0 {
-                amount = Some(AmountExpr::from(v));
+                amount = Some(Amount::from(v));
             } else {
                 valuations.push(PostingValuation::new_total(v, false));
             }
         }
         match amount {
             Some(amount_expr) => {
-                let va = ValuedAmount { amount_expr, valuations: Some(valuations) };
+                let va = ValuedAmount { amount: amount_expr, valuations: Some(valuations) };
                 assert!(
-                    !va.valuations.iter().flatten().any(|v| v.unit() == va.amount_expr.unit()),
+                    !va.valuations.iter().flatten().any(|v| v.unit() == va.amount.unit()),
                     "Valuations must not contain the same unit as the amount"
                 );
                 va
@@ -245,7 +230,7 @@ impl<'h> ValuedAmount<'h> {
             }
         }
         match expr {
-            Some(amount_expr) => ValuedAmount { amount_expr, valuations },
+            Some(amount_expr) => ValuedAmount { amount: amount_expr, valuations },
             None => ValuedAmount::nil(),
         }
     }
@@ -262,18 +247,18 @@ impl<'h> ValuedAmount<'h> {
     /// The `quantity` can be positive or negative depending on the needs.
     pub fn split(mut self, quantity: Quantity) -> (Self, Self) {
         // Shortcut to avoid divide by zero.
-        if self.amount_expr.is_zero() {
+        if self.amount.is_zero() {
             return (ValuedAmount::zero(self.unit(), self.allocator().unwrap()), self);
         }
 
         // Split by % for the valuations
-        let split_percent = quantity / self.amount_expr.quantity();
+        let split_percent = quantity / self.amount.quantity();
 
         let saved_amount = self.amount();
 
         let mut right = self.clone();
-        self.set_amount(self.amount_expr.with_quantity(quantity));
-        right.set_amount(saved_amount - *self.amount_expr);
+        self.set_amount(self.amount.with_quantity(quantity));
+        right.set_amount(saved_amount - self.amount);
         for valuation in self.valuations.clone().into_iter().flatten() {
             match &valuation.inner {
                 Unit(v) => {
@@ -282,8 +267,8 @@ impl<'h> ValuedAmount<'h> {
                 }
                 Total(v, e) => {
                     let (l_amount, r_amount) = v.split_percent(split_percent);
-                    self.set_valuation(PostingValuation::new_total(v.with_amount(l_amount), *e));
-                    right.set_valuation(PostingValuation::new_total(v.with_amount(r_amount), *e));
+                    self.set_valuation(PostingValuation::new_total(l_amount, *e));
+                    right.set_valuation(PostingValuation::new_total(r_amount, *e));
                 }
             }
         }
@@ -299,13 +284,13 @@ impl<'h> ValuedAmount<'h> {
             return ValuedAmount::nil();
         }
 
-        let split_total = |expr: &AmountExpr<'h>, pretext| {
-            let mp = MoneyPot::new(**expr);
-            AmountExpr::new(mp.split_weighted(weights).nth(i).unwrap(), pretext, None::<&'h str>)
+        let split_total = |expr: &Amount<'h>, _pretext| {
+            let mp = MoneyPot::new(*expr);
+            mp.split_weighted(weights).nth(i).unwrap()
         };
 
         let mut va = ValuedAmount::new_in(
-            split_total(&self.amount_expr, ""),
+            split_total(&self.amount, ""),
             self.valuations.as_ref().unwrap().allocator(),
         );
 
@@ -332,43 +317,35 @@ impl<'h> ValuedAmount<'h> {
 
     /// Gets whether the amount is zero.
     pub fn is_zero(&self) -> bool {
-        self.amount_expr.is_zero()
+        self.amount.is_zero()
     }
 
     /// Gets whether the amount is nil. This is similar, but not the same as
     /// [`Self::is_zero`]. All nil `ValuedAmounts` are zero, but not all
     /// zero `ValuedAmounts` are nil.
     pub fn is_nil(&self) -> bool {
-        self.amount_expr.is_nil()
+        self.amount.is_nil()
     }
 
     pub fn amount(&self) -> Amount<'h> {
-        *self.amount_expr
+        self.amount
     }
 
     /// Gets all effective 'amounts' for this valued amount. That is,
     /// the primary amount first, and then all valuations.
     pub fn amounts(&self) -> impl Iterator<Item = Amount<'h>> + '_ {
-        iter::once(*self.amount_expr).chain(self.valuations().map(|v| v.value()))
-    }
-
-    pub fn amount_expr(&self) -> &AmountExpr<'h> {
-        &self.amount_expr
+        iter::once(self.amount).chain(self.valuations().map(|v| v.value()))
     }
 
     /// The unit of the primary amount.
     pub fn unit(&self) -> &'h Unit<'h> {
-        self.amount_expr.unit()
+        self.amount.unit()
     }
 
     pub fn set_amount(&mut self, amount: Amount<'h>) {
         assert!(!self.is_nil(), "Can't set an amount on nil, create a new ValuedAmount instead");
 
-        self.amount_expr.set_amount(amount)
-    }
-
-    pub fn set_pretext(&mut self, pretext: &'h str) {
-        self.amount_expr = self.amount_expr.with_pretext(pretext);
+        self.amount = amount
     }
 
     pub fn valuations(&self) -> impl Iterator<Item = Valuation<'h>> {
@@ -390,7 +367,7 @@ impl<'h> ValuedAmount<'h> {
     /// this is a nil amount.
     pub fn all_valuations(&self) -> impl Iterator<Item = PostingValuation<'h>> + '_ {
         let mut amount_expr_val =
-            iter::once(PostingValuation::new_total(self.amount_expr.clone(), false));
+            iter::once(PostingValuation::new_total(self.amount.clone(), false));
         iter::from_fn(move || {
             if self.is_nil() {
                 return None;
@@ -403,9 +380,9 @@ impl<'h> ValuedAmount<'h> {
     /// An iterator of all units.
     /// A nil `ValuedAmount` does not have any units.
     pub fn units(&self) -> impl Iterator<Item = &'h Unit<'h>> + '_ {
-        let mut iter = iter::once(self.amount_expr.unit())
+        let mut iter = iter::once(self.amount.unit())
             .chain(self.valuations.iter().flatten().map(|v| v.unit()));
-        iter::from_fn(move || if self.amount_expr.unit().is_none() { None } else { iter.next() })
+        iter::from_fn(move || if self.amount.unit().is_none() { None } else { iter.next() })
     }
 
     /// Gets the price of the base unit in the quote unit.
@@ -434,9 +411,9 @@ impl<'h> ValuedAmount<'h> {
     /// assert_eq!(va!("$10").value_in(unit!("€")), None);
     /// ```
     pub fn value_in(&self, in_unit: &'h Unit<'h>) -> Option<Amount<'h>> {
-        self.amounts().find(|v| v.unit() == in_unit).or_else(|| {
-            if self.amount_expr.is_zero() { Some(in_unit.with_quantity(0)) } else { None }
-        })
+        self.amounts()
+            .find(|v| v.unit() == in_unit)
+            .or_else(|| if self.amount.is_zero() { Some(in_unit.with_quantity(0)) } else { None })
     }
 
     pub fn valuer(&self) -> impl Valuer<'h> + '_ {
@@ -524,17 +501,17 @@ impl<'h> ValuedAmount<'h> {
     /// Returns the new amount if successfully found, otherwise the old amount on Err.
     pub fn in_terms_of(&mut self, unit: &'h Unit<'h>) -> bool {
         // Already in terms of unit
-        if self.amount_expr.unit() == unit || self.is_nil() {
+        if self.amount.unit() == unit || self.is_nil() {
             return true;
         }
         match self.value_in(unit) {
             Some(amount) => {
-                self.valuations.as_mut().unwrap().push(PostingValuation::new_total(
-                    *self.amount_expr.with_amount(*self.amount_expr),
-                    false,
-                ));
+                self.valuations
+                    .as_mut()
+                    .unwrap()
+                    .push(PostingValuation::new_total(self.amount, false));
                 self.valuations.as_mut().unwrap().retain(|v| v.unit() != unit);
-                self.amount_expr.set_amount(amount);
+                self.amount = amount;
                 true
             }
             None => false,
@@ -571,22 +548,13 @@ impl<'h> ValuedAmount<'h> {
             return self;
         }
 
-        if self.amount_expr.unit() == unit {
+        if self.amount.unit() == unit {
             if self.valuations.as_ref().unwrap().is_empty() {
                 return ValuedAmount::nil();
             } else {
                 match self.valuations.as_mut().unwrap().remove(0).inner {
-                    Total(amount_expr, _) => {
-                        self.amount_expr =
-                            AmountExpr::new(amount_expr.amount(), "", None::<&'h str>)
-                    }
-                    Unit(unit) => {
-                        self.amount_expr = AmountExpr::new(
-                            unit.amount() * self.amount_expr.quantity(),
-                            "",
-                            None::<&'h str>,
-                        )
-                    }
+                    Total(amount, _) => self.amount = amount,
+                    Unit(unit) => self.amount = unit * self.amount.quantity(),
                 }
             }
         } else {
@@ -636,7 +604,7 @@ impl<'h> ValuedAmount<'h> {
     }
 
     pub fn negate(&mut self) {
-        self.amount_expr = self.amount_expr.with_amount(self.amount().negate());
+        self.amount = self.amount().negate();
         for val in self.posting_valuations_mut().filter(|v| v.is_total()) {
             *val = PostingValuation::new_total(-val.value(), val.is_elided())
         }
@@ -648,7 +616,7 @@ impl<'h> ValuedAmount<'h> {
     }
 
     pub fn abs(mut self) -> Self {
-        self.amount_expr = self.amount_expr.with_amount(self.amount_expr.abs());
+        self.amount = self.amount.abs();
         for val in self.posting_valuations_mut().filter(|v| v.is_total()) {
             *val = PostingValuation::new_total(val.value().abs(), val.is_elided())
         }
@@ -657,7 +625,7 @@ impl<'h> ValuedAmount<'h> {
 
     /// Rounds amount and total valuations. This won't round unit valuations.
     pub fn round(&mut self) {
-        self.amount_expr = self.amount_expr.with_amount(self.amount().rounded());
+        self.amount = self.amount().rounded();
         self.round_total_valuations();
     }
 
@@ -756,10 +724,10 @@ impl<'h> ValuedAmount<'h> {
         None
     }
 
-    pub fn write<W: fmt::Write>(&self, w: &mut W, include_elided: bool) -> fmt::Result {
-        write!(w, "{}", self.amount_expr)?;
+    pub fn write<W: fmt::Write>(&self, w: &mut W) -> fmt::Result {
+        write!(w, "{}", self.amount)?;
         for valuation in self.valuations.iter().flatten() {
-            valuation.write(w, include_elided)?;
+            valuation.write(w)?;
         }
         Ok(())
     }
@@ -767,7 +735,7 @@ impl<'h> ValuedAmount<'h> {
     pub fn as_cell(&self) -> Box<dyn table2::Cell> {
         let mut cell = self.amount().into_cell(self.amount().unit().format());
         for val in self.posting_valuations() {
-            let symbol = if val.is_total() { "@@" } else { "@" };
+            let symbol = if val.is_total() { " @@ " } else { " @ " };
 
             let val_cell = table2::BinaryCell::new(
                 Box::new(symbol),
@@ -787,7 +755,7 @@ impl<'h> ValuedAmount<'h> {
         for amount in rhs.amounts().filter(|a| !a.is_zero()) {
             // Matches primary amount
             if self.unit() == amount.unit() {
-                self.amount_expr.set_amount(self.amount() + amount);
+                self.amount = self.amount() + amount;
             // Matches existing total valuation
             } else if let Some(val) =
                 self.posting_valuations_mut().find(|v| v.is_total() && v.unit() == amount.unit())
@@ -845,7 +813,7 @@ impl Ord for ValuedAmount<'_> {
 
 impl fmt::Display for ValuedAmount<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.write(f, false)
+        self.write(f)
     }
 }
 
@@ -887,7 +855,7 @@ impl<'h> From<&ValuedAmount<'h>> for Yaml {
 
 impl fmt::Debug for ValuedAmount<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?}", self.amount_expr)?;
+        write!(f, "{:?}", self.amount)?;
         for v in self.valuations.iter().flatten() {
             write!(f, "{:?}", v)?;
         }
@@ -950,16 +918,12 @@ impl<'h> Add<&ValuedAmount<'h>> for &ValuedAmount<'h> {
         match initial {
             Some(initial) => {
                 let mut va_accum = ValuedAmount::new_in(
-                    AmountExpr::new(
-                        self.value_in(initial).unwrap() + rhs.value_in(initial).unwrap(),
-                        "",
-                        None::<&'h str>,
-                    ),
+                    self.value_in(initial).unwrap() + rhs.value_in(initial).unwrap(),
                     allocator,
                 );
 
-                let self_amount_val = PostingValuation::new_total(self.amount_expr.amount(), false);
-                let rhs_amount_val = PostingValuation::new_total(rhs.amount_expr.amount(), false);
+                let self_amount_val = PostingValuation::new_total(self.amount, false);
+                let rhs_amount_val = PostingValuation::new_total(rhs.amount, false);
                 for cu in unit_iter {
                     let lhs_val = self
                         .valuations
@@ -968,7 +932,7 @@ impl<'h> Add<&ValuedAmount<'h>> for &ValuedAmount<'h> {
                         .find(|v| v.unit() == cu)
                         .map(|v| &v.inner)
                         .or_else(|| {
-                            if self.amount_expr.unit() == cu {
+                            if self.amount.unit() == cu {
                                 Some(&self_amount_val.inner)
                             } else {
                                 None
@@ -981,11 +945,7 @@ impl<'h> Add<&ValuedAmount<'h>> for &ValuedAmount<'h> {
                         .find(|v| v.unit() == cu)
                         .map(|v| &v.inner)
                         .or_else(|| {
-                            if rhs.amount_expr.unit() == cu {
-                                Some(&rhs_amount_val.inner)
-                            } else {
-                                None
-                            }
+                            if rhs.amount.unit() == cu { Some(&rhs_amount_val.inner) } else { None }
                         });
                     match (lhs_val, rhs_val) {
                         // When both sides have a unit valuation, we set the summed valuation to be the weighted sum.
@@ -996,33 +956,29 @@ impl<'h> Add<&ValuedAmount<'h>> for &ValuedAmount<'h> {
                             // If the denominator is zero, it means both sides are zero in the initial unit.
                             // In that case, we'll average the two unit valuations.
                             let sum_uv = if denom.is_zero() {
-                                (lhs_uv.amount() + rhs_uv.amount()) / 2
+                                (lhs_uv + rhs_uv) / 2
                             } else {
-                                let l = lhs_uv.amount().abs()
+                                let l = lhs_uv.abs()
                                     * self.value_in(initial).unwrap().quantity().abs()
                                     / denom;
-                                let r = rhs_uv.amount().abs()
+                                let r = rhs_uv.abs()
                                     * rhs.value_in(initial).unwrap().quantity().abs()
                                     / denom;
                                 l + r
                             };
-                            va_accum.set_valuation(PostingValuation::new_unit(
-                                lhs_uv.with_amount(sum_uv),
-                            ));
+                            va_accum.set_valuation(PostingValuation::new_unit(sum_uv));
                         }
                         // When only one side has a unit valuation, we set it as the valuation.
                         (Some(Unit(uv)), None) | (None, Some(Unit(uv))) => {
                             va_accum.set_valuation(PostingValuation::new_unit(uv.clone()));
                         }
                         // Otherwise we sum the total valuations.
-                        (Some(Total(expr, e)), _) | (_, Some(Total(expr, e))) => {
+                        (Some(Total(_expr, e)), _) | (_, Some(Total(_expr, e))) => {
                             // Use `value_in` to account for potential negativity.
                             // Ignore the result as it may be a duplicate.
                             if cu != va_accum.unit() {
                                 va_accum.set_valuation(PostingValuation::new_total(
-                                    expr.with_amount(
-                                        self.value_in(cu).unwrap() + rhs.value_in(cu).unwrap(),
-                                    ),
+                                    self.value_in(cu).unwrap() + rhs.value_in(cu).unwrap(),
                                     *e,
                                 ));
                             }
@@ -1098,14 +1054,12 @@ impl<'h> Mul<Quantity> for &ValuedAmount<'h> {
             return self.clone();
         }
 
-        let mut va = ValuedAmount::new_in(
-            AmountExpr::new(self.amount_expr.amount() * rhs, "", None::<&'h str>),
-            self.valuations.as_ref().unwrap().allocator(),
-        );
+        let mut va =
+            ValuedAmount::new_in(self.amount * rhs, self.valuations.as_ref().unwrap().allocator());
         let mut va_valuations = Vec::new_in(*self.valuations.as_ref().unwrap().allocator());
         va_valuations.extend(self.valuations.as_ref().unwrap().iter().map(|v| match &v.inner {
             Unit(unit) => PostingValuation::new_unit(unit.clone()),
-            Total(tot, elided) => PostingValuation::new_total(**tot * rhs, *elided),
+            Total(tot, elided) => PostingValuation::new_total(*tot * rhs, *elided),
         }));
         va.valuations = Some(va_valuations);
         va
@@ -1130,14 +1084,12 @@ impl<'h> Div<Quantity> for &ValuedAmount<'h> {
             return self.clone();
         }
 
-        let mut va = ValuedAmount::new_in(
-            AmountExpr::new(self.amount_expr.amount() / rhs, "", None::<&'h str>),
-            self.valuations.as_ref().unwrap().allocator(),
-        );
+        let mut va =
+            ValuedAmount::new_in(self.amount / rhs, self.valuations.as_ref().unwrap().allocator());
         let mut va_valuations = Vec::new_in(*self.valuations.as_ref().unwrap().allocator());
         va_valuations.extend(self.valuations.as_ref().unwrap().iter().map(|v| match &v.inner {
             Unit(unit) => PostingValuation::new_unit(unit.clone()),
-            Total(tot, elided) => PostingValuation::new_total(**tot / rhs, *elided),
+            Total(tot, elided) => PostingValuation::new_total(*tot / rhs, *elided),
         }));
         va.valuations = Some(va_valuations);
         va

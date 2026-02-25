@@ -14,12 +14,10 @@ use fmt::Write;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::Zero;
 use smartstring::alias::String as SS;
-use std::borrow::Borrow;
 use std::hash::Hash;
 use std::iter::Sum;
 use std::ops::{
-    Add, AddAssign, Bound, Deref, Div, DivAssign, Mul, MulAssign, Neg, Rem, RemAssign, Sub,
-    SubAssign,
+    Add, AddAssign, Bound, Div, DivAssign, Mul, MulAssign, Neg, Rem, RemAssign, Sub, SubAssign,
 };
 use std::{cmp, fmt, mem};
 use yaml_rust2::Yaml;
@@ -758,6 +756,7 @@ impl<'h> Neg for Amount<'h> {
     }
 }
 
+/*
 /// An arithmetic expression of `Amounts`.
 /// These are parsed from the journal files and stored so that they can be rewritten later.
 #[derive(Clone)]
@@ -785,10 +784,6 @@ impl<'h> AmountExpr<'h> {
 
     pub fn with_pretext(&self, pretext: &'h str) -> AmountExpr<'h> {
         AmountExpr::new(self.amount, pretext, self.parsed)
-    }
-
-    pub fn parsed_expression(&self) -> Option<&str> {
-        self.parsed.as_ref().map(|p| p.borrow())
     }
 
     /// Once the amount is changed, it can no longer be written back as the expression it was. It will be an expression
@@ -826,12 +821,6 @@ impl<'h> AmountExpr<'h> {
     }
 }
 
-impl fmt::Display for AmountExpr<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.write(f, false)
-    }
-}
-
 impl fmt::Debug for AmountExpr<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.parsed.as_ref() {
@@ -865,7 +854,7 @@ impl Hash for AmountExpr<'_> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.amount.hash(state);
     }
-}
+}*/
 
 #[cfg(test)]
 mod tests {

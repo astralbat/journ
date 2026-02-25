@@ -63,6 +63,14 @@ impl<'h, X> TextBlockInput<'h, X> {
         }
     }
 
+    pub fn with_extra<X2>(self, extra: X2) -> TextBlockInput<'h, X2> {
+        TextBlockInput {
+            inner: self.inner.map_extra(|_| extra),
+            block: self.block,
+            allocator: self.allocator,
+        }
+    }
+
     pub fn into_extra(self) -> X {
         self.inner.into_fragment_and_extra().1
     }

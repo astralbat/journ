@@ -165,6 +165,7 @@ pub trait StrExt {
     /// Trims the start of the string according to the indented amount from [`Self::indented_amount()`].
     /// Returns `None` if outdenting was not successful.
     fn outdent(&self, outdent_amount: u16) -> Option<&str>;
+    fn outdent_lines(&self) -> Option<String>;
     /// Compares ignoring case for the ascii characters. Non-ascii characters are compared without
     /// any conversion.
     fn cmp_ignore_case_ascii(&self, b: &str) -> Ordering;
@@ -306,6 +307,15 @@ impl StrExt for str {
         Some("")
     }
 
+    fn outdent_lines(&self) -> Option<String> {
+        let base_indent_amount = self[0..self.len() - self.trim_start().len()].indented_amount();
+        let mut outdented_expression = vec![];
+        for line in self.lines() {
+            outdented_expression.push(line.outdent(base_indent_amount)?);
+        }
+        Some(outdented_expression.join("\n"))
+    }
+
     fn cmp_ignore_case_ascii(&self, b: &str) -> Ordering {
         self.bytes()
             .zip_longest(b.bytes())
@@ -356,6 +366,11 @@ impl StrExt for String {
     fn outdent(&self, outdent_amount: u16) -> Option<&str> {
         self.as_str().outdent(outdent_amount)
     }
+
+    fn outdent_lines(&self) -> Option<String> {
+        self.as_str().outdent_lines()
+    }
+
     fn cmp_ignore_case_ascii(&self, b: &str) -> Ordering {
         self.as_str().cmp_ignore_case_ascii(b)
     }

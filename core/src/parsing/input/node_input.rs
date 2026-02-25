@@ -8,14 +8,15 @@
 use crate::parsing::input::TextBlockInput;
 use crate::parsing::parser::JournalParseNode;
 
-pub trait NodeInput<'h, 's, 'e, 'p> {
-    fn parse_node(&self) -> &'p JournalParseNode<'h, 's, 'e>;
+pub trait NodeInput<'h, 's, 'p> {
+    fn parse_node(&self) -> &'p JournalParseNode<'h, 's>;
 }
 
-impl<'h, 's, 'e, 'p> NodeInput<'h, 's, 'e, 'p>
-    for TextBlockInput<'h, &'p JournalParseNode<'h, 's, 'e>>
+impl<'h, 's, 'e, 'p> NodeInput<'h, 's, 'p> for TextBlockInput<'h, &'p JournalParseNode<'h, 's>>
+where
+    's: 'p,
 {
-    fn parse_node(&self) -> &'p JournalParseNode<'h, 's, 'e> {
+    fn parse_node(&self) -> &'p JournalParseNode<'h, 's> {
         self.inner.extra
     }
 }

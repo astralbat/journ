@@ -15,6 +15,7 @@ use crate::parsing::text_block::TextBlock;
 use crate::parsing::util::interim_space;
 use crate::python::environment::PythonEnvironment;
 use crate::{err, parsing};
+use nom::{IResult, Parser};
 use nom_locate::LocatedSpan;
 use std::cell::RefCell;
 use std::path::Path;
@@ -36,7 +37,7 @@ type ParseOperation<'h, 's> = Box<dyn ParseFunc<'h> + 's>;
 /// The main idea here is that this node stays on a single thread and does not require
 /// synchronisation.
 #[derive(Debug)]
-pub struct JournalParseNode<'h, 's, 'e> {
+pub struct JournalParseNode<'h, 's> {
     /// The ongoing segments being parsed for the current node. The last segment is the current one.
     /// The list is never empty.
     segments: RefCell<Vec<&'h JournalNodeSegment<'h>>>,
@@ -44,18 +45,17 @@ pub struct JournalParseNode<'h, 's, 'e> {
     input: TextBlockInput<'h, ()>,
     configuration: Rc<RefCell<Configuration<'h>>>,
     children: Mutex<Vec<ParseOperation<'h, 's>>>,
-    parent_scope: &'s Scope<'s, 'e>,
+    scope: &'s Scope<'s, 'h>,
     allocator: &'h HerdAllocator<'h>,
 }
-impl<'h, 's, 'e> JournalParseNode<'h, 's, 'e>
+impl<'h, 's> JournalParseNode<'h, 's>
 where
-    'h: 'e,
-    'e: 's,
+    'h: 's,
 {
     pub fn new_root(
         node: &'h JournalNode<'h>,
         configuration: Configuration<'h>,
-        parent_scope: &'s Scope<'s, 'e>,
+        scope: &'s Scope<'s, 'h>,
     ) -> Self {
         let allocator = configuration.allocator();
         JournalParseNode {
@@ -68,7 +68,7 @@ where
             node,
             configuration: Rc::new(RefCell::new(configuration)),
             children: Mutex::new(vec![]),
-            parent_scope,
+            scope,
             allocator,
         }
     }
@@ -85,7 +85,28 @@ where
         self.allocator
     }
 
-    pub fn parse(self) -> JournResult<&'h JournalNode<'h>> {
+    pub fn input<'a>(&'a self) -> TextBlockInput<'h, &'a JournalParseNode<'h, 's>> {
+        self.input.with_extra(self)
+    }
+
+    #[cfg(test)]
+    pub fn parse_fn<'p, F, O, E>(
+        &'p self,
+        mut func: F,
+    ) -> IResult<&'h str, (Configuration<'h>, O), E>
+    where
+        F: Parser<TextBlockInput<'h, &'p Self>, O, E>,
+        'h: 's,
+        's: 'p,
+    {
+        func.parse(self.input.with_extra(self))
+            .map(move |(rem, out)| (*rem.fragment(), (self.config().borrow().clone(), out)))
+    }
+
+    pub fn parse(self) -> JournResult<&'h JournalNode<'h>>
+    where
+        'h: 's,
+    {
         let mut parse_errors = vec![];
         let time = std::time::Instant::now();
 
@@ -113,7 +134,7 @@ where
                 }
                 self.node.set_segments(self.segments.take());
             }
-            _ => match parsing::directive::directives(self.input.map_extra(|_| &self)) {
+            _ => match parsing::directive::directives(self.input.with_extra(&self)) {
                 Ok(segment_dirs) => {
                     let segments = self.segments.take();
                     for (segment, dirs) in segments.iter().copied().zip(segment_dirs) {
@@ -196,14 +217,14 @@ where
                 let child_clone = child;
                 let branched_to_segment = self.branch_to_new_segment(child);
 
-                thread::scope(move |scope| {
+                thread::scope(|scope| {
                     let jfp_node = JournalParseNode {
                         segments: RefCell::new(vec![branched_to_segment]),
                         input: child.input(),
                         node: child,
                         configuration: Rc::clone(&self.configuration),
                         children: Mutex::new(vec![]),
-                        parent_scope: scope,
+                        scope,
                         allocator: self.allocator(),
                     };
                     jfp_node.parse()?;
@@ -216,7 +237,7 @@ where
         }
     }
 
-    pub fn branch_kind<I>(
+    pub fn branch_kind<'e, I>(
         &self,
         input: I,
         path: Option<&'h Path>,
@@ -240,7 +261,7 @@ where
                     t_builder = t_builder.name(filename.to_str().unwrap().to_string());
                 }
                 let join_handle = t_builder
-                    .spawn_scoped(self.parent_scope, move || {
+                    .spawn_scoped(self.scope, move || {
                         thread::scope(|scope| {
                             let jfp_node = JournalParseNode {
                                 segments: RefCell::new(vec![branched_to_segment]),
@@ -248,7 +269,7 @@ where
                                 node: child,
                                 configuration: Rc::new(RefCell::new(child_config)),
                                 children: Mutex::new(vec![]),
-                                parent_scope: scope,
+                                scope,
                                 allocator,
                             };
                             jfp_node.parse()
@@ -344,7 +365,7 @@ where
     }
 }
 
-impl PartialEq for JournalParseNode<'_, '_, '_> {
+impl PartialEq for JournalParseNode<'_, '_> {
     fn eq(&self, other: &Self) -> bool {
         self.node == other.node
     }

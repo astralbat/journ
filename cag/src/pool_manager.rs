@@ -9,9 +9,10 @@ use crate::adjustment::Adjustment;
 use crate::cgt_configuration::{CagConfiguration, MatchMethod};
 use crate::deal::DealId;
 use crate::deal_group::DealGroup;
+use crate::deal_holding::DealHolding;
 use crate::module_init::MODULE_NAME;
-use crate::pool::Pool;
-use crate::pool_event::PoolEvent;
+use crate::pool::{Pool, PoolBalance};
+use crate::pool_event::{PoolEvent, PoolEventKind};
 use crate::ruleset::{ActionRule, AgeUnit, Condition, Rule};
 use chrono::{LocalResult, TimeZone};
 use journ_core::alloc::HerdAllocator;
@@ -22,6 +23,7 @@ use journ_core::error::{BlockContextError, JournError, JournResult};
 use journ_core::journal_entry::JournalEntry;
 use journ_core::parsing::text_block::TextBlock;
 use journ_core::unit::Unit;
+use log::debug;
 use std::collections::HashMap;
 
 pub struct PoolManager<'h> {
@@ -105,27 +107,21 @@ impl<'h, 'u> PoolManager<'h> {
                         unit,
                         pool.current_method(unit),
                     ) {
-                        //let bal_before = pool.balance(pse.deal_unit);
+                        let bal_before = pool.balance(pse.deal_unit);
                         if let Some(group) = pool.extract(pse.deal_id, pse.deal_unit) {
-                            /*let pe = PoolEvent::new(
-                                pool.name(),
-                                JDateTimeRange::new(pse.datetime, None),
-                                PoolEventKind::UnpooledDeal(DealHolding::Group(group.clone())),
-                                bal_before,
-                                pool.balance(pse.deal_unit),
-                            );*/
-                            //debug!("{}", pe);
-                            //pool_events.push(pe);
+                            let bal_after = pool.balance(pse.deal_unit);
                             self.apply_deal_rules(
                                 group,
                                 JDateTimeRange::new(pse.datetime, None),
-                                Some(
+                                Some((
                                     self.pools
                                         .iter()
                                         .find(|p| p.id() == pse.pool_id)
                                         .unwrap()
                                         .name(),
-                                ),
+                                    bal_before,
+                                    bal_after,
+                                )),
                                 &mut pool_events,
                             )?;
                         }
@@ -173,7 +169,7 @@ impl<'h, 'u> PoolManager<'h> {
         &mut self,
         mut group: DealGroup<'h>,
         event_datetime: JDateTimeRange,
-        from_pool: Option<&'h str>,
+        mut from_pool: Option<(&'h str, PoolBalance<'h>, PoolBalance<'h>)>,
         events: &mut Vec<PoolEvent<'h>>,
     ) -> JournResult<()> {
         loop {
@@ -186,8 +182,32 @@ impl<'h, 'u> PoolManager<'h> {
                             pool_name,
                             self.unit_of_account,
                         );
-                        match pool.try_match(group, event_datetime)? {
+                        match pool.try_match(group.clone(), event_datetime)? {
                             Ok((match_events, remainder)) => {
+                                if let Some((from_pool, bal_before, _)) = from_pool.as_mut() {
+                                    let bal_after = match remainder.as_ref() {
+                                        Some(remainder) => {
+                                            &*bal_before - &(group.total() - remainder.total())
+                                        }
+                                        None => &*bal_before - group.total(),
+                                    };
+                                    let pe = PoolEvent::new(
+                                        from_pool,
+                                        event_datetime,
+                                        PoolEventKind::MatchedFrom(
+                                            DealHolding::Group(group.clone()),
+                                            pool_name,
+                                        ),
+                                        bal_before.clone(),
+                                        bal_after.clone(),
+                                    );
+                                    debug!("{}", pe);
+                                    events.push(pe);
+                                    if remainder.is_some() {
+                                        *bal_before = bal_after;
+                                    }
+                                }
+
                                 events.extend(match_events);
                                 match remainder {
                                     Some(rem) => group = rem,
@@ -213,16 +233,39 @@ impl<'h, 'u> PoolManager<'h> {
                         let pool_id = pool.id();
                         let deal_id = group.id();
 
+                        if let Some((from_pool, bal_before, bal_after)) = from_pool.clone() {
+                            let pe = PoolEvent::new(
+                                from_pool,
+                                event_datetime,
+                                PoolEventKind::MovedFrom(
+                                    DealHolding::Group(group.clone()),
+                                    pool_name,
+                                ),
+                                bal_before,
+                                bal_after,
+                            );
+                            debug!("{}", pe);
+                            events.push(pe);
+                        }
+
                         // Stop processing rules when we pool (terminal action).
                         return match until_condition {
                             Condition::False => {
-                                events.push(pool.push(group, event_datetime, from_pool)?);
+                                events.push(pool.push(
+                                    group,
+                                    event_datetime,
+                                    from_pool.as_ref().map(|fp| fp.0),
+                                )?);
                                 Ok(())
                             }
                             Condition::Age(age, age_unit) => {
                                 let datetime = group.datetime();
                                 let deal_unit = group.unit();
-                                events.push(pool.push(group, event_datetime, from_pool)?);
+                                events.push(pool.push(
+                                    group,
+                                    event_datetime,
+                                    from_pool.as_ref().map(|fp| fp.0),
+                                )?);
 
                                 let future_date = match age_unit {
                                     AgeUnit::Days => {

@@ -726,7 +726,7 @@ macro_rules! parse_block1 {
         std::thread::scope(|scope| {
             use $crate::config;
             use $crate::parse_node;
-            use $crate::parsing::text_block::{NodeReader, TextBlock};
+            use $crate::parsing::text_block::TextBlock;
 
             // Function to map lifetimes of input func to TextBlockInput's.
             fn higher_func<'h, 's, 'e, 'p, F, O>(

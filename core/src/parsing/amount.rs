@@ -5,7 +5,7 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
-use crate::amount::{Amount, AmountExpr};
+use crate::amount::Amount;
 use crate::error::parsing::{IErrorMsg, IParseError, tag_err};
 use crate::ext::StrExt;
 use crate::parsing::input::{ConfigInput, TextInput};
@@ -368,19 +368,15 @@ where
     })(input)
 }
 
-pub fn amount_expr<'h, I>(input: I) -> IParseResult<'h, I, AmountExpr<'h>>
+pub fn amount_expr<'h, I>(input: I) -> IParseResult<'h, I, Amount<'h>>
 where
     I: TextInput<'h> + ConfigInput<'h>,
 {
     map(
         consumed(tag_err(IErrorMsg::UNIT, verify(amount_expr_inner::<I>, |out| out.0.0.is_some()))),
         |(cons, ((unit, quantity), _))| {
-            let (consumed, preceding_space) = space0::<_, ()>(cons).unwrap();
-            AmountExpr::new(
-                Amount::new(unit.unwrap(), quantity),
-                preceding_space.text(),
-                Some(consumed.text()),
-            )
+            let (_consumed, _preceding_space) = space0::<_, ()>(cons).unwrap();
+            Amount::new(unit.unwrap(), quantity)
         },
     )(input)
 }
@@ -399,11 +395,12 @@ impl<'h> Sum<Amount<'h>> for Option<Amount<'h>> {
 mod tests {
     use crate::parsing::amount::*;
     use crate::parsing::util::str_res;
+    use crate::unit::RoundingStrategy;
     use crate::*;
 
     #[test]
     fn test_unit() {
-        let unit = |s: &'static str| parse!(s, unit).map(str_res);
+        let unit = |s: &'static str| parse!(s, unit).map(str_res).map_err(|e| e.to_string());
 
         assert_eq!(unit("USD"), Ok(("", "USD")));
         assert_eq!(unit(" USD"), Ok(("", "USD")));
@@ -414,8 +411,8 @@ mod tests {
         assert_eq!(unit("€"), Ok(("", "€")));
         assert_eq!(unit("\"123\""), Ok(("", "123")));
         assert_eq!(unit("\"123\"\"abc\""), Ok(("", "123\"\"abc")));
-        assert_eq!(unit("1"), Err(util::E_SURR_QUOTE));
-        assert_eq!(unit("\"123"), Err(util::E_SURR_QUOTE));
+        assert_eq!(unit("1"), Err(util::E_SURR_QUOTE.to_string()));
+        assert_eq!(unit("\"123"), Err(util::E_SURR_QUOTE.to_string()));
     }
 
     #[test]
@@ -430,13 +427,20 @@ mod tests {
         assert_eq!(amount("1.1 Kg Gold"), Ok(("", Amount::new(unit!("Kg Gold"), dec!(1.1)))));
         assert_eq!(amount("10 GBP 1"), Ok((" 1", Amount::new(unit!("GBP"), dec!(10)))));
         assert_eq!(amount("GBP 10 "), Ok((" ", Amount::new(unit!("GBP"), dec!(10)))));
+        assert_eq!(
+            amount("0.000000000000001 GBP").map(|a| a.1.to_string()),
+            Ok("0.000000000000001 GBP".to_string()),
+            "small amounts are stable"
+        )
     }
 
     #[test]
     fn test_formatting() {
         let format = |s: &'static str, amount: Amount| match parse!(s, unit_format(true)) {
-            Ok((_, f)) => Ok(f.format(amount)),
-            Err(e) => Err(e),
+            Ok((_, f)) => Ok(f
+                .format(amount.quantity(), amount.unit().code(), RoundingStrategy::HalfEven)
+                .to_string()),
+            Err(e) => Err(e.to_string()),
         };
 
         // Padding
@@ -455,12 +459,12 @@ mod tests {
         assert_eq!(format("$1.#", amount!("$1.5")), Ok("$1.5".to_string()));
 
         // Bad format
-        assert_eq!(format("1 1A", amount!("1A")), Err(util::E_SURR_QUOTE));
+        assert_eq!(format("1 1A", amount!("1A")), Err(util::E_SURR_QUOTE.to_string()));
     }
 
     #[test]
     fn test_amount_expression() {
-        let expr = |s: &'static str| parse!(s, (map(amount_expr, |e| e.amount())));
+        let expr = |s: &'static str| parse!(s, amount_expr);
 
         assert_eq!(expr("$10 --10"), Ok(("", amount!("$20"))));
         assert_eq!(expr("$10 ---10"), Ok((" ---10", amount!("$10"))));

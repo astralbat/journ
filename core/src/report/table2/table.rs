@@ -8,7 +8,8 @@
 use crate::report::table2::fmt::RowFormatter;
 use crate::report::table2::fmt::TableCellFormatter;
 use crate::report::table2::row::Row;
-use crate::report::table2::{CellRef, SeparatorCell, SpannedCell};
+use crate::report::table2::{CellRef, SeparatorCell, SpannedCell, StyledCell};
+use crate::report::term_style::{Style, Weight};
 use std::fmt;
 
 pub struct Table<'cell> {
@@ -34,26 +35,25 @@ impl<'cell> Table<'cell> {
         self.push_row(row);
     }
 
-    pub fn append_chain_separator<C: Into<CellRef<'cell>>>(&mut self, title: Option<C>) {
-        match title {
-            Some(title) => {
-                self.push_separator_row('-', self.column_count());
-                let mut row: Row<'cell> = Row::default();
-                let spanned = SpannedCell::new(title, self.column_count());
-                row.append(spanned);
-                self.push_row(row);
-                self.push_separator_row('-', self.column_count());
-            }
-            None => self.push_separator_row('-', self.column_count()),
-        }
+    pub fn append_chain_separator(&mut self) {
+        self.push_separator_row('-', self.column_count())
+    }
+
+    pub fn append_title_row<C: Into<CellRef<'cell>>>(&mut self, title: C, column_count: usize) {
+        let mut row: Row<'cell> = Row::default();
+        let style = Style::default().with_weight(Weight::Bold);
+        let spanned = SpannedCell::new(StyledCell::new(title, style), column_count);
+        row.append(spanned);
+        self.push_row(row);
+        self.push_separator_row('-', column_count);
     }
 
     pub fn push_separator_row(&mut self, separator: char, span: usize) {
-        self.push_row(Row::new([Box::new(SeparatorCell::new(separator, span))]));
+        self.push_row(Row::new([Box::new(SeparatorCell::new(separator, span.max(1)))]));
     }
 
     pub fn column_count(&self) -> usize {
-        self.rows.get(0).map(|r| r.cells.len()).unwrap_or(0)
+        self.rows.get(0).map(|r| r.column_count()).unwrap_or(0)
     }
 
     pub fn rows(&self) -> &[Row<'cell>] {

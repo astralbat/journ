@@ -53,6 +53,15 @@ pub struct BalArguments {
         default_value = "account"
     )]
     group_by: String,
+    #[arg(
+        long = "order-by",
+        value_delimiter = ',',
+        value_name = "ORDER_BY",
+        help = "Order the output by the specified column(s)"
+    )]
+    order_by: Option<String>,
+    #[arg(long = "descending")]
+    order_descending: bool,
 }
 
 impl IntoExecCommand for BalArguments {
@@ -78,6 +87,8 @@ impl IntoExecCommand for BalArguments {
             no_header: self.no_header,
             no_total: self.no_total,
             show_zeros: self.show_zeros,
+            order_by_spec: self.order_by,
+            order_ascending: !self.order_descending,
             group_by: self.group_by,
         };
         Ok(bal_cmd)

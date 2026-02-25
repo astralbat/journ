@@ -11,7 +11,6 @@ use crate::deal_group::DealGroup;
 use crate::deal_holding::DealHolding;
 use crate::pool::PoolBalance;
 use crate::pool_event::{MatchDetails, PoolEvent, PoolEventKind};
-use itertools::Itertools;
 use journ_core::configuration::Configuration;
 use journ_core::datetime::JDateTime;
 use journ_core::error::JournResult;
@@ -82,11 +81,12 @@ where
         let res = eval_identifier!(identifier, EventObj<'h, 'e>,
             "eventDate" => Value(ColumnValue::DatetimeRange(self.event.event_datetime())),
             "dealDate" => Value(ColumnValue::DatetimeRange(self.event.deal_datetime())),
-            "description" => Value(ColumnValue::String(self.event.description().iter().join(",").into())),
+            "description" => Value(ColumnValue::Description(self.event.description())),
             "unit" => Value(ColumnValue::Unit(self.event.unit())),
             "amount" => {
                 Value(ColumnValue::Amount(self.event.balance_after().amount() - self.event.balance_before().amount()))
             },
+            "balance" => Value(self.variables().get("balance").cloned().unwrap()),
             "cost" => {
                 Value(ColumnValue::Amount(self.event.balance_after().cost() - self.event.balance_before().cost()))
             },
@@ -122,14 +122,16 @@ where
             "type" => {
                 match self.event.kind() {
                     PoolEventKind::PooledDeal(_) => Value(ColumnValue::String("Pooled".into())),
-                    PoolEventKind::MovedDeal(_, _) => Value(ColumnValue::String("Moved".into())),
+                    PoolEventKind::MovedFrom(_, _) => Value(ColumnValue::String("MovedFrom".into())),
+                    PoolEventKind::MatchedFrom(..) => Value(ColumnValue::String("MatchedFrom".into())),
+                    PoolEventKind::MovedTo(_, _) => Value(ColumnValue::String("MovedTo".into())),
                     PoolEventKind::Match(_) => Value(ColumnValue::String("Matched".into())),
                     PoolEventKind::Adjustment(_) => Value(ColumnValue::String("Adjusted".into()))
                 }
             },
             "pooled" => {
                 match self.event.kind() {
-                    PoolEventKind::PooledDeal(dh) | PoolEventKind::MovedDeal(dh, _) => DealHolding(dh),
+                    PoolEventKind::PooledDeal(dh) | PoolEventKind::MovedTo(dh, _) => DealHolding(dh),
                     _ => Value(ColumnValue::Undefined)
                 }
             },

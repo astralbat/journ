@@ -123,7 +123,7 @@ impl fmt::Display for Expr<'_> {
             LogicalOp { left, op, right } => {
                 write!(f, "({} {} {})", left, op, right)
             }
-            Literal(lit) => write!(f, "\"{}\"", lit),
+            Literal(lit) => write!(f, "{lit}"),
             Identifier(name) => write!(f, "{}", name),
             Number(num) => write!(f, "{}", num),
             Aliased(_inner, alias) => write!(f, "{}", alias),

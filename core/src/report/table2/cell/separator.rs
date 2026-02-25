@@ -16,6 +16,8 @@ pub struct SeparatorCell {
 }
 impl SeparatorCell {
     pub fn new(padding_char: char, span: usize) -> Self {
+        assert!(span > 0, "span must be greater than 0");
+
         Self { padding_char, span }
     }
 }

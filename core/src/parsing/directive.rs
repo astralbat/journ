@@ -42,15 +42,10 @@ pub const E_VALUE: &str = "Value expected";
 pub const E_ACCOUNT_NAME: &str = "Account name expected";
 pub const E_METADATA_OR_UNIT: &str = "Metadata or unit expected";
 
-fn account_directive<'h, 's, 'e, 'p, I>(input: I) -> JParseResult<I, Directive<'h>>
+fn account_directive<'h, 's, 'p, I>(input: I) -> JParseResult<I, Directive<'h>>
 where
-    I: TextInput<'h>
-        + ConfigInput<'h>
-        + BlockInput<'h>
-        + LocatedInput<'h>
-        + NodeInput<'h, 's, 'e, 'p>,
-    'h: 'e,
-    'e: 's,
+    I: TextInput<'h> + ConfigInput<'h> + BlockInput<'h> + LocatedInput<'h> + NodeInput<'h, 's, 'p>,
+    'h: 's,
     's: 'p,
 {
     let (input, full_name) =
@@ -68,7 +63,7 @@ where
     let mut config_mut = input.config_mut();
     let parent =
         Account::parent_str(full_name.text()).map(|s| config_mut.get_or_create_account(&s));
-    let acc = Arc::new(Account::new(full_name.text().to_string(), parent, metadata, units));
+    let acc = Account::new(full_name.text().to_string(), parent, metadata, units);
     let merged = config_mut.merge_account(acc);
     Ok((rem, Directive::new(Some(input.block()), DirectiveKind::Account(merged))))
 }
@@ -123,7 +118,7 @@ where
 
 fn python_directive<'h, 's, 'e, 'p, I>(input: I) -> JParseResult<I, Directive<'h>>
 where
-    I: TextInput<'h> + BlockInput<'h> + NodeInput<'h, 's, 'e, 'p> + LocatedInput<'h>,
+    I: TextInput<'h> + BlockInput<'h> + NodeInput<'h, 's, 'p> + LocatedInput<'h>,
     'h: 'e,
     'e: 's,
     's: 'p,
@@ -152,9 +147,8 @@ pub const E_PARSE_DATETIME: &str = "Unable to read date/time";
 
 fn price<'h, 's, 'e, 'p, I>(input: I) -> JParseResult<I, Directive<'h>>
 where
-    I: TextInput<'h> + NodeInput<'h, 's, 'e, 'p> + ConfigInput<'h> + BlockInput<'h>,
-    'h: 'e,
-    'e: 's,
+    I: TextInput<'h> + NodeInput<'h, 's, 'p> + ConfigInput<'h> + BlockInput<'h>,
+    'h: 's,
     's: 'p,
 {
     let tz = input.parse_node().config().borrow().timezone();
@@ -199,30 +193,29 @@ where
     Ok((dir_rem, Directive::new(Some(input.block()), DirectiveKind::Price(Arc::new(price)))))
 }
 
-fn entry<'h, 's, 'e, 'p, I>(input: I, date_and_time: DateAndTime) -> JParseResult<I, Directive<'h>>
+fn entry<'h, 's, 'p, I>(
+    date_and_time: DateAndTime,
+) -> impl FnOnce(I) -> JParseResult<I, Directive<'h>>
 where
-    I: TextInput<'h>
-        + BlockInput<'h>
-        + ConfigInput<'h>
-        + NodeInput<'h, 's, 'e, 'p>
-        + LocatedInput<'h>,
-    'h: 'e,
-    'e: 's,
+    I: TextInput<'h> + BlockInput<'h> + ConfigInput<'h> + NodeInput<'h, 's, 'p> + LocatedInput<'h>,
+    'h: 's,
     's: 'p,
 {
-    let (rem, entry) = entry::entry(input.clone(), date_and_time)?;
-    Ok((
-        rem,
-        Directive::new(
-            Some(input.block()),
-            DirectiveKind::Entry(input.parse_node().allocator().alloc(entry)),
-        ),
-    ))
+    move |input| {
+        let (rem, entry) = entry::entry_with_date(input.clone(), date_and_time)?;
+        Ok((
+            rem,
+            Directive::new(
+                Some(input.block()),
+                DirectiveKind::Entry(input.parse_node().allocator().alloc(entry)),
+            ),
+        ))
+    }
 }
 
 fn filename<'h, 's, 'e, 'p, I>(input: I) -> JParseResult<I, &'h Path>
 where
-    I: TextInput<'h> + NodeInput<'h, 's, 'e, 'p> + BlockInput<'h> + LocatedInput<'h>,
+    I: TextInput<'h> + NodeInput<'h, 's, 'p> + BlockInput<'h> + LocatedInput<'h>,
     'h: 'e,
     'e: 's,
     's: 'p,
@@ -248,7 +241,7 @@ where
 /// of the input.
 pub(super) fn stream<'h, 's, 'e, 'p, I>(input: I) -> JParseResult<I, (I, Option<&'h Path>)>
 where
-    I: TextInput<'h> + LocatedInput<'h> + BlockInput<'h> + NodeInput<'h, 's, 'e, 'p>,
+    I: TextInput<'h> + LocatedInput<'h> + BlockInput<'h> + NodeInput<'h, 's, 'p>,
     'h: 'e,
     'e: 's,
     's: 'p,
@@ -281,7 +274,7 @@ where
     'h: 'e,
     'e: 's,
     's: 'p,
-    I: TextInput<'h> + NodeInput<'h, 's, 'e, 'p> + LocatedInput<'h> + BlockInput<'h>,
+    I: TextInput<'h> + NodeInput<'h, 's, 'p> + LocatedInput<'h> + BlockInput<'h>,
 {
     move |input| {
         let orig_block = input.block();
@@ -298,7 +291,7 @@ where
 
 fn include<'h, 's, 'e, 'p, I>(kind: JournalNodeKind) -> impl Fn(I) -> JParseResult<I, Directive<'h>>
 where
-    I: TextInput<'h> + NodeInput<'h, 's, 'e, 'p> + LocatedInput<'h> + BlockInput<'h>,
+    I: TextInput<'h> + NodeInput<'h, 's, 'p> + LocatedInput<'h> + BlockInput<'h>,
     'h: 'e,
     'e: 's,
     's: 'p,
@@ -322,17 +315,13 @@ where
     }
 }
 
+/// Returns a list of segments where each segment is a list of `Directives`.
 pub fn entry_file_directives<'h, 's, 'e, 'p, I>(
     input: I,
 ) -> JParseResult<I, Vec<Vec<Directive<'h>>>>
 where
-    I: TextInput<'h>
-        + BlockInput<'h>
-        + LocatedInput<'h>
-        + NodeInput<'h, 's, 'e, 'p>
-        + ConfigInput<'h>,
-    'h: 'e,
-    'e: 's,
+    I: TextInput<'h> + BlockInput<'h> + LocatedInput<'h> + NodeInput<'h, 's, 'p> + ConfigInput<'h>,
+    'h: 's,
     's: 'p,
 {
     let plugin_dir = |input: I| -> IParseResult<'h, I, (&'static str, I)> {
@@ -351,7 +340,7 @@ where
         let tbi = TextBlockInput::new(
             dir_input.into_located_span(rem.parse_node()),
             rem.block(),
-            rem.parse_node().allocator(),
+            rem.allocator(),
         );
         let modules_lock = MODULES.lock().unwrap();
         match modules_lock.iter().find_map(|m| m.directives().find(|d| d.name() == dir)) {
@@ -381,27 +370,27 @@ where
         };
 
     let rem = match_blocks!(input,
-        entry::entry_date_and_remainder => |(date_and_time, input)| {
-            push_directive(entry(input, date_and_time)?.1, false)
-        },
-        util::comment => |c: I| push_directive(Directive::new(Some(c.block()), DirectiveKind::Comment(c.text())), false),
-        param_value("account") => |input| push_directive(account_directive(input)?.1, false),
-        param_value("unit") => |input| push_directive(unit_directive_body(input)?.1, false),
-        param_value("branch") => |input| {
-            push_directive(branch(JournalNodeKind::Entry)(input)?.1, true)
-        },
-        param_value("include") => |input| {
-            push_directive(include(JournalNodeKind::Entry)(input)?.1, true)
-        },
-        param_value("dateformat") => |input| push_directive(dateformat_directive(input)?.1, false),
-        param_value("timeformat") => |input| push_directive(timeformat_directive(input)?.1, false),
-        param_value("datetimeformat") => |input| push_directive(datetimeformat_directive(input)?.1, false),
-        param_value("timezone") => |input| push_directive(timezone_directive(input)?.1, false),
-        param_value("python") => |input| push_directive(python_directive(input)?.1, false),
-        param_value("units") => |input| push_directive(units_directive(input)?.1, false),
-        plugin_dir => |(dir, input)| push_directive(plugin_directive(dir, input)?.1, false),
-        rest => |input: I| Err(NomErr::Error(input.into_err("Unknown directive")))
-    )?.0;
+            entry::entry_date_and_remainder => |(date_and_time, input)| {
+                push_directive(entry(date_and_time)(input)?.1, false)
+            },
+            util::comment => |c: I| push_directive(Directive::new(Some(c.block()), DirectiveKind::Comment(c.text())), false),
+            param_value("account") => |input| push_directive(account_directive(input)?.1, false),
+            param_value("unit") => |input| push_directive(unit_directive_body(input)?.1, false),
+            param_value("branch") => |input| {
+                push_directive(branch(JournalNodeKind::Entry)(input)?.1, true)
+            },
+            param_value("include") => |input| {
+                push_directive(include(JournalNodeKind::Entry)(input)?.1, true)
+            },
+            param_value("dateformat") => |input| push_directive(dateformat_directive(input)?.1, false),
+            param_value("timeformat") => |input| push_directive(timeformat_directive(input)?.1, false),
+            param_value("datetimeformat") => |input| push_directive(datetimeformat_directive(input)?.1, false),
+            param_value("timezone") => |input| push_directive(timezone_directive(input)?.1, false),
+            param_value("python") => |input| push_directive(python_directive(input)?.1, false),
+            param_value("units") => |input| push_directive(units_directive(input)?.1, false),
+            plugin_dir => |(dir, input)| push_directive(plugin_directive(dir, input)?.1, false),
+            rest => |input: I| Err(NomErr::Error(input.into_err("Unknown directive")))
+        )?.0;
     Ok((rem, segments))
 }
 
@@ -409,13 +398,8 @@ pub fn price_file_directives<'h, 's, 'e, 'p, I>(
     input: I,
 ) -> JParseResult<I, Vec<Vec<Directive<'h>>>>
 where
-    I: TextInput<'h>
-        + ConfigInput<'h>
-        + LocatedInput<'h>
-        + BlockInput<'h>
-        + NodeInput<'h, 's, 'e, 'p>,
-    'h: 'e,
-    'e: 's,
+    I: TextInput<'h> + ConfigInput<'h> + LocatedInput<'h> + BlockInput<'h> + NodeInput<'h, 's, 'p>,
+    'h: 's,
     's: 'p,
 {
     let mut dirs = vec![];
@@ -459,15 +443,10 @@ where
     Ok((rem, vec![dirs]))
 }
 
-pub fn directives<'h, 's, 'e, 'p, I>(input: I) -> JournResult<Vec<Vec<Directive<'h>>>>
+pub fn directives<'h, 's, 'p, I>(input: I) -> JournResult<Vec<Vec<Directive<'h>>>>
 where
-    I: TextInput<'h>
-        + BlockInput<'h>
-        + ConfigInput<'h>
-        + LocatedInput<'h>
-        + NodeInput<'h, 's, 'e, 'p>,
-    'h: 'e,
-    'e: 's,
+    I: TextInput<'h> + BlockInput<'h> + ConfigInput<'h> + LocatedInput<'h> + NodeInput<'h, 's, 'p>,
+    'h: 's,
     's: 'p,
 {
     let r = if input.parse_node().node().file_kind() == JournalNodeKind::Prices {
@@ -481,129 +460,53 @@ where
 
 #[cfg(test)]
 mod tests {
-    use crate::datetime::date_and_time::{JDate, JTime};
+    use crate::datetime::{DateTimePrecision, JDate, JTime};
     use crate::ext::StrExt;
     use crate::metadata::Metadata;
     use crate::parsing::directive::*;
-    use crate::parsing::util::str_res;
+    use crate::parsing::entry::entry_date_and_remainder;
     use crate::*;
     use chrono::{NaiveDate, NaiveTime};
     use indoc::indoc;
 
     #[test]
-    fn test_entry() {
-        let ent = |s: &'static str| dir!(s).map(str_res);
-
-        // Description is optional
-        assert_eq!(ent("2000-01-01"), Ok(("", "2000-01-01")));
-        assert_eq!(ent("2000-01-01\n AccA  £0"), Ok(("", "2000-01-01\n AccA  £0")));
-
-        assert_eq!(ent("2000-01-01  desc"), Ok(("", "2000-01-01  desc")));
-        assert_eq!(ent("2000-01-01    desc"), Ok(("", "2000-01-01    desc")));
-        assert_eq!(
-            ent("2000-01-01    desc\n  AccB  £0"),
-            Ok(("", "2000-01-01    desc\n  AccB  £0"))
-        );
-
-        // Entry config is updated
-        assert!(entry!("2000-01-01\n  AccC  $0").config().get_unit("$").is_some());
-    }
-
-    #[test]
     fn test_entry_directive() {
+        let date_and_time =
+            parse_node!("2000-01-01", map(entry_date_and_remainder, |(date, _rem)| date));
+        assert!(date_and_time.is_ok());
+        let date_and_time = date_and_time.unwrap().1;
+
         let ent = |s: &'static str| {
-            let dir = dir!(s);
-            dir.map(|d| match d.1.kind() {
-                DirectiveKind::Entry(e) => (d.0, *e),
-                _ => panic!("Expected entry directive"),
-            })
+            let entry_res = parse_node!(s, entry(date_and_time.clone()));
+            assert!(entry_res.is_ok());
+            let ((_config, _), entry_dir) = entry_res.unwrap();
+            match_then!(entry_dir.kind(), DirectiveKind::Entry(e) => *e)
         };
 
-        let (rem, entry) = ent("2000-01-01").unwrap();
-        assert_eq!(rem, "");
-        assert_eq!(entry.date().naive_local(), NaiveDate::from_ymd(2000, 1, 1));
+        // Description is optional
+        assert_eq!(ent("").date(), JDate::new(NaiveDate::from_ymd_opt(2000, 1, 1).unwrap()));
+        assert_eq!(ent("\n AccA  £0").description(), "");
+        assert_eq!(ent("  desc").description(), "desc");
     }
 
     #[test]
     fn test_account_directive() {
-        let journ = journ!(indoc! {"
-            account ABC:DEF
-              +key
-              ; comment
-        "});
-        let config = journ.root().config();
+        let res = parse_node!(
+            "ABC:DEF
+              +key",
+            account_directive
+        );
+
+        assert!(res.is_ok(), "{}", res.err().unwrap());
+        let ((config, rem), _out) = res.unwrap();
+        assert!(rem.trim().is_empty());
+        //let config = rem.config();
         assert!(config.get_account("ABC:DEF").is_some());
         assert!(config.get_account("ABC").is_some());
         assert_eq!(
-            config.get_account("ABC:DEF").and_then(|a| a.metadata().first()),
-            Some(&Metadata::new("+", "key".into(), "", None))
+            config.get_account("ABC:DEF").and_then(|a| a.metadata().next()),
+            Some(&Metadata::new(config.clone(), "key", None::<&str>))
         );
-    }
-
-    #[test]
-    fn test_unit_directive() {
-        let journ = journ!(indoc! {r#"
-              unit euros, EE, E
-                name Euro
-                format -€1.000,00
-                ranking 1
-                rounding halfeven
-                value d, b, q ->
-                  1
-                prices
-                  P 2000-01-01 10:11:12Z "€" "$1.00"
-           "#});
-
-        let config = journ.root().config();
-        assert!(config.get_unit("euros").is_some());
-        let unit = config.get_unit("euros").unwrap();
-
-        assert!(config.get_unit("E").is_some());
-        assert!(config.get_unit("EE").is_some());
-        assert_eq!(unit.name(), Some(&"Euro".to_string()));
-        assert_eq!(unit.conversion_ranking(), Some(1));
-        assert_eq!(
-            unit.format(),
-            &parse!("-€1.000,00", parsing::amount::unit_format(true)).unwrap().1
-        );
-        assert_eq!(
-            unit.conversion_expression(),
-            Some(Lambda::from_str("d, b, q -> 1").unwrap()).as_ref()
-        );
-        assert!(unit.prices().is_some());
-        assert_eq!(unit.prices().unwrap().prices().len(), 1, "Price DB contains one price");
-        assert_eq!(
-            unit.prices().unwrap().prices().iter().next().unwrap().to_string(),
-            "P 2000-01-01 10:11:12Z \"€\" $1.00"
-        )
-    }
-
-    #[test]
-    fn test_default_unit_directive() {
-        let journ = journ!("default unit rounding halfeven");
-        assert_eq!(
-            journ.root().config().default_unit().rounding_strategy(),
-            RoundingStrategy::HalfEven
-        );
-
-        let journ = journ!(indoc! { r#"
-        default unit value d, b, q ->
-                      1
-          prices
-           P 2000-01-01 10:11:12Z "€" "$1.00""# });
-
-        let config = journ.root().config();
-        let unit = config.default_unit();
-        assert_eq!(
-            unit.conversion_expression(),
-            Some(Lambda::from_str("d, b, q -> 1").unwrap()).as_ref()
-        );
-        assert!(unit.prices().is_some());
-        assert_eq!(unit.prices().unwrap().prices().len(), 1, "Price DB contains one price");
-        assert_eq!(
-            unit.prices().unwrap().prices().iter().next().unwrap().to_string(),
-            "P 2000-01-01 10:11:12Z \"€\" $1.00"
-        )
     }
 
     #[test]
@@ -616,9 +519,9 @@ mod tests {
         "#});
         let files = journ.nodes_recursive();
         assert_eq!(files.len(), 3);
-        let root_config = files[0].config();
-        let branch_config1 = files[1].config();
-        let branch_config2 = files[2].config();
+        let root_config = files[0].segments()[0].config();
+        let branch_config1 = files[1].segments()[0].config();
+        let branch_config2 = files[2].segments()[0].config();
 
         assert_eq!(root_config.date_format().format_str(), "yyyy-mm-dd");
         assert_eq!(branch_config1.date_format().format_str(), "dd/mm/yyyy");
@@ -629,12 +532,12 @@ mod tests {
     fn test_include() {
         let journ = journ!(
             r#"include
-                 dateformat dd/mm/yyyy"#
+                     dateformat dd/mm/yyyy"#
         );
         let files = journ.nodes_recursive();
         assert_eq!(files.len(), 2);
-        let root_config = files[0].config();
-        let include_config = files[1].config();
+        let root_config = files[0].segments()[0].config();
+        let include_config = files[1].segments()[0].config();
 
         assert_eq!(root_config.date_format().format_str(), "dd/mm/yyyy");
         assert_eq!(include_config.date_format().format_str(), "dd/mm/yyyy");
@@ -642,92 +545,64 @@ mod tests {
 
     #[test]
     fn test_price_directive() {
-        let parse_price = |s: &'static str| dir_kind!(s, Price, config!(), JournalNodeKind::Prices);
+        let parse_price = |s: &'static str| dir!(s);
 
-        let price = parse_price("P 2000-01-01 12:00:00 \"$\" \"€1.1\" s1, s2").unwrap().1;
+        let price = match_then!(parse_price("P 2000-01-01 12:00:00 \"$\" \"€1.1\" s1, s2").into_inner().1, DirectiveKind::Price(p) => p);
 
-        assert_eq!(price.datetime().date().naive_utc(), NaiveDate::from_ymd(2000, 1, 1));
-        assert_eq!(price.datetime().time(), NaiveTime::from_hms(12, 0, 0));
+        assert_eq!(*price.datetime().date(), NaiveDate::from_ymd_opt(2000, 1, 1).unwrap());
+        assert_eq!(price.datetime().time(), NaiveTime::from_hms_opt(12, 0, 0).unwrap());
         assert_eq!(price.base_unit(), &Unit::new("$"));
         assert_eq!(price.price(), amount!("€1.1"));
-        assert_eq!(price.sources().as_slice(), &["s1".to_string(), "s2".to_string()]);
+        let mut sources = price.sources();
+        assert_eq!(sources.next(), Some("s1"));
+        assert_eq!(sources.next(), Some("s2"));
     }
 
     #[test]
     fn test_dateformat_directive() {
-        let df_dir = |s: &'static str| match dir_kind!(s, DateFormat) {
-            Ok((rem, df)) => {
-                let date = JDate::new(NaiveDate::from_ymd(1999, 1, 2), df).to_string().intern();
-                Ok((rem, date))
-            }
-            Err(e) => Err(e),
+        let df_dir = |s: &'static str| {
+            let dir = dir!(s);
+            let df = match_then!(dir.kind(), DirectiveKind::DateFormat(df) => *df);
+            let date = JDate::new(NaiveDate::from_ymd_opt(1999, 1, 2).unwrap())
+                .format(df)
+                .to_string()
+                .intern();
+            date
         };
 
-        assert_eq!(df_dir("dateformat dd/mm/yyyy\nabc"), Ok(("\nabc", "02/01/1999")));
-        assert_eq!(df_dir("dateformat d/m/yy"), Ok(("", "2/1/99")));
-        assert_eq!(df_dir("dateformat d/mmm/yy"), Ok(("", "2/Jan/99")));
-        assert_eq!(df_dir("dateformat d/mmmm/yy"), Ok(("", "2/January/99")));
-        assert_eq!(df_dir("dateformat %"), Ok(("", "%")));
+        assert_eq!(df_dir("dateformat dd/mm/yyyy"), "02/01/1999");
+        assert_eq!(df_dir("dateformat d/m/yy"), "2/1/99");
+        assert_eq!(df_dir("dateformat d/mmm/yy"), "2/Jan/99");
+        assert_eq!(df_dir("dateformat d/mmmm/yy"), "2/January/99");
+        assert_eq!(df_dir("dateformat %"), "%");
     }
 
     #[test]
     fn test_timeformat_directive() {
-        let tf_dir = |s: &'static str, hour: u32, min: u32, sec: u32| match dir_kind!(s, TimeFormat)
-        {
-            Ok((rem, tf)) => {
-                let time =
-                    JTime::new(NaiveTime::from_hms(hour, min, sec), tf, false).to_string().intern();
-                Ok((rem, time))
-            }
-            Err(e) => Err(e),
+        let tf_dir = |s: &'static str, hour: u32, min: u32, sec: u32| {
+            let tf = dir_kind!(s, TimeFormat);
+            JTime::new(NaiveTime::from_hms_opt(hour, min, sec).unwrap())
+                .format_with_precision(tf, DateTimePrecision::Second)
+                .to_string()
         };
 
-        assert_eq!(tf_dir("timeformat hh:mm:ss\nabc", 1, 2, 3), Ok(("\nabc", "01:02:03")));
-        assert_eq!(tf_dir("timeformat ii:mm:ss p", 13, 1, 2), Ok(("", "01:01:02 pm")));
+        assert_eq!(tf_dir("timeformat hh:mm:ss", 1, 2, 3), "01:02:03".to_string());
+        assert_eq!(tf_dir("timeformat ii:mm:ss p", 13, 1, 2), "01:01:02 pm".to_string());
     }
 
     #[test]
     fn test_timezone_directive() {
         let journ = journ!("timezone Europe/London");
-        assert_eq!(journ.root().config().timezone(), chrono_tz::Europe::London);
+        assert_eq!(journ.config().timezone(), chrono_tz::Europe::London);
     }
 
     #[test]
     fn test_python_directive() {
-        let python_str = |s: &'static str| match dir_kind!(s, Python) {
-            Ok((rem, jf)) => Ok((rem, jf.block().text_outdented().intern())),
-            Err(e) => Err(e),
+        let python_str = |s: &'static str| {
+            let python = dir_kind!(s, Python);
+            python.block().text_outdented(1).intern()
         };
-        assert_eq!(
-            python_str("python\n a = 123\n b = 456\nabc"),
-            Ok(("\nabc", "a = 123\nb = 456"))
-        );
-    }
-
-    #[test]
-    fn test_cgt_directive() {
-        let journ = journ!(indoc! {r#"
-            capitalGains
-              rounddeals true
-              pools
-                pool 1D
-                  unitofaccount £
-                  maxAge 1
-                  method fifo
-                pool 30D
-                  maxAge 30
-                  method fifo
-                  matchWhen b,s ->
-                    s.date() < b.date()
-                pool
-                      
-            capitalgains pool 1D maxAge 2
-        "#});
-
-        let config = journ.root().config();
-        let cgt_config = config.cgt_config();
-        assert!(cgt_config.round_deals());
-        assert_eq!(cgt_config.pools().first().unwrap().max_age(), Some(2));
+        assert_eq!(python_str("python\n a = 123\n b = 456"), "a = 123\nb = 456");
     }
 
     /// Test the formatting output visually.

@@ -12,8 +12,8 @@ use crate::report::expr::column_spec::ColumnSpec;
 use crate::report::expr::{
     ColumnValue, Expr, GroupKey, GroupState, IdentifierContext, LateContext, TotalContext,
 };
-use std::collections::HashMap;
-use std::collections::hash_map::Entry;
+use std::collections::btree_map::Entry;
+use std::collections::{BTreeMap, HashMap};
 
 pub struct Plan<'h> {
     column_spec: ColumnSpec<'h>,
@@ -84,6 +84,7 @@ impl<'h> Plan<'h> {
         }
     }
 
+    /*
     fn validate_expr_is_agg_or_no_identifiers(expr: &Expr) -> bool {
         if matches!(expr, Expr::Identifier(_)) {
             false
@@ -97,7 +98,7 @@ impl<'h> Plan<'h> {
             }
             true
         }
-    }
+    }*/
 
     fn validate_no_nested_aggregates(&self) -> JournResult<()> {
         for expr in self.column_spec.exprs().iter().chain(self.additional.values()) {
@@ -136,14 +137,14 @@ impl<'h> Plan<'h> {
         &self,
         items: impl Iterator<Item = E>,
         mut context_fn: F,
-    ) -> JournResult<(HashMap<GroupKey<'h>, GroupState<'h>>, GroupState<'h>)>
+    ) -> JournResult<(BTreeMap<GroupKey<'h>, GroupState<'h>>, GroupState<'h>)>
     where
         C: IdentifierContext<'h> + 'e,
         F: FnMut(E) -> C,
         E: 'e,
     {
         // Aggregate events into groups
-        let mut groups: HashMap<GroupKey, GroupState> = HashMap::new();
+        let mut groups: BTreeMap<GroupKey, GroupState> = BTreeMap::new();
         let mut total_group = GroupState::try_from(self.column_spec.agg_functions())?;
         for item in items {
             let mut context = context_fn(item);
@@ -312,6 +313,10 @@ pub struct RowData<'h> {
     pub sort_values: Vec<ColumnValue<'h>>,
 }
 impl<'h> RowData<'h> {
+    pub fn column_count(&self) -> usize {
+        self.column_values.len()
+    }
+
     pub fn push_column_value(&mut self, val: ColumnValue<'h>) {
         self.column_values.push(val)
     }

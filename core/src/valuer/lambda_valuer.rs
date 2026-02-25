@@ -8,6 +8,7 @@
 use crate::amount::Amount;
 use crate::configuration::Configuration;
 use crate::datetime::JDateTime;
+use crate::parsing::parse_with_config_mut;
 use crate::price::Price;
 use crate::price_db::PriceDatabase;
 use crate::python::conversion::{DateTimeWrapper, DeferredArg};
@@ -16,8 +17,9 @@ use crate::python::lambda::Lambda;
 use crate::python::mod_ledger::PyPrice;
 use crate::unit::Unit;
 use crate::valuer::{Valuation, ValuationError, ValuationResult, Valuer};
-use crate::{err, parse, parsing};
+use crate::{err, parsing};
 use pyo3::{PyObject, Python};
+use rust_decimal::Decimal;
 use std::sync::Arc;
 
 pub struct LambdaValuer<'h, 'p, 'l> {
@@ -56,12 +58,17 @@ impl<'h, 'p, 'l> LambdaValuer<'h, 'p, 'l> {
                 // String can be an Amount (Unit & Decimal), or just a Decimal. In the latter case, we assume the
                 // quote_unit as the unit.
                 let amount_str = config.allocator().alloc(s).as_str();
-                let price = match parse!(amount_str, parsing::amount::amount, config) {
+                let price = match parse_with_config_mut(amount_str, parsing::amount::amount, config)
+                {
                     Ok((_, amount)) => amount,
                     Err(_) => {
-                        let dec = parse!(amount_str, parsing::amount::parsed_decimal, config)
-                            .map_err(ValuationError::EvalFailure)?
-                            .1;
+                        let dec = parse_with_config_mut(
+                            amount_str,
+                            parsing::amount::parsed_decimal,
+                            config,
+                        )
+                        .map_err(ValuationError::EvalFailure)?
+                        .1;
                         quote_unit.with_quantity(dec)
                     }
                 };
@@ -70,6 +77,13 @@ impl<'h, 'p, 'l> LambdaValuer<'h, 'p, 'l> {
                 Ok(vec![Arc::new(py_price.as_price(py, config).map_err(|e| {
                     ValuationError::EvalFailure(err!(e; "Unable to convert PyPrice"))
                 })?)])
+            } else if let Ok(val) = result.extract::<u128>(py) {
+                Ok(vec![Arc::new(Price::new(
+                    datetime,
+                    base_unit,
+                    quote_unit.with_quantity(Decimal::from(val)),
+                    None,
+                ))])
             } else if let Ok(None) = result.extract::<Option<String>>(py) {
                 Err(ValuationError::Undetermined(err!("None returned")))
             } else {

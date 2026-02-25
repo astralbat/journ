@@ -59,7 +59,7 @@ mod journal_node_segment;
 mod journal_obj;
 pub mod journal_util;
 pub mod module;
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 pub mod test_util;
 pub mod unit;
 pub mod valuer;

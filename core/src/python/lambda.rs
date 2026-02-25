@@ -200,7 +200,7 @@ mod tests {
             a"#,
         )
         .unwrap();
-        l1.run(vec![Box::new(1)], 1).unwrap();
+        l1.eval::<String>(vec![Box::new("abc".to_string())], 1).unwrap();
 
         // No newline after arrow, expression indented from start of parameters.
         let l2 = Lambda::from_str(
@@ -210,6 +210,6 @@ mod tests {
                  a"#,
         )
         .unwrap();
-        l2.run(vec![Box::new(1)], 1).unwrap();
+        l2.eval::<String>(vec![Box::new("abc".to_string())], 1).unwrap();
     }
 }

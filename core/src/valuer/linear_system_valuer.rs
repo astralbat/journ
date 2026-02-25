@@ -138,7 +138,7 @@ impl<'h> LinearSystemValuer<'h> {
             return;
         }
 
-        let mut cols: Vec<usize> = total_amounts
+        let cols: Vec<usize> = total_amounts
             .iter()
             .filter(|a| !a.is_zero())
             .map(|a| self.ensure_has_unit(a.unit()))
@@ -388,7 +388,7 @@ pub struct MatrixResult {
     pub rank: usize,
 }
 
-fn analyze_and_solve(mut a: &mut Vec<Vec<Decimal>>, mut b: &mut Vec<Decimal>) -> MatrixResult {
+fn analyze_and_solve(a: &mut Vec<Vec<Decimal>>, b: &mut Vec<Decimal>) -> MatrixResult {
     if a.is_empty() || a[0].is_empty() {
         return MatrixResult { solution: None, rank: 0 };
     }

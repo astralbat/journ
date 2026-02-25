@@ -6,7 +6,7 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::module_init::MODULE_NAME;
-use crate::pool_event::{AggregatedPoolEvent, PoolEvent, PoolEventKind};
+use crate::pool_event::{PoolEvent, PoolEventKind};
 use crate::ruleset::{ActionRule, Rule, RuleSet};
 use chrono::{DateTime, Duration};
 use chrono_tz::Tz;
@@ -24,7 +24,7 @@ use std::ops::Deref;
 use std::str::FromStr;
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::{cmp, fmt, mem};
+use std::{cmp, fmt};
 
 pub static DEFAULT_POOL: &str = "Pool_1";
 
@@ -249,6 +249,7 @@ impl ModuleConfigurationEq for CagConfiguration {
     }
 }
 
+/*
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum CapitalGainsGroupBy {
     EventDate,
@@ -410,7 +411,7 @@ impl FromStr for CapitalGainsColumn {
             )),
         }
     }
-}
+}*/
 
 /// A filter that only includes events that matches any of the strings within.
 ///
@@ -475,7 +476,9 @@ impl<'a, 'h> Filter<PoolEvent<'h>> for EventFilter<'_> {
                 s.deref() == "pooled"
                     || s.starts_with("pooled ") && s.split_whitespace().nth(1) == Some(&lower_name)
             }),
-            PoolEventKind::MovedDeal(..) => self.0.iter().any(|s| {
+            PoolEventKind::MovedFrom(..)
+            | PoolEventKind::MovedTo(..)
+            | PoolEventKind::MatchedFrom(..) => self.0.iter().any(|s| {
                 s.deref() == "moved"
                     || s.starts_with("moved ") && s.split_whitespace().nth(1) == Some(&lower_name)
             }),
