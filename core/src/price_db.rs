@@ -12,7 +12,7 @@ use crate::journal_node::JournalNode;
 use crate::price::Price;
 use crate::unit::Unit;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, MappedMutexGuard, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 #[derive(Debug, Default)]
 pub struct PriceDatabase<'h> {
@@ -51,7 +51,7 @@ impl<'h> PriceDatabase<'h> {
     }
 
     #[cfg(test)]
-    pub fn prices(&self) -> MappedMutexGuard<'_, Vec<Arc<Price<'h>>>> {
+    pub fn prices(&self) -> std::sync::MappedMutexGuard<'_, Vec<Arc<Price<'h>>>> {
         MutexGuard::map(self.prices_init(), |(prices, _initialised)| prices)
     }
 

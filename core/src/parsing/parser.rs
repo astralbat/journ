@@ -15,7 +15,6 @@ use crate::parsing::text_block::TextBlock;
 use crate::parsing::util::interim_space;
 use crate::python::environment::PythonEnvironment;
 use crate::{err, parsing};
-use nom::{IResult, Parser};
 use nom_locate::LocatedSpan;
 use std::cell::RefCell;
 use std::path::Path;
@@ -87,20 +86,6 @@ where
 
     pub fn input<'a>(&'a self) -> TextBlockInput<'h, &'a JournalParseNode<'h, 's>> {
         self.input.with_extra(self)
-    }
-
-    #[cfg(test)]
-    pub fn parse_fn<'p, F, O, E>(
-        &'p self,
-        mut func: F,
-    ) -> IResult<&'h str, (Configuration<'h>, O), E>
-    where
-        F: Parser<TextBlockInput<'h, &'p Self>, O, E>,
-        'h: 's,
-        's: 'p,
-    {
-        func.parse(self.input.with_extra(self))
-            .map(move |(rem, out)| (*rem.fragment(), (self.config().borrow().clone(), out)))
     }
 
     pub fn parse(self) -> JournResult<&'h JournalNode<'h>>
@@ -370,3 +355,6 @@ impl PartialEq for JournalParseNode<'_, '_> {
         self.node == other.node
     }
 }
+
+#[cfg(test)]
+mod tests {}

@@ -155,7 +155,7 @@ impl Journal {
             // temporarily.
             python.allow_threads(|| {
                 TextBlock::from_file(filename, &ALLOCATOR, None).and_then(|block| {
-                    journ_core::journal::Journal::parse(args, filename, block, &ALLOCATOR)
+                    journ_core::journal::Journal::parse(args, Some(filename), block, &ALLOCATOR)
                 })
             })
         })

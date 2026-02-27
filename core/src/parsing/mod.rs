@@ -15,22 +15,18 @@ pub mod text_block;
 mod unit_directive;
 pub mod util;
 
-use crate::alloc::HerdAllocator;
 use crate::configuration::Configuration;
 use crate::error::parsing::IParseError;
 use crate::error::{JournError, JournResult};
-use crate::journal_node::{JournalNode, JournalNodeKind, NodeId};
 use crate::parsing::input::TextBlockInput;
 use crate::parsing::parser::JournalParseNode;
 use crate::parsing::text_block::TextBlock;
-use bumpalo_herd::Herd;
 use nom::{Err as NomErr, Finish, IResult};
 use nom_locate::LocatedSpan;
 use std::cell::RefCell;
 use std::fmt;
 use std::ops::DerefMut;
 use std::rc::Rc;
-use std::thread::Scope;
 
 /// A note on lifetimes:
 /// * `'h` is the lifetime of the heap allocator.
@@ -158,85 +154,6 @@ where
     let (frag, extra) = rem.into_fragment_and_extra();
     *config = extra.into_inner();
     Ok((frag, out))
-}
-
-#[cfg(test)]
-pub fn parse_block_with_config_mut<'h, O, E: Into<JournError>, F>(
-    expr: &'h str,
-    func: F,
-    config: &mut Configuration<'h>,
-) -> JournResult<(&'h str, (Configuration<'h>, O))>
-where
-    F: FnMut(
-        TextBlockInput<'h, RefCell<Configuration<'h>>>,
-    ) -> IResult<TextBlockInput<'h, RefCell<Configuration<'h>>>, O, E>,
-{
-    let config_owned = config.clone();
-    let block = config_owned.alloc(TextBlock::from(expr));
-    block_parse(block, config_owned, func)
-}
-
-#[cfg(test)]
-pub fn node_input<'h, 's>(
-    text: &'h str,
-    config: Option<&mut Configuration<'h>>,
-    scope: &'s Scope<'s, 'h>,
-) -> JournalParseNode<'h, 's>
-where
-    'h: 's,
-{
-    let herd = Box::leak(Box::new(Herd::new()));
-    let allocator = herd.get().alloc(HerdAllocator::new(herd));
-    let tb = &*allocator.alloc(TextBlock::from(text));
-    let node_id = allocator.alloc(NodeId::new_root());
-    let node = allocator.alloc(JournalNode::new(
-        None,
-        node_id,
-        None,
-        JournalNodeKind::Entry,
-        tb.as_input(allocator),
-        allocator,
-    ));
-    let parse_node_config: Configuration<'h> = match config {
-        Some(config) => config.clone(),
-        None => Configuration::new(allocator, node_id),
-    };
-    JournalParseNode::new_root(node, parse_node_config, scope)
-}
-
-/// Parses a string with the supplied function and a configuration.
-/// A configuration is required unless testing.
-#[macro_export]
-#[cfg(any(test, feature = "testing"))]
-macro_rules! parse {
-    ($str:expr, $func:expr, $config:expr) => {{
-        $crate::parsing::parse_with_config_mut($str, $func, $config)
-        //use $crate::parsing::OwnedOrMutConfigParseHelper;
-        //$config.handle_str($str, $func)
-    }};
-    ($str:expr, $func:expr) => {{
-        use $crate::config;
-        let config = config!();
-        $crate::parsing::parse_with_config($str, $func, &config)
-        //parse!($str, $func, config)
-    }};
-}
-
-/// `$config` should be a `Arc<Configuration>` type that may get modified as a result of the parser's actions.
-#[macro_export]
-#[cfg(any(test, feature = "testing"))]
-macro_rules! parse_block {
-    ($block:expr, $func:expr, $config:expr) => {{
-        $crate::parsing::parse_block_with_config_mut($block, $func, $config)
-        //use $crate::parsing::OwnedOrMutConfigParseHelper;
-        //$config.handle_block($block, $func)
-    }};
-    ($str:expr, $func:expr) => {{
-        use $crate::config;
-        let mut config = config!();
-        $crate::parsing::parse_block_with_config_mut($str, $func, &mut config)
-        //parse_block!($str, $func, config)
-    }};
 }
 
 /*
@@ -422,3 +339,111 @@ macro_rules! parse_node {
         )
     }};
 }*/
+
+#[cfg(any(test, doctest, feature = "testing"))]
+mod testing {
+    use crate::alloc::HerdAllocator;
+    use crate::configuration::Configuration;
+    use crate::error::{JournError, JournResult};
+    use crate::journal_node::{JournalNode, JournalNodeKind, NodeId};
+    use crate::parsing::block_parse;
+    use crate::parsing::input::TextBlockInput;
+    use crate::parsing::parser::JournalParseNode;
+    use crate::parsing::text_block::TextBlock;
+    use bumpalo_herd::Herd;
+    use nom::IResult;
+    use std::cell::RefCell;
+    use std::thread::Scope;
+
+    /// Parses a string with the supplied function and a configuration.
+    /// A configuration is required unless testing.
+    #[macro_export]
+    macro_rules! parse {
+        ($str:expr, $func:expr, $config:expr) => {{
+            $crate::parsing::parse_with_config_mut($str, $func, $config)
+            //use $crate::parsing::OwnedOrMutConfigParseHelper;
+            //$config.handle_str($str, $func)
+        }};
+        ($str:expr, $func:expr) => {{
+            use $crate::config;
+            let config = config!();
+            $crate::parsing::parse_with_config($str, $func, &config)
+            //parse!($str, $func, config)
+        }};
+    }
+
+    #[macro_export]
+    macro_rules! parse_obj {
+        ($str:expr, $func:expr, $config:expr) => {{
+            use $crate::parse;
+            let res = parse!($str, $func, $config);
+            assert!(res.is_ok(), "Parse error: {}", res.unwrap_err());
+            res.unwrap().1
+        }};
+        ($str:expr, $func:expr) => {{
+            use $crate::config;
+            let mut config = config!();
+            parse_obj!($str, $func, &mut config)
+        }};
+    }
+
+    #[allow(dead_code)]
+    pub fn node_input<'h, 's>(
+        text: &'h str,
+        config: Option<&mut Configuration<'h>>,
+        scope: &'s Scope<'s, 'h>,
+    ) -> JournalParseNode<'h, 's>
+    where
+        'h: 's,
+    {
+        let herd = Box::leak(Box::new(Herd::new()));
+        let allocator = herd.get().alloc(HerdAllocator::new(herd));
+        let tb = &*allocator.alloc(TextBlock::from(text));
+        let node_id = allocator.alloc(NodeId::new_root());
+        let node = allocator.alloc(JournalNode::new(
+            None,
+            node_id,
+            None,
+            JournalNodeKind::Entry,
+            tb.as_input(allocator),
+            allocator,
+        ));
+        let parse_node_config: Configuration<'h> = match config {
+            Some(config) => config.clone(),
+            None => Configuration::new(allocator, node_id),
+        };
+        JournalParseNode::new_root(node, parse_node_config, scope)
+    }
+
+    /// `$config` should be a `Arc<Configuration>` type that may get modified as a result of the parser's actions.
+    #[macro_export]
+    macro_rules! parse_block {
+        ($block:expr, $func:expr, $config:expr) => {{
+            $crate::parsing::testing::parse_block_with_config_mut($block, $func, $config)
+            //use $crate::parsing::OwnedOrMutConfigParseHelper;
+            //$config.handle_block($block, $func)
+        }};
+        ($str:expr, $func:expr) => {{
+            use $crate::config;
+            let mut config = config!();
+            $crate::parsing::testing::parse_block_with_config_mut($str, $func, &mut config)
+            //parse_block!($str, $func, config)
+        }};
+    }
+
+    #[allow(dead_code)]
+    pub fn parse_block_with_config_mut<'h, O, E: Into<JournError>, F>(
+        expr: &'h str,
+        func: F,
+        config: &mut Configuration<'h>,
+    ) -> JournResult<(&'h str, (Configuration<'h>, O))>
+    where
+        F: FnMut(
+            TextBlockInput<'h, RefCell<Configuration<'h>>>,
+        ) -> IResult<TextBlockInput<'h, RefCell<Configuration<'h>>>, O, E>,
+    {
+        let config_owned = config.clone();
+        let block = config_owned.alloc(TextBlock::from(expr));
+        block_parse(block, config_owned, func)
+    }
+}

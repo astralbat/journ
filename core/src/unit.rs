@@ -649,7 +649,7 @@ impl NumberFormat {
 
     pub fn to_non_scientific(num: &mut String) -> &mut String {
         // 4E+1 = 40
-        if let Some(i) = num.find('E') {
+        if let Some(i) = num.find('E').or_else(|| num.find('e')) {
             let positive = num.chars().nth(i + 1).unwrap() == '+';
             let neg_num = num.starts_with('-');
             let change: usize = num[i + 2..].parse().unwrap();

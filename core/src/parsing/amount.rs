@@ -59,17 +59,39 @@ pub fn unit<'h, I: TextInput<'h>>(input: I) -> IParseResult<'h, I, &'h str> {
     Ok((rem, unit_code))
 }
 
+/// Parses a positive decimal.
+///
+/// ```
+/// # use journ_core::parse;
+/// # use journ_core::parse_obj;
+/// # use rust_decimal_macros::dec;
+/// # use journ_core::parsing::amount::pos_decimal;
+///
+/// assert_eq!(parse_obj!("123 ABC", pos_decimal), "123");
+/// assert_eq!(parse_obj!("123- ABC", pos_decimal), "123");
+/// assert!(parse!("-123", pos_decimal).is_err());
+///
+/// // Can be in scientific format
+/// assert_eq!(parse_obj!("123e6 ABC", pos_decimal), "123e6");
+/// assert_eq!(parse_obj!("123E+6 ABC", pos_decimal), "123E+6");
+/// assert_eq!(parse_obj!("123E-6 ABC", pos_decimal), "123E-6");
+/// assert_eq!(parse_obj!("123E- ABC", pos_decimal), "123");
+/// ```
 pub fn pos_decimal<'h, I: TextInput<'h>>(input: I) -> IParseResult<'h, I, &'h str> {
     let digit_taker = |input: I| {
         let mut last_digit = 0usize;
-        for (i, c) in input.text().char_indices() {
+        let mut last_char = None;
+        let mut peek_char = input.text().char_indices().peekable();
+        while let Some((i, c)) = peek_char.next() {
             match c {
                 d if d.is_ascii_digit() => last_digit = i + 1,
-                ',' | '.' => {}
+                ',' | '.' | 'e' | 'E' => {}
+                '-' | '+' if last_char == Some('e') || last_char == Some('E') => {}
                 _ => {
                     break;
                 }
             }
+            last_char = Some(c);
         }
         if last_digit == 0 {
             return Err(nom::Err::Error(IParseError::new(IErrorMsg::NUMBER, input)));
@@ -188,6 +210,19 @@ where
     )(input)
 }
 
+/// Parses an amount string to an `Amount` object, merging any new unit
+/// information in to the parser's configuration.
+///
+/// ```
+/// # use journ_core::parse_obj;
+/// # use rust_decimal_macros::dec;
+/// # use journ_core::parsing::amount::amount;
+///
+/// assert_eq!(parse_obj!("$12", amount).quantity(), dec!(12));
+/// assert_eq!(parse_obj!("$12", amount).unit().code(), "$");
+/// assert_eq!(parse_obj!("12e-5 ABC", amount).quantity(), dec!(0.00012));
+/// assert_eq!(parse_obj!("12E+5 ABC", amount).quantity(), dec!(1200000));
+/// ```
 pub fn amount<'h, I>(input: I) -> IParseResult<'h, I, Amount<'h>>
 where
     I: TextInput<'h> + ConfigInput<'h>,

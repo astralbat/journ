@@ -90,7 +90,7 @@ macro_rules! entry {
 #[macro_export]
 macro_rules! parse_node {
     ($text:expr, $func:expr) => {{
-        use $crate::parsing::node_input;
+        use $crate::parsing::testing::node_input;
         use $crate::ext::StrExt;
 
         let text = $text;
