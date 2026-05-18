@@ -49,11 +49,7 @@ impl Lambda {
         Lambda { parameters: self.parameters, expression: self.expression + code }
     }
 
-    pub fn eval<T>(
-        &self,
-        args: Vec<Box<dyn DeferredArg>>,
-        journal_incarnation: u32,
-    ) -> JournResult<T>
+    pub fn eval<T>(&self, args: Vec<Box<dyn DeferredArg>>) -> JournResult<T>
     where
         T: FromPyObjectOwned,
     {
@@ -63,7 +59,7 @@ impl Lambda {
         for (p, a) in self.parameters().iter().zip(args) {
             locals.insert(p.to_string(), a);
         }
-        PythonEnvironment::eval(self.expression(), Some(locals), Some(journal_incarnation))
+        PythonEnvironment::eval(self.expression(), Some(locals))
     }
 
     /*
@@ -200,7 +196,7 @@ mod tests {
             a"#,
         )
         .unwrap();
-        l1.eval::<String>(vec![Box::new("abc".to_string())], 1).unwrap();
+        l1.eval::<String>(vec![Box::new("abc".to_string())]).unwrap();
 
         // No newline after arrow, expression indented from start of parameters.
         let l2 = Lambda::from_str(
@@ -210,6 +206,6 @@ mod tests {
                  a"#,
         )
         .unwrap();
-        l2.eval::<String>(vec![Box::new("abc".to_string())], 1).unwrap();
+        l2.eval::<String>(vec![Box::new("abc".to_string())]).unwrap();
     }
 }

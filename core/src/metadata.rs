@@ -8,10 +8,9 @@
 use crate::alloc::HerdAllocator;
 use crate::configuration::{Configuration, Expression};
 use crate::error::{BlockContext, BlockContextError, JournError, JournResult};
-use crate::journal_obj::JournalObj;
-use crate::parsing::input::{BlockInput, ConfigInput, LocatedInput, TextBlockInput, TextInput};
-use crate::parsing::text_block::{TextBlock, block, block_remainder1};
-use crate::parsing::util::{blank_lines0, double_space, spaced_word};
+use crate::parsing::input::{BlockInput, ConfigInput, LocatedInput, TextInput};
+use crate::parsing::text_block::{BlockObject, TextBlock, TextBlockBuf, block, block_remainder1};
+use crate::parsing::util::{blank_lines0, double_space_lf, spaced_word};
 use crate::parsing::{IParseResult, block_parse, entry};
 use crate::{err, impl_journal_obj_common};
 use nom::bytes::complete::tag;
@@ -22,13 +21,14 @@ use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::fmt;
+use std::fmt::Write;
 use std::fmt::{Debug, Formatter};
 use std::hash::{Hash, Hasher};
 use std::sync::OnceLock;
 
 /// &str wrapper for key, to override PartialEq behavior.
 /// Metadata key comparisons are case-insensitive.
-#[derive(Debug, Clone, Hash)]
+#[derive(Debug, Clone, Hash, Ord, PartialOrd)]
 pub struct MetadataKey<'h>(pub Cow<'h, str>);
 
 impl MetadataKey<'_> {
@@ -60,52 +60,6 @@ impl AsRef<str> for MetadataKey<'_> {
         &self.0
     }
 }
-
-/*
-#[derive(Debug, Clone)]
-pub struct MetadataValue<'h>(&'h str);
-
-impl<'h> MetadataValue<'h> {
-    pub fn as_str(&self) -> &str {
-        self.0.block().text().trim()
-    }
-
-    /// Reads each sub-block of the value, attempting to interpret them as metadata
-    pub fn as_metadata_lines(&self) -> SmallVec<[Metadata<'h>; 4]> {
-        let mut lines = SmallVec::new();
-
-        let mut input = self.0.clone();
-        while let Ok((rem, maybe_metadata)) = block(input) {
-            input = rem;
-            if let Ok(lmd) = entry::metadata(maybe_metadata).map(|r| r.1) {
-                lines.push(lmd)
-            }
-        }
-        lines
-    }
-
-    pub fn unindented(&self) -> String {
-        self.0.block().text_outdented(3)
-    }
-}
-
-impl PartialEq for MetadataValue<'_> {
-    fn eq(&self, other: &Self) -> bool {
-        self.unindented().eq(&other.unindented())
-    }
-}
-
-impl PartialEq<&str> for &MetadataValue<'_> {
-    fn eq(&self, other: &&str) -> bool {
-        self.unindented().eq(other)
-    }
-}
-
-impl fmt::Display for MetadataValue<'_> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0.text())
-    }
-}*/
 
 /// Metadata provides additional key/value information on `JournalEntries`.
 ///
@@ -153,8 +107,6 @@ impl<'h> Metadata<'h> {
     }
 
     /// Gets the metadata value.
-    ///
-    /// The returned string is not trimmed.
     pub fn value(&self) -> Option<&str> {
         self.inner().value()
     }
@@ -206,7 +158,7 @@ impl<'h> Metadata<'h> {
     fn value_parser<I: TextInput<'h> + BlockInput<'h>>(
         input: I,
     ) -> IParseResult<'h, I, Option<Cow<'h, str>>> {
-        opt(preceded(double_space, map(block_remainder1, |r: I| Cow::Borrowed(r.text()))))(input)
+        opt(preceded(double_space_lf, map(block_remainder1, |r: I| Cow::Borrowed(r.text()))))(input)
     }
     fn value_as_nested_metadata_parser<
         I: TextInput<'h> + LocatedInput<'h> + ConfigInput<'h> + BlockInput<'h>,
@@ -242,6 +194,18 @@ impl PartialEq for Metadata<'_> {
 
 impl Eq for Metadata<'_> {}
 
+impl PartialOrd for Metadata<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Metadata<'_> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.key().cmp(other.key()).then_with(|| self.value().cmp(&other.value()))
+    }
+}
+
 impl Hash for Metadata<'_> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.key().hash(state);
@@ -249,76 +213,15 @@ impl Hash for Metadata<'_> {
     }
 }
 
-/*
-#[derive(Debug)]
-pub struct LazyMetadata<'h> {
-    block: &'h TextBlock<'h>,
-    allocator: &'h HerdAllocator<'h>,
-    metadata: OnceLock<Metadata<'h>>,
-}
-impl<'h> LazyMetadata<'h> {
-    pub fn new(block: &'h TextBlock<'h>, allocator: &'h HerdAllocator<'h>) -> Self {
-        LazyMetadata { block, allocator, metadata: OnceLock::new() }
-    }
-
-    pub fn get_or_init(&self) -> &Metadata<'h> {
-        self.metadata.get_or_init(|| {
-            let pretext = recognize(tuple((blank_lines0, space1, tag("+"), space0)));
-
-            let (_rem, (pretext, key, value)) =
-                // There has been enough prevalidation during main parsing to assert that this won't fail
-                tuple((pretext, spaced_word, opt(block_remainder1)))(
-                    self.block.as_input(self.allocator),
-                ).unwrap();
-            Metadata {
-                pretext: pretext.text(),
-                key: MetadataKey(key.text()),
-                value: value.map(|v| MetadataValue(v.block(), self.allocator)),
-            }
-        })
-    }
-
-    pub fn into_inner(self) -> Metadata<'h> {
-        self.get_or_init();
-        self.metadata.into_inner().unwrap()
-    }
-
-    /// Creates an error that includes the text block of the metadata.
-    pub fn err(&self, msg: String, highlight_text: Option<&str>) -> JournError {
-        let mut context = BlockContext::from(self.block);
-        if let Some(highlight_text) = highlight_text {
-            context.highlight(highlight_text);
+impl BlockObject for Metadata<'_> {
+    fn write(&self, buf: &mut TextBlockBuf, _config: Option<&Configuration<'_>>) {
+        match (self.block.get(), self.inner.get()) {
+            (Some(block), _) => write!(buf, "{}", block).unwrap(),
+            (None, Some(inner)) => write!(buf, "+{}", inner).unwrap(),
+            (None, None) => unreachable!("Illegal metadata state"),
         }
-        err!(BlockContextError::new(context, msg))
     }
 }
-
-impl<'h> Deref for LazyMetadata<'h> {
-    type Target = Metadata<'h>;
-    fn deref(&self) -> &Self::Target {
-        self.get_or_init()
-    }
-}
-
-impl Clone for LazyMetadata<'_> {
-    fn clone(&self) -> Self {
-        Self { block: self.block, allocator: self.allocator, metadata: OnceLock::new() }
-    }
-}
-
-impl PartialEq for LazyMetadata<'_> {
-    fn eq(&self, other: &Self) -> bool {
-        self.block == other.block
-    }
-}
-
-impl Eq for LazyMetadata<'_> {}
-
-impl fmt::Display for LazyMetadata<'_> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.block)
-    }
-}*/
 
 #[derive(Debug, Clone)]
 struct MetadataInner<'h> {
@@ -335,21 +238,12 @@ impl<'h> MetadataInner<'h> {
         Self { key, value }
     }
 
-    /*
-    pub fn leading_whitespace(&self) -> &str {
-        self.pretext.leading_whitespace()
-    }
-
-    pub fn pretext(&self) -> &str {
-        self.pretext
-    }*/
-
     pub fn key(&self) -> &MetadataKey<'h> {
         &self.key
     }
 
     pub fn value(&self) -> Option<&str> {
-        self.value.as_deref()
+        self.value.as_deref().map(|s| s.trim())
     }
 }
 
@@ -365,7 +259,12 @@ impl fmt::Display for MetadataInner<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.key.0)?;
         if let Some(value) = &self.value {
-            write!(f, "  {value}")?;
+            // Values may start on a new line.
+            if value.starts_with("\n") || value.starts_with("\r") {
+                write!(f, "{value}")?;
+            } else {
+                write!(f, "  {value}")?;
+            }
         }
         Ok(())
     }

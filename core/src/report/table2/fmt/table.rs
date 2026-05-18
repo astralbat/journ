@@ -132,7 +132,7 @@ impl<'w, 'format> CellFormatter for TableCellFormatter<'w, 'format> {
     fn format_cell(&mut self, cell: &dyn Cell, line: usize, mut width: ColumnWidth) -> fmt::Result {
         // Set the width.
         let sep_len = self.cell_separator.chars().count();
-        width = width.distribute(sep_len * (cell.hspan() - 1));
+        width = width.distribute((sep_len * (cell.hspan() - 1)) as isize);
 
         // Not the first column, so add a separator
         if !self.first_cell_in_line {
@@ -177,6 +177,9 @@ impl<'format> RowFormatter<'format> for TableCellFormatter<'_, 'format> {
     }
 
     fn format_line_start(&mut self, row: &Row, row_num: usize, _line: usize) -> fmt::Result {
+        if row_num > 0 {
+            writeln!(self.writer)?;
+        }
         self.first_cell_in_line = true;
 
         if *styled::IS_STYLED {
@@ -227,7 +230,8 @@ impl<'format> RowFormatter<'format> for TableCellFormatter<'_, 'format> {
         }
         self.cursor_line += 1;
         self.cursor_col = 0;
-        writeln!(self.writer)
+        Ok(())
+        //writeln!(self.writer)
     }
 
     fn prepare_columns(&mut self, columns: &mut Vec<TableColumn>) {

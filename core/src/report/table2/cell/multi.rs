@@ -53,3 +53,40 @@ impl<'c> Cell for MultiLineCell<'c> {
         self.cells.iter().map(|c| c.height()).sum()
     }
 }
+
+/// A cell that arranges its constituents horizontally. This differs from `BinaryCell`, in that
+/// it does not adhere to a binary width and therefore does not create an effect of distinct columns.
+pub struct MultiCell<'c> {
+    cells: SmallVec<[CellRef<'c>; 2]>,
+}
+
+impl<'c> MultiCell<'c> {
+    pub fn new(cells: impl IntoIterator<Item = CellRef<'c>>) -> Self {
+        // Only use cells that have a width, otherwise printing them will always return std::fmt::Error.
+        Self { cells: cells.into_iter().filter(|c| c.width() > 0).collect() }
+    }
+}
+
+impl<'c> Cell for MultiCell<'c> {
+    fn print<'format>(
+        &self,
+        f: &mut dyn CellFormatter,
+        line: usize,
+        width: Option<ColumnWidth>,
+    ) -> std::fmt::Result {
+        let mut width_to_go = width;
+        for cell in self.cells.iter() {
+            width_to_go = width_to_go.as_ref().map(|w| w - &cell.width());
+            cell.print(f, line, width_to_go.clone())?;
+        }
+        Ok(())
+    }
+
+    fn width(&self) -> CellWidth {
+        let mut max = CellWidth::Unary(0);
+        for cell in self.cells.iter() {
+            max = max.distributed_max(&cell.width());
+        }
+        max
+    }
+}

@@ -10,7 +10,7 @@ use journ_core::configuration::{AccountFilter, Filter};
 use journ_core::datetime::JDateTime;
 use journ_core::directive::{Directive, DirectiveKind};
 use journ_core::error::JournResult;
-use journ_core::journal::Journal;
+use journ_core::journal_context::JournalContext;
 use journ_core::journal_entry::JournalEntry;
 use journ_core::journal_node::JournalNode;
 use journ_core::report::command::arguments::{Command, DateTimeFormatCommand};
@@ -46,7 +46,7 @@ where
     R: RangeBounds<JDateTime>,
 {
     fn is_included(&self, entry: &JournalEntry<'a>) -> bool {
-        self.range.contains(&entry.date_and_time().from())
+        self.range.contains(&entry.datetime_range().start())
     }
 }
 
@@ -81,11 +81,8 @@ impl PrintCommand {
 }
 
 impl ExecCommand for PrintCommand {
-    fn execute<'h>(
-        &'h self,
-        journ: &'h mut Journal<'h>,
-        _chained: Option<ChainingResult>,
-    ) -> JournResult<()> {
+    fn execute<'h>(&'h self, _chained: Option<ChainingResult>) -> JournResult<()> {
+        let journ = JournalContext::current().journal();
         let dir_filter = self.create_dir_filter(self.begin_and_end_cmd.begin_end_range());
         match self.print_file.as_ref().map(|s| s.to_string()) {
             Some(pf) => match journ.find_node_by_filename(Path::new(&pf)) {

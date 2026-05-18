@@ -9,6 +9,7 @@
 
 mod bindings_pyo3;
 mod entry_iterator;
+mod file_id;
 mod journal_entry;
 mod posting;
 

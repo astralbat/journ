@@ -21,12 +21,13 @@ use crate::report::cag_command::CagCommand;
 use chrono::Utc;
 use journ_core::configuration::Filter;
 use journ_core::datetime::JDateTimeRange;
+use journ_core::error::BlockContext;
 use journ_core::error::JournResult;
 use journ_core::error::{BlockContextError, JournError};
 use journ_core::journal::Journal;
 use journ_core::journal_entry::JournalEntry;
 use journ_core::journal_entry_flow::Flow;
-use journ_core::parsing::text_block::TextBlock;
+use journ_core::parsing::text_block::TextBlockBuf;
 use journ_core::report::command::arguments::{Cmd, Command};
 use journ_core::unit::Unit;
 use journ_core::valuer::ValueResult;
@@ -100,12 +101,15 @@ impl<'h> CapitalGainsComputer {
         // the result completely.
         for entry in journal.entry_range(..) {
             let entry_err = |e: JournError| {
-                let entry_text = entry.to_string();
-                let tb = entry
-                    .text_block()
-                    .cloned()
-                    .unwrap_or_else(|| TextBlock::from(entry_text.as_str()));
-                err!(e; BlockContextError::from((&tb, "Unable to process entry")))
+                let context = match entry.text_block() {
+                    Some(block) => BlockContext::from(block),
+                    None => {
+                        let mut buf = TextBlockBuf::new();
+                        buf.write(entry, Some(entry.config()));
+                        BlockContext::from(&buf.as_text_block())
+                    }
+                };
+                err!(e; BlockContextError::new(context, "Unable to process entry"))
             };
 
             pool_manager.update_configuration(entry.config()).map_err(entry_err)?;

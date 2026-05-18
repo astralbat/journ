@@ -19,9 +19,9 @@ use journ_core::alloc::HerdAllocator;
 use journ_core::configuration::{Configuration, Filter};
 use journ_core::datetime::{DateTimePrecision, JDateTime, JDateTimeRange};
 use journ_core::err;
-use journ_core::error::{BlockContextError, JournError, JournResult};
+use journ_core::error::{BlockContext, BlockContextError, JournError, JournResult};
 use journ_core::journal_entry::JournalEntry;
-use journ_core::parsing::text_block::TextBlock;
+use journ_core::parsing::text_block::TextBlockBuf;
 use journ_core::unit::Unit;
 use log::debug;
 use std::collections::HashMap;
@@ -108,7 +108,7 @@ impl<'h, 'u> PoolManager<'h> {
                         pool.current_method(unit),
                     ) {
                         let bal_before = pool.balance(pse.deal_unit);
-                        if let Some(group) = pool.extract(pse.deal_id, pse.deal_unit) {
+                        if let Some(group) = pool.extract(&pse.deal_id, pse.deal_unit) {
                             let bal_after = pool.balance(pse.deal_unit);
                             self.apply_deal_rules(
                                 group,
@@ -149,10 +149,15 @@ impl<'h, 'u> PoolManager<'h> {
         adjustments: I,
     ) -> JournResult<Vec<PoolEvent<'h>, &'h HerdAllocator<'h>>> {
         let entry_err = |e: JournError, entry: &'h JournalEntry<'h>| {
-            let entry_text = entry.to_string();
-            let tb =
-                entry.text_block().cloned().unwrap_or_else(|| TextBlock::from(entry_text.as_str()));
-            err!(e; BlockContextError::from((&tb, "Unable to process entry")))
+            let context = match entry.text_block() {
+                Some(block) => BlockContext::from(block),
+                None => {
+                    let mut buf = TextBlockBuf::new();
+                    buf.write(entry, Some(entry.config()));
+                    BlockContext::from(&buf.as_text_block())
+                }
+            };
+            err!(e; BlockContextError::new(context, "Unable to process entry"))
         };
 
         let mut pool_events = Vec::new_in(*self.pools.allocator());
@@ -231,7 +236,7 @@ impl<'h, 'u> PoolManager<'h> {
                             self.unit_of_account,
                         );
                         let pool_id = pool.id();
-                        let deal_id = group.id();
+                        let deal_id = group.id().clone();
 
                         if let Some((from_pool, bal_before, bal_after)) = from_pool.clone() {
                             let pe = PoolEvent::new(
@@ -309,7 +314,7 @@ impl<'h, 'u> PoolManager<'h> {
                                 };
                                 self.pool_scheduler_mut(pool_id).insert(PoolSchedulerEntry {
                                     pool_id,
-                                    deal_id,
+                                    deal_id: deal_id.clone(),
                                     datetime: JDateTime::new(
                                         future_date,
                                         DateTimePrecision::Second,
@@ -451,7 +456,7 @@ pub struct PoolSchedulerEntry<'h> {
     datetime: JDateTime,
     pool_id: usize,
     deal_unit: &'h Unit<'h>,
-    deal_id: DealId<'h>,
+    deal_id: DealId,
 }
 
 impl Ord for PoolSchedulerEntry<'_> {

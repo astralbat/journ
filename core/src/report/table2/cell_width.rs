@@ -7,7 +7,7 @@
  */
 use std::iter::Sum;
 use std::mem;
-use std::ops::Add;
+use std::ops::{Add, Sub};
 
 #[derive(Clone, Copy, Debug, Default)]
 pub enum SpaceDistribution {
@@ -83,15 +83,35 @@ impl CellWidth {
             (binary, CellWidth::Unary(u2)) | (CellWidth::Unary(u2), binary)
                 if u2 > &binary.width() =>
             {
-                Self::distribute(binary, u2 - binary.width())
+                Self::distribute(binary, (*u2 as isize) - binary.width() as isize)
             }
             // The binary width is wider than the unary width, so we can just return the binary width.
             (binary, CellWidth::Unary(_)) | (CellWidth::Unary(_), binary) => binary.clone(),
         }
     }
 
+    pub fn distributed_min(&self, other: &CellWidth) -> CellWidth {
+        match (self, other) {
+            (CellWidth::Unary(l), CellWidth::Unary(r)) => CellWidth::Unary(*l.min(r)),
+            (CellWidth::Binary(l1, r1, d1), CellWidth::Binary(l2, r2, _d2)) => CellWidth::Binary(
+                Box::new(l1.distributed_min(l2)),
+                Box::new(r1.distributed_min(r2)),
+                *d1,
+            ),
+            // The unary width is narrower than the binary width, so we distribute the extra space to the binary width.
+            (binary, CellWidth::Unary(u2)) | (CellWidth::Unary(u2), binary)
+                if u2 < &binary.width() =>
+            {
+                Self::distribute(binary, (*u2 as isize) - binary.width() as isize)
+            }
+            // The binary width is narrower than the unary width, so we can just return the binary width.
+            (binary, CellWidth::Unary(_)) | (CellWidth::Unary(_), binary) => binary.clone(),
+        }
+    }
+
     /// Distributes extra space proportionally.
-    pub fn distribute(&self, extra_width: usize) -> CellWidth {
+    /// The `extra_width` parameter can be negative to shrink the extra space.
+    pub fn distribute(&self, extra_width: isize) -> CellWidth {
         if extra_width == 0 {
             return self.clone();
         }
@@ -106,7 +126,7 @@ impl CellWidth {
                         let left_pc_increase: f64 =
                             left_width as f64 / (left_width + right_width) as f64;
                         let left_increase =
-                            (extra_width as f64 * left_pc_increase).round() as usize;
+                            (extra_width as f64 * left_pc_increase).round() as isize;
                         let right_increase = extra_width - left_increase;
                         (left_increase, right_increase)
                     }
@@ -123,7 +143,10 @@ impl CellWidth {
                     *strategy,
                 )
             }
-            CellWidth::Unary(w) => CellWidth::Unary(w + extra_width),
+            CellWidth::Unary(w) if extra_width >= 0 => {
+                CellWidth::Unary(w + extra_width.abs() as usize)
+            }
+            CellWidth::Unary(w) => CellWidth::Unary(w - extra_width.abs() as usize),
         }
     }
 }
@@ -149,6 +172,31 @@ impl Add<&CellWidth> for &CellWidth {
             Box::new(rhs.clone()),
             SpaceDistribution::default(),
         )
+    }
+}
+
+impl Sub<&CellWidth> for &CellWidth {
+    type Output = CellWidth;
+
+    fn sub(self, rhs: &CellWidth) -> Self::Output {
+        assert!(self.width() >= rhs.width());
+
+        self.distribute(self.width() as isize - rhs.width() as isize)
+
+        /*
+        if self.width() == 0 {
+            return self.clone();
+        }
+
+        if rhs.width() == 0 {
+            return self.clone();
+        }
+        match (self, rhs) {
+            (CellWidth::Unary(left), CellWidth::Unary(right)) => CellWidth::Unary(left - right),
+            (CellWidth::Unary(left), CellWidth::Binary(bl, br, _)) => CellWidth::Unary(left - bl.width() - br.width()),
+            (CellWidth::Binary(_bl, _br, _), CellWidth::Unary(right)) => self.distributed_min(CellWidth::Unary(self.width() - right.width())),
+            (CellWidth::Binary(_))
+        }*/
     }
 }
 

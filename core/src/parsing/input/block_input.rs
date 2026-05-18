@@ -261,7 +261,7 @@ where
             block = parent.trimmed_start_lines();
         }
         let mut context_lines = vec![];
-        let mut line_num = block.location().unwrap().line() as usize;
+        let mut line_num = block.location().line() as usize;
         let input_end = self.inner.slice(self.inner.input_len()..);
         for line in block.skip_leading_blank_lines().0.lines() {
             let highlight_range = {
@@ -291,7 +291,7 @@ where
             line_num += 1;
         }
         let context = BlockContext::new(
-            self.block.location().and_then(|l| l.file().map(|f| f.to_string())),
+            self.block.location().file().map(|f| format!("{}", f.display())),
             Some(self.inner.line() as usize),
             Some(self.inner.column() as usize),
             context_lines,

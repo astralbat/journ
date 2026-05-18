@@ -170,7 +170,7 @@ impl<'h> DealHolding<'h> {
         let holding = mem::replace(
             self,
             Average(AverageDealHolding::new(
-                group.entries().next().unwrap().date_and_time().datetime_range(),
+                group.entries().next().unwrap().datetime_range(),
                 ValuedAmount::new_in(
                     group.unit().with_quantity(0),
                     group.entries().next().unwrap().config().allocator(),
@@ -240,7 +240,7 @@ impl<'h> DealHolding<'h> {
     /// Returns the portion of the holding extracted, along with the remainder of the holding, if any.
     /// # Panics
     /// If the holding is or contains an average holding.
-    pub fn extract(self, deal_id: DealId<'h>) -> Result<(DealGroup<'h>, Option<Self>), Self> {
+    pub fn extract(self, deal_id: &DealId) -> Result<(DealGroup<'h>, Option<Self>), Self> {
         match self {
             /*Single(deal) => Err(Single(deal)),*/
             Group(group) => {
@@ -672,7 +672,7 @@ impl<'h> SequenceDealHolding<'h> {
         Ok(())
     }
 
-    pub fn extract(self, group_id: DealId<'h>) -> Result<(DealGroup<'h>, Option<Self>), Self> {
+    pub fn extract(self, group_id: &DealId) -> Result<(DealGroup<'h>, Option<Self>), Self> {
         let mut new_seq = VecDeque::new_in(*self.sequence.allocator());
         let mut extracted_deal = None;
         for dh in self.sequence {

@@ -236,6 +236,17 @@ impl<'h> Account<'h> {
             right.parent.as_ref().and_then(|parent| Account::common_parent(parent, left))
         }
     }
+
+    pub fn into_cell(self: Arc<Account<'h>>) -> Box<dyn Cell + 'h> {
+        let mut wrapping_account =
+            PolicyWrappingCell::new(Box::new(self), WrapPolicy::AfterStr(":"));
+        wrapping_account.set_wrap_ease(WrapEase::Reluctant);
+
+        Box::new(StyledCell::new(
+            Box::new(wrapping_account),
+            Style::default().with_fg(Colour::Blue),
+        ))
+    }
 }
 
 impl fmt::Display for Account<'_> {
@@ -298,19 +309,6 @@ macro_rules! cell_from_account {
 }
 cell_from_account!(&Account<'_>);
 cell_from_account!(Arc<Account<'_>>);
-
-impl<'a> From<&'a Account<'_>> for Box<dyn Cell + 'a> {
-    fn from(account: &'a Account) -> Self {
-        let mut wrapping_account =
-            PolicyWrappingCell::new(Box::new(account), WrapPolicy::AfterStr(":"));
-        wrapping_account.set_wrap_ease(WrapEase::Eager);
-
-        Box::new(StyledCell::new(
-            Box::new(wrapping_account),
-            Style::default().with_fg(Colour::Blue),
-        ))
-    }
-}
 
 #[cfg(test)]
 mod tests {}

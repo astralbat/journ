@@ -9,6 +9,7 @@ use crate::datetime::JDateTime;
 use crate::directive::DirectiveKind;
 use crate::error::JournResult;
 use crate::journal_node::JournalNode;
+use crate::parsing::text_block::PaddingPolicy;
 use crate::price::Price;
 use crate::unit::Unit;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -142,7 +143,7 @@ impl<'h> PriceDatabase<'h> {
                 let p = (**price).clone();
                 node.append_directive(DirectiveKind::Price(Arc::new(p)))
             }
-            node.write_nearest_file()?;
+            node.write_nearest_file(PaddingPolicy::Fixed(1))?;
         }
         Ok(())
     }

@@ -507,6 +507,11 @@ pub fn double_space<'h, I: TextInput<'h>>(input: I) -> IParseResult<'h, I, I> {
     alt((tag("  "), tag("\t")))(input)
 }
 
+/// Reads a 'double space' or line feed - where `spaced_word()` stops.
+pub fn double_space_lf<'h, I: TextInput<'h>>(input: I) -> IParseResult<'h, I, I> {
+    alt((tag("  "), tag("\t"), tag("\r\n"), tag("\n")))(input)
+}
+
 /// Reads a comment, up to any line ending or eof.
 /// # Examples
 /// ```

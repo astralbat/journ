@@ -30,9 +30,9 @@ pub const PROP_TAXABLE_GAIN: &str = "Taxable Gain";
 
 /// The deal identifier uniquely identifies a deal within an entry.
 /// Upon splitting, the two parts will both still have the same deal id. Therefore the deal_id is not always unique.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct DealId<'h> {
-    entry_id: EntryId<'h>,
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct DealId {
+    entry_id: EntryId,
     // The `extra` is the same as position when that is `Some`. When `None`, it is a unique sequence number.
     // This allows `DealId` to always be unique, and this field coming above `position` ensures
     // that existing ids with a position always come first.
@@ -40,20 +40,20 @@ pub struct DealId<'h> {
     position: Option<u32>,
 }
 
-impl<'h> DealId<'h> {
-    pub(crate) fn new(entry_id: EntryId<'h>, position: u32) -> Self {
-        Self { entry_id, position: Some(position), extra: position }
+impl DealId {
+    pub(crate) fn new(entry_id: &EntryId, position: u32) -> Self {
+        Self { entry_id: entry_id.clone(), position: Some(position), extra: position }
     }
-    fn allocate(entry_id: EntryId<'h>) -> Self {
+    fn allocate(entry_id: &EntryId) -> Self {
         // Set to a sufficiently high starting value so that allocated deals are naturally sequenced
         // after parsed deals that will expected to be allocated manually.
         static DEAL_COUNTER: AtomicU32 = AtomicU32::new(2 ^ 16);
         let new_id = DEAL_COUNTER.fetch_add(1, Ordering::Relaxed);
-        Self { entry_id, position: None, extra: new_id }
+        Self { entry_id: entry_id.clone(), position: None, extra: new_id }
     }
 
-    pub fn entry_id(&self) -> EntryId<'h> {
-        self.entry_id
+    pub fn entry_id(&self) -> &EntryId {
+        &self.entry_id
     }
 
     /// The position of the deal within the entry where the first deal is 0. This will be `None`
@@ -81,7 +81,7 @@ impl<'h> DealOrigin<'h> {
 pub struct Deal<'h> {
     /// The deal id. Sorting deals by their id will allow them to written to a `JournalEntry` in the
     /// correct order.
-    id: DealId<'h>,
+    id: DealId,
     /// The entry from which the deal or belongs to.
     entry: &'h JournalEntry<'h>,
     metadata: SmallVec<[Metadata<'h>; 4]>,
@@ -131,7 +131,7 @@ impl<'h> Deal<'h> {
             .map(|id| DealId::new(entry.id(), id))
             .unwrap_or_else(|| DealId::allocate(entry.id()));
 
-        let datetime = entry.date_and_time().datetime_range();
+        let datetime = entry.datetime_range();
 
         let round_deals = entry
             .config()
@@ -203,8 +203,8 @@ impl<'h> Deal<'h> {
         );
     }
 
-    pub fn id(&self) -> DealId<'h> {
-        self.id
+    pub fn id(&self) -> &DealId {
+        &self.id
     }
 
     pub fn datetime(&self) -> JDateTimeRange {

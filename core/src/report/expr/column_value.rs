@@ -21,12 +21,12 @@ use rust_decimal::Decimal;
 use smartstring::alias::String as SS;
 use std::cmp::Ordering;
 use std::iter::Sum;
-use std::ops::AddAssign;
+use std::ops::{Add, AddAssign};
 use std::sync::Arc;
 use std::{fmt, iter, mem, slice};
 use yaml_rust2::Yaml;
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Default, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Hash)]
 pub enum ColumnValue<'h> {
     #[default]
     Undefined,
@@ -53,6 +53,13 @@ impl<'h> ColumnValue<'h> {
     pub fn as_amount(&self) -> Option<Amount<'h>> {
         match self {
             ColumnValue::Amount(a) => Some(*a),
+            _ => None,
+        }
+    }
+
+    pub fn as_valued_amount(&self) -> Option<&ValuedAmount<'h>> {
+        match self {
+            ColumnValue::ValuedAmount(a) => Some(a),
             _ => None,
         }
     }
@@ -137,22 +144,41 @@ impl<'h> ColumnValue<'h> {
     pub fn as_reporting_string(&self) -> String {
         match self {
             ColumnValue::Datetime(dt) => {
-                let dtf = Cmd::args().datetime_cmd.datetime_format_or_default();
-                let tz = Cmd::args().datetime_cmd.timezone().unwrap_or(dt.timezone());
+                let dtf = Cmd::get().datetime_fmt_cmd().datetime_format_or_default();
+                let tz = Cmd::get().datetime_fmt_cmd().timezone().unwrap_or(dt.timezone());
                 // format with max precision to avoid inconsistent formats in the reporting output
                 format!("{}", dt.with_timezone(tz).format_with_precision(dtf, dtf.max_precision()))
             }
             ColumnValue::DatetimeRange(range) => {
-                let dtf = Cmd::args().datetime_cmd.datetime_format_or_default();
+                let dtf = Cmd::get().datetime_fmt_cmd().datetime_format_or_default();
                 let mut s = String::new();
                 range.write(&mut s, dtf).unwrap();
                 s
             }
             ColumnValue::Date(date) => {
-                let df = Cmd::args().datetime_cmd.date_format_or_default();
+                let df = Cmd::get().datetime_fmt_cmd().datetime_format_or_default();
                 format!("{}", date.format(df))
             }
             col => col.to_string(),
+        }
+    }
+
+    pub fn as_type_string(&self) -> String {
+        match self {
+            ColumnValue::Undefined => "UNDEFINED".to_string(),
+            ColumnValue::Boolean(b) => format!("Boolean({})", b),
+            ColumnValue::Account(a) => format!("Account({})", a),
+            ColumnValue::Unit(u) => format!("Unit({})", u),
+            ColumnValue::Description(d) => format!("Description({})", d),
+            ColumnValue::String(s) => format!("String({})", s),
+            ColumnValue::StringRef(s) => format!("String({})", s),
+            ColumnValue::Date(_dt) => format!("Date({})", self.as_reporting_string()),
+            ColumnValue::Datetime(dt) => format!("Datetime({})", dt),
+            ColumnValue::DatetimeRange(range) => format!("DatetimeRange({})", range),
+            ColumnValue::Number(n) => format!("Number({})", n),
+            ColumnValue::Amount(a) => format!("Amount({})", a),
+            ColumnValue::ValuedAmount(a) => format!("ValuedAmount({})", a),
+            ColumnValue::List(_l) => format!("List({})", self.as_reporting_string()),
         }
     }
 
@@ -193,6 +219,7 @@ impl<'h> ColumnValue<'h> {
         }
     }
 
+    /*
     pub fn cmp(&self, other: &ColumnValue<'h>) -> JournResult<Ordering> {
         self.as_amount()
             .and_then(|a| {
@@ -231,10 +258,21 @@ impl<'h> ColumnValue<'h> {
                     }
                     Ok(a.len().cmp(&b.len()))
                 } else {
-                    Err(err!("Unable to compare {} with {}", self, other))
+                    //Ok(self.as_reporting_string().cmp(&other.as_reporting_string()))
+                    Err(err!(
+                        "Unable to compare {} with {}",
+                        self.as_type_string(),
+                        other.as_type_string()
+                    ))
                 }
             }
         }
+    }*/
+
+    pub fn try_cmp(&self, other: &ColumnValue<'h>) -> JournResult<Ordering> {
+        self.partial_cmp(other).ok_or_else(|| {
+            err!("Unable to compare {} with {}", self.as_type_string(), other.as_type_string())
+        })
     }
 
     pub fn matches(&self, other: &ColumnValue<'h>) -> JournResult<bool> {
@@ -304,7 +342,7 @@ impl<'h> ColumnValue<'h> {
             ColumnValue::DatetimeRange(_range) => {
                 CellRef::Owned(Box::new(self.as_reporting_string()))
             }
-            ColumnValue::Account(acc) => CellRef::Owned(Box::new(acc)),
+            ColumnValue::Account(acc) => CellRef::Owned(acc.into_cell()),
             ColumnValue::Unit(unit) => CellRef::Owned(Box::new(unit.to_string())),
             ColumnValue::Amount(amount) => CellRef::Owned(amount.into_cell(amount.unit().format())),
             // Format numbers similar to amounts using a number format
@@ -313,7 +351,7 @@ impl<'h> ColumnValue<'h> {
             ColumnValue::ValuedAmount(va) => CellRef::Owned(va.as_cell()),
             ColumnValue::List(mut values) => {
                 if show_multi {
-                    values.sort();
+                    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
 
                     // Don't include zero amounts in the list
                     CellRef::Owned(Box::new(MultiLineCell::new(
@@ -353,7 +391,7 @@ impl<'h> ColumnValue<'h> {
             }
             ColumnValue::ValuedAmount(va) => Yaml::String(va.to_string()),
             ColumnValue::List(mut values) => {
-                values.sort();
+                values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
 
                 Yaml::Array(
                     values
@@ -421,6 +459,35 @@ impl fmt::Display for ColumnValue<'_> {
     }
 }
 
+impl PartialOrd for ColumnValue<'_> {
+    /// The comparison of `ColumnValues` may result in a `None` when either is `undefined`.
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        if self.is_undefined() || other.is_undefined() {
+            return None;
+        }
+
+        match (self, other) {
+            (ColumnValue::Undefined, _) | (_, ColumnValue::Undefined) => None,
+            (ColumnValue::List(a), ColumnValue::List(b)) => a.partial_cmp(b),
+            (ColumnValue::Boolean(a), ColumnValue::Boolean(b)) => Some(a.cmp(b)),
+            (ColumnValue::Amount(a), ColumnValue::Amount(b)) => Some(a.cmp(b)),
+            (ColumnValue::Number(a), ColumnValue::Number(b)) => Some(a.cmp(b)),
+            (ColumnValue::Datetime(a), ColumnValue::Datetime(b)) => Some(a.cmp(b)),
+            (ColumnValue::DatetimeRange(a), ColumnValue::DatetimeRange(b)) => Some(a.cmp(b)),
+            (ColumnValue::ValuedAmount(a), ColumnValue::ValuedAmount(b)) => {
+                Some(a.amount().cmp(&b.amount()))
+            }
+            (a, b) if a.as_str().is_some() && b.as_str().is_some() => {
+                Some(a.as_str().unwrap().cmp(b.as_str().unwrap()))
+            }
+            (a, b) if a.as_date().is_some() && b.as_date().is_some() => {
+                Some(a.as_date().unwrap().cmp(&b.as_date().unwrap()))
+            }
+            (a, b) => Some(a.as_reporting_string().cmp(&b.as_reporting_string())),
+        }
+    }
+}
+
 /*
 impl<'a> From<ColumnValue<'a>> for Cell<'a> {
     fn from(value: ColumnValue<'a>) -> Self {
@@ -458,28 +525,55 @@ impl<'h, A: Amounts<'h>> From<A> for ColumnValue<'h> {
     }
 }
 
-impl AddAssign for ColumnValue<'_> {
-    /// Adds one `ColumnValue` to another. We use [ColumnValue::cmp] to check whether one `ColumnValue`
-    /// is add-compatible with another - otherwise a list is formed.
-    fn add_assign(&mut self, rhs: Self) {
-        if *self == ColumnValue::Undefined {
-            *self = rhs;
-            return;
-        }
+impl<'h> Add for &ColumnValue<'h> {
+    type Output = Option<ColumnValue<'h>>;
+
+    /// Gets whether the left and right can be added without creating a new list.
+    fn add(self, rhs: Self) -> Self::Output {
         match (self, rhs) {
-            (ColumnValue::Number(left), ColumnValue::Number(right)) => *left += right,
-            (ColumnValue::Amount(left), ColumnValue::Amount(right))
-                if left.unit() == right.unit() =>
-            {
-                *left += right
+            (ColumnValue::Undefined, ColumnValue::Undefined) => Some(ColumnValue::Undefined),
+            (ColumnValue::Number(a), ColumnValue::Number(b)) => Some(ColumnValue::Number(a + b)),
+            (ColumnValue::Amount(a), ColumnValue::Amount(b)) if a.unit() == b.unit() => {
+                Some(ColumnValue::Amount(a + b))
             }
-            (ColumnValue::Undefined, _r) => unreachable!(),
+            (ColumnValue::List(a), ColumnValue::List(b)) => {
+                let mut res = vec![];
+                'next_r: for r in b {
+                    for l in a.iter() {
+                        if let Some(sum) = l + r {
+                            res.push(sum);
+                            continue 'next_r;
+                        } else {
+                            res.push(l.clone());
+                        }
+                    }
+                    res.push(r.clone());
+                }
+                Some(ColumnValue::List(res))
+            }
+            (ColumnValue::List(list), other) | (other, ColumnValue::List(list)) => {
+                let mut res = list.clone();
+                res.push(other.clone());
+                Some(ColumnValue::List(res))
+            }
+            _ => None,
+        }
+    }
+}
+
+impl AddAssign for ColumnValue<'_> {
+    /// Adds one `ColumnValue` to another. We defer to [ColumnValue::add] to sum in simple cases and
+    /// whether one value is add-compatible with another - otherwise a list is formed.
+    fn add_assign(&mut self, rhs: Self) {
+        // Optimise list handling to avoid unnecessary allocation, otherwise defer to add()
+        match (self, rhs) {
+            (left, rhs) if left.is_undefined() => *left = rhs,
             (_, ColumnValue::Undefined) => {}
             (ColumnValue::List(left), ColumnValue::List(right)) => {
                 'next_r: for r in right {
                     for l in left.iter_mut() {
-                        if ColumnValue::cmp(l, &r).is_ok() {
-                            *l += r;
+                        if let Some(sum) = &*l + &r {
+                            *l = sum;
                             continue 'next_r;
                         }
                     }
@@ -487,12 +581,23 @@ impl AddAssign for ColumnValue<'_> {
                 }
             }
             (ColumnValue::List(left), right) => {
-                match left.iter_mut().find(|l| ColumnValue::cmp(l, &right).is_ok()) {
-                    Some(l) => *l += right,
-                    None => left.push(right),
+                for l in left.iter_mut() {
+                    if let Some(sum) = &*l + &right {
+                        *l = sum;
+                        return;
+                    }
+                }
+                // Avoid duplicates in the list
+                if !left.contains(&right) {
+                    left.push(right);
                 }
             }
-            (l, r) => *l = ColumnValue::List(vec![l.clone(), r]),
+            (l, r) => match &*l + &r {
+                Some(sum) => *l = sum,
+                // Avoid duplicates in the list
+                None if *l == r => {}
+                None => *l = ColumnValue::List(vec![l.clone(), r]),
+            },
         }
     }
 }
@@ -565,11 +670,17 @@ impl<'a, 'h> Iterator for ColumnValueIter<'a, 'h> {
 /// A simple sort algorithm for sorting ColumnValues when comparing them
 /// might result in an error.
 pub fn try_sort<'h>(v: &mut [ColumnValue<'h>]) -> JournResult<()> {
+    let err = |a: &ColumnValue<'h>, b: &ColumnValue<'h>| {
+        err!("Unable to compare {} with {}", a.as_type_string(), b.as_type_string())
+    };
+
     for i in 1..v.len() {
         let mut j = i;
         while j > 0 {
             // Only call cmp, propagate errors with `?`
-            if v[j - 1].cmp(&v[j])? != Ordering::Greater {
+            if v[j - 1].partial_cmp(&v[j]).ok_or_else(|| err(&v[j - 1], &v[j]))?
+                != Ordering::Greater
+            {
                 break;
             }
             v.swap(j - 1, j);

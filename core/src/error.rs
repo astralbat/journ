@@ -8,8 +8,9 @@
 use crate::parsing::text_block::TextBlock;
 use crate::parsing::util::interim_space;
 use crate::report::table2;
-use crate::report::table2::{AlignedCell, Alignment, BinaryCell, Row, StyledCell};
+use crate::report::table2::{AlignedCell, Alignment, CellRef, MultiCell, Row, StyledCell};
 use crate::report::term_style::{Colour, Style};
+use pyo3::{DowncastError, DowncastIntoError, PyErr};
 use smartstring::alias::String as SS;
 use std::error::Error;
 use std::ops::Range;
@@ -167,6 +168,10 @@ impl JournError {
         if !msg_pruned {
             if let Some(msg_je) = self.msg.downcast_mut::<JournError>() {
                 msg_je.prune_except_last::<E>();
+            } else if let Some(errs) = self.msg.downcast_mut::<JournErrors>() {
+                for err in errs.errors.iter_mut() {
+                    err.prune_except_last::<E>();
+                }
             }
         } else if take_source {
             self.msg = self.source.take().unwrap();
@@ -265,6 +270,24 @@ impl From<JournErrors> for JournError {
     }
 }
 
+impl From<PyErr> for JournError {
+    fn from(err: PyErr) -> Self {
+        Self::new(err)
+    }
+}
+
+impl From<DowncastError<'_, '_>> for JournError {
+    fn from(err: DowncastError) -> Self {
+        Self::new(err.to_string())
+    }
+}
+
+impl From<DowncastIntoError<'_>> for JournError {
+    fn from(err: DowncastIntoError) -> Self {
+        Self::new(err.to_string())
+    }
+}
+
 impl From<(&TextBlock<'_>, &'static str)> for BlockContextError {
     fn from((block, ctx): (&TextBlock<'_>, &'static str)) -> Self {
         let context = BlockContext::from(block);
@@ -356,6 +379,15 @@ impl From<&BlockContextLine> for Row<'static> {
         let text_style = Style::default().with_fg(Colour::Red);
         let highlighted_text =
             StyledCell::new(SS::from(&value.text[value.highlight_range.clone()]), text_style);
+
+        let text_cell = MultiCell::new([
+            CellRef::from(Box::new(SS::from(&value.text[..value.highlight_range.start]))),
+            CellRef::from(Box::new(highlighted_text)),
+            CellRef::from(Box::new(SS::from(&value.text[value.highlight_range.end..]))),
+        ]);
+        row.append(Box::new(text_cell));
+
+        /*
         let left_binary = BinaryCell::new(
             Box::new(SS::from(&value.text[..value.highlight_range.start])),
             Box::new(highlighted_text),
@@ -364,7 +396,8 @@ impl From<&BlockContextLine> for Row<'static> {
             Box::new(left_binary),
             Box::new(SS::from(&value.text[value.highlight_range.end..])),
         );
-        row.append(binary);
+        row.append(binary);*/
+
         row
     }
 }
@@ -468,7 +501,7 @@ impl fmt::Display for BlockContext {
         table.set_striped(false);
         // maybe not needed functionality if messages are auto-indented with IndentedLineFormat
         // above.
-        table.indent_column(0, 2);
+        //table.indent_column(0, 2);
         for next_line in self.lines.iter() {
             table.push_row(next_line);
         }
@@ -481,12 +514,6 @@ impl fmt::Display for BlockContext {
 
 impl From<&TextBlock<'_>> for BlockContext {
     fn from(block: &TextBlock<'_>) -> Self {
-        // This needs to pass for the indexing below to work.
-        assert!(
-            block.location().is_some() || block.parent().is_none(),
-            "Block has a parent, but no location"
-        );
-
         // Go up the block tree while the parent block is on the same line as the current block.
         // We need full lines so that indexing works correctly.
         // Also, go to the first parent block that is not indented.
@@ -548,7 +575,7 @@ impl From<&TextBlock<'_>> for BlockContext {
             ));
         }
         BlockContext::new(
-            t_block.file().map(|f| f.to_string()),
+            t_block.node().and_then(|n| n.nearest_filename().map(|f| f.display().to_string())),
             Some(t_block.line() as usize),
             Some(t_block.column() as usize + col_adj),
             context_lines,

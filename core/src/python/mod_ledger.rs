@@ -35,17 +35,13 @@ impl PythonLedgerModule {
     /// Statically sets the price database for a particular unit code. This call is invoked in preparation
     /// of python invoking price lookups. Because this is statically set, we need to be able to match which
     /// journal incarnation this is for.
-    pub fn set_price_database(
-        unit_code: &str,
-        price_db: &Arc<PriceDatabase>,
-        journal_incarnation: u32,
-    ) {
+    pub fn set_price_database(unit_code: &str, price_db: &Arc<PriceDatabase>) {
         let alias_owned = unit_code.to_string();
         let price_db = Arc::clone(price_db);
 
         PythonEnvironment::wait_for();
         Python::with_gil(|py| {
-            let journal_dict = PythonEnvironment::journal_dict(py, journal_incarnation, None);
+            let journal_dict = PythonEnvironment::journal_dict(py, None);
 
             match journal_dict
                 .get_item("__price_dbs")
@@ -65,23 +61,15 @@ impl PythonLedgerModule {
         })
     }
 
-    pub fn set_default_price_database(price_db: &Arc<PriceDatabase>, journal_incarnation: u32) {
-        PythonLedgerModule::set_price_database("__default", price_db, journal_incarnation)
+    pub fn set_default_price_database(price_db: &Arc<PriceDatabase>) {
+        PythonLedgerModule::set_price_database("__default", price_db)
     }
 
     fn get_price_database<'a, 'py>(
         mod_ledger: &'a Bound<'py, PyModule>,
-        globals: Bound<'py, PyDict>,
         unit_code: &str,
     ) -> Option<&'a PriceDatabase<'a>> {
-        let journal_incarnation = globals
-            .get_item("__active_journal")
-            .ok()
-            .flatten()
-            .expect("Active journal not set")
-            .extract::<u32>()
-            .unwrap();
-        let dict = PythonEnvironment::journal_dict(mod_ledger.py(), journal_incarnation, None);
+        let dict = PythonEnvironment::journal_dict(mod_ledger.py(), None);
 
         let get_db = |unit_code| {
             dict.get_item("__price_dbs")
@@ -130,13 +118,7 @@ fn price_db_lookup<'py>(
     dt: PyObject,
     within_seconds: usize,
 ) -> PyResult<Option<Py<PyPrice>>> {
-    let globals = mod_ledger
-        .py()
-        .eval(c"globals()", None, None)
-        .unwrap()
-        .extract::<Bound<'py, PyDict>>()
-        .unwrap();
-    match PythonLedgerModule::get_price_database(mod_ledger, globals, bc) {
+    match PythonLedgerModule::get_price_database(mod_ledger, bc) {
         Some(price_db) => {
             let py = mod_ledger.py();
             let datetime =

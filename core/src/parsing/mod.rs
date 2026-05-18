@@ -342,15 +342,15 @@ macro_rules! parse_node {
 
 #[cfg(any(test, doctest, feature = "testing"))]
 mod testing {
-    use crate::alloc::HerdAllocator;
     use crate::configuration::Configuration;
     use crate::error::{JournError, JournResult};
-    use crate::journal_node::{JournalNode, JournalNodeKind, NodeId};
+    use crate::journal_context::JournalContext;
+    use crate::journal_node::{JournalNode, JournalNodeKind};
     use crate::parsing::block_parse;
     use crate::parsing::input::TextBlockInput;
     use crate::parsing::parser::JournalParseNode;
     use crate::parsing::text_block::TextBlock;
-    use bumpalo_herd::Herd;
+    use crate::tree_id::TreeId;
     use nom::IResult;
     use std::cell::RefCell;
     use std::thread::Scope;
@@ -396,23 +396,21 @@ mod testing {
     where
         'h: 's,
     {
-        let herd = Box::leak(Box::new(Herd::new()));
-        let allocator = herd.get().alloc(HerdAllocator::new(herd));
+        let allocator = JournalContext::current().allocator();
         let tb = &*allocator.alloc(TextBlock::from(text));
-        let node_id = allocator.alloc(NodeId::new_root());
         let node = allocator.alloc(JournalNode::new(
             None,
-            node_id,
+            TreeId::new_root().into(),
             None,
             JournalNodeKind::Entry,
-            tb.as_input(allocator),
+            //tb.as_input(allocator),
             allocator,
         ));
         let parse_node_config: Configuration<'h> = match config {
             Some(config) => config.clone(),
-            None => Configuration::new(allocator, node_id),
+            None => Configuration::new(),
         };
-        JournalParseNode::new_root(node, parse_node_config, scope)
+        JournalParseNode::new_root(node, tb, parse_node_config, scope)
     }
 
     /// `$config` should be a `Arc<Configuration>` type that may get modified as a result of the parser's actions.

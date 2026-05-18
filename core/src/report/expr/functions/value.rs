@@ -8,6 +8,7 @@
 use crate::amount::Amount;
 use crate::err;
 use crate::error::JournResult;
+use crate::journal_context::JournalContext;
 use crate::report::expr::context::IdentifierContext;
 use crate::report::expr::{ColumnValue, Expr};
 use crate::unit::Unit;
@@ -34,10 +35,9 @@ pub fn value<'h>(
                     "Function 'value()' requires the first argument to be a string representing a unit"
                 ))
                 .map(|s| {
-                    context
-                        .config()
+                    JournalContext::current().journal().config()
                         .get_unit(s)
-                        .unwrap_or(context.config().allocator().alloc(Unit::new(s)))
+                        .unwrap_or(JournalContext::current().allocator().alloc(Unit::new(s)))
                 })?;
 
             // The second argument is evaluated as the base amount that needs to be valued.

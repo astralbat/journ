@@ -7,7 +7,6 @@
  */
 use crate::directive::{Directive, DirectiveKind};
 use crate::error::JournResult;
-use crate::journal::Journal;
 use crate::parsing::JParseResult;
 use crate::parsing::input::TextBlockInput;
 use crate::parsing::parser::JournalParseNode;
@@ -106,7 +105,6 @@ pub trait ModuleCommand: Send {
 
     fn create(
         &self,
-        journal: &Journal,
         args: &Arguments,
         command_args: &[String],
     ) -> JournResult<Box<dyn ExecCommand>>;

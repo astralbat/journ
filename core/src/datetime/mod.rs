@@ -17,7 +17,7 @@ use chrono::format::{Item, Numeric, Parsed};
 use chrono_tz::Tz;
 pub use date_and_time::DateAndTime;
 pub use jdate::JDate;
-pub use jdatetime::JDateTime;
+pub use jdatetime::{JDateTime, MAX_DATETIME, MIN_DATETIME};
 pub use jdatetime_range::JDateTimeRange;
 pub use jtime::JTime;
 use nom::Finish;
@@ -86,6 +86,7 @@ impl<'a> TryFrom<&Item<'a>> for DateTimePrecision {
                 Numeric::Day => Ok(DateTimePrecision::Day),
                 Numeric::Month => Ok(DateTimePrecision::Month),
                 Numeric::Year => Ok(DateTimePrecision::Year),
+                Numeric::YearMod100 => Ok(DateTimePrecision::Year),
                 Numeric::Minute => Ok(DateTimePrecision::Minute),
                 Numeric::Second => Ok(DateTimePrecision::Second),
                 Numeric::Hour => Ok(DateTimePrecision::Hour),

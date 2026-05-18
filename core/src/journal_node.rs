@@ -12,15 +12,14 @@ use crate::err;
 use crate::error::JournResult;
 use crate::journal_entry::{EntryId, JournalEntry};
 use crate::journal_node_segment::JournalNodeSegment;
-use crate::parsing::input::TextBlockInput;
-use crate::parsing::text_block::TextBlock;
+use crate::parsing::text_block::{PaddingPolicy, TextBlockWriter};
+use crate::tree_id::{BranchCountingTreeId, TreeId};
+use std::fmt::Debug;
 use std::fs::OpenOptions;
-use std::hash::Hash;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{MutexGuard, OnceLock};
-use std::{cmp, fmt, fs};
+use std::{cmp, fmt, fs, io};
 
 /// An iterator over the directives from a journal node's tree.
 pub struct DirectiveTreeIter<'h, 'a, 'b> {
@@ -85,6 +84,9 @@ impl<'t, 'a, 'b> Drop for DirectiveTreeIter<'t, 'a, 'b> {
     }
 }
 
+pub type NodeId = BranchCountingTreeId;
+
+/*
 /// A unique identifier for nodes in journal trees. Each node id is allocated uniquely.
 ///
 /// NodeIds can be compared as nodes are created with _some_ guarantee of order (assumed behaviour of parser):
@@ -92,107 +94,187 @@ impl<'t, 'a, 'b> Drop for DirectiveTreeIter<'t, 'a, 'b> {
 /// - Children Ids are always created after parent Ids.
 // Implementation notes:
 // Different branches may create nodes at different rates with different ordering of `id`.
-#[derive(Debug, Clone, Copy)]
-pub struct NodeId<'h> {
+#[derive(Clone, Copy)]
+pub struct NodeId {
     /// Parent, or `Err(i)` if at the root node. Where `i` represents the `ith` journal incarnation.
-    parent: Result<&'h NodeId<'h>, u32>,
+    //parent: Result<&'h NodeId<'h>, u16>,
     /// A unique identifier.
-    id: u32,
+    id: u16,
+}
+impl Debug for NodeId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self)
+    }
 }
 
-pub static FIRST_NODE_ID: NodeId = NodeId { parent: Err(1), id: 1 };
-pub static LAST_NODE_ID: NodeId = NodeId { parent: Err(u32::MAX), id: u32::MAX };
-impl<'h> NodeId<'h> {
+impl<'h> NodeId {
+    pub const ROOT: NodeId = NodeId { id: 0 };
+
     pub fn new_root() -> Self {
-        static ROOT_COUNTER: AtomicU32 = AtomicU32::new(1);
-        Self { parent: Err(ROOT_COUNTER.fetch_add(1, Ordering::Relaxed)), id: Self::generate_id() }
+        let parents = JournalContext::current().node_parents();
+        assert_eq!(parents.count(), 0);
+        parents.push(0);
+
+        NodeId { id: Self::ROOT.id }
     }
 
-    fn generate_id() -> u32 {
-        static ID_COUNTER: AtomicU32 = AtomicU32::new(1);
-        ID_COUNTER.fetch_add(1, Ordering::Relaxed)
+    fn parent(&self) -> Option<NodeId> {
+        let parents = JournalContext::current().node_parents();
+        // This is the root
+        if self.id == 0 {
+            return None;
+        }
+        let parent = parents[self.id as usize];
+        Some(NodeId { id: parent })
     }
 
-    /// Gets the depth of the node in the journal tree where 0 is the root.
-    fn depth(&self) -> u32 {
-        match self.parent {
-            Ok(p) => p.depth() + 1,
-            Err(_) => 0,
+    /// Gets the depth of the node and the journal id in the node tree where a depth of
+    /// 0 is the root.
+    fn depth(&self) -> u16 {
+        let parents = JournalContext::current().node_parents();
+        let mut depth = 0;
+        let mut id = self.id;
+        loop {
+            // Root found
+            if id == 0 {
+                break depth;
+            }
+            id = parents[id as usize];
+            depth += 1;
         }
     }
 
-    /// Gets the journal incarnation number. That is, how many journals have been created
-    /// since the start of the program. Each journal is assigned a unique sequential incarnation
-    /// number.
-    /// The first journal has an incarnation of 1.
-    pub fn journal_incarnation(&self) -> u32 {
-        match self.parent {
-            Ok(p) => p.journal_incarnation(),
-            Err(i) => i,
+    // We find the max() by looking at the parents structure. We could also
+    // more simply by examining the journal node tree directly but the problem
+    // is that the journal won't yet be available during parsing - and we may
+    // be called during parsing.
+    pub fn max() -> NodeId {
+        // The algorithm isn't immediately intuitive. We know that the root
+        // id is 0, so we look for the last 0. This gives us the last child of
+        // the root and its index is its id. Then repeat by looking for the last
+        // occurrence of that id.
+        let parents = JournalContext::current().node_parents();
+
+        // The algorithm would spin forever when empty.
+        if parents.count() == 0 {
+            return Self::ROOT;
         }
+
+        let mut curr_parent = 0;
+        loop {
+            let mut last = None;
+            // Not a DoubleEndedIterator so can't reverse.
+            for (i, parent) in parents.iter() {
+                if *parent == curr_parent {
+                    last = Some(i as u16);
+                }
+            }
+            match last {
+                Some(last) => curr_parent = last,
+                None => break NodeId { id: curr_parent },
+            }
+        }
+
+        /*
+        let mut node = JournalContext::current().journal().root();
+        loop {
+            match node.children().last() {
+                Some(last_child) => node = last_child,
+                None => break node.id(),
+            }
+        }*/
     }
 
-    pub fn branch(&'h self) -> Self {
-        Self { parent: Ok(self), id: Self::generate_id() }
+    pub fn branch(self) -> Self {
+        let parents = JournalContext::current().node_parents();
+        let len = parents.count() as u16;
+
+        parents.push(self.id);
+        Self { id: len }
     }
 
     /// A numeric identifier for this node, guaranteed to be unique. However, it should
-    /// not be used for ordering purposes.
-    pub fn id(&self) -> u32 {
+    /// not be directly used for ordering purposes.
+    pub fn id(&self) -> u16 {
         self.id
     }
 }
 
-impl PartialEq for NodeId<'_> {
+impl PartialEq for NodeId {
     fn eq(&self, other: &Self) -> bool {
         self.id == other.id
     }
 }
 
-impl Eq for NodeId<'_> {}
+impl Eq for NodeId {}
 
-impl Hash for NodeId<'_> {
+impl Hash for NodeId {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.id.hash(state);
     }
 }
 
-impl PartialOrd for NodeId<'_> {
+impl PartialOrd for NodeId {
     fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl Ord for NodeId<'_> {
+impl Ord for NodeId {
+    /// Compares two nodes
     fn cmp(&self, other: &Self) -> cmp::Ordering {
+        if self.id == other.id {
+            return cmp::Ordering::Equal;
+        }
         let mut self_depth = self.depth();
         let mut other_depth = other.depth();
 
         // Bring the lower node up to the same depth as the upper one.
-        let mut self_base = self;
-        let mut other_base = other;
+        let mut self_base = *self;
+        let mut other_base = *other;
         while self_depth > other_depth {
-            self_base = self_base.parent.unwrap();
+            self_base = self_base.parent().unwrap();
             self_depth -= 1;
         }
         while other_depth > self_depth {
-            other_base = other_base.parent.unwrap();
+            other_base = other_base.parent().unwrap();
             other_depth -= 1;
         }
 
         // Compare the nodes starting from the same depth.
-        self_base.parent.cmp(&other_base.parent).then_with(|| self_base.id.cmp(&other_base.id))
+        self_base
+            .parent()
+            .cmp(&other_base.parent())
+            .then_with(|| self_base.id.cmp(&other_base.id))
+            .then_with(|| {
+                // We'll get here for example if comparing a parent to a chld node.
+                // Then just compare on the id.
+                self.id.cmp(&other.id)
+            })
     }
 }
 
-impl fmt::Display for NodeId<'_> {
+impl fmt::Display for NodeId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.parent {
-            Ok(p) => write!(f, "{}.{}", p, self.id),
-            Err(i) => write!(f, "{}#{}", i, self.id),
+        let parents = JournalContext::current().node_parents();
+        let jid = JournalContext::current().jid();
+        let mut ancestors = Vec::with_capacity(4);
+        let mut next_parent = self.id;
+        loop {
+            if next_parent == 0 {
+                break;
+            }
+            let parent = parents[next_parent as usize];
+            ancestors.push(parent);
+            next_parent = parent;
         }
+        write!(f, "{}#", jid)?;
+        for a in ancestors.iter().rev() {
+            write!(f, "{}.", a)?;
+        }
+        write!(f, "{}", self.id)
     }
-}
+}*/
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum JournalNodeKind {
@@ -202,12 +284,11 @@ pub enum JournalNodeKind {
 }
 
 /// A node usually representing a file on the filesystem.
-#[derive(Debug)]
 pub struct JournalNode<'h> {
-    node_id: &'h NodeId<'h>,
+    node_id: NodeId,
     kind: JournalNodeKind,
     filename: Option<&'h Path>,
-    input: TextBlockInput<'h, ()>,
+    //input: TextBlockInput<'h, ()>,
     allocator: &'h HerdAllocator<'h>,
     segments: OnceLock<Vec<&'h JournalNodeSegment<'h>>>,
     //directives: Mutex<Vec<Directive<'h>>>,
@@ -219,18 +300,17 @@ impl<'h> JournalNode<'h> {
     /// Creates a new JournalFile
     pub fn new(
         parent: Option<&'h JournalNode<'h>>,
-        node_id: &'h NodeId,
+        node_id: NodeId,
         filename: Option<&'h Path>,
         kind: JournalNodeKind,
-        input: TextBlockInput<'h, ()>,
-        //directives: Vec<Directive<'h>>,
+        //input: TextBlockInput<'h, ()>,
         allocator: &'h HerdAllocator<'h>,
     ) -> &'h JournalNode<'h> {
         allocator.alloc(Self {
             node_id,
             filename,
             kind,
-            input,
+            //input,
             allocator,
             segments: OnceLock::new(),
             parent,
@@ -260,8 +340,55 @@ impl<'h> JournalNode<'h> {
         files
     }
 
-    pub fn find_by_node_id(&self, node_id: &'h NodeId<'h>) -> Option<&Self> {
-        if self.node_id == node_id {
+    /// Gets the leaf child at the right-most section of the subtree.
+    pub fn last_child_recursive(&self) -> Option<&JournalNode<'h>> {
+        self.children().last().and_then(|c| c.last_child_recursive())
+    }
+
+    /*
+    /// Creates a new child node from this parent node.
+    /// `child_num` must be the number of children created by the parser node.
+    pub fn new_child_unchecked(
+        &'h self,
+        filename: Option<&'h Path>,
+        kind: JournalNodeKind,
+        child_num: usize,
+    ) -> &'h JournalNode<'h> {
+        let child = JournalNode {
+            parent: Some(self),
+            filename,
+            node_id: NodeId::branch(self.id()),
+            kind,
+            allocator: self.allocator,
+            segments: OnceLock::new(),
+            children: OnceLock::new(),
+        };
+        self.allocator.alloc(child)
+    }
+
+    /// Creates a new child node from this parent node.
+    /// If the filename has been parsed before, an `Err` is returned with that node.
+    pub fn new_child(
+        &'h self,
+        filename: Option<&'h Path>,
+        kind: JournalNodeKind,
+    ) -> Result<&'h JournalNode<'h>, &'h JournalNode<'h>> {
+        // Check parents recursively to see whether we've parsed this file before
+        // to prevent infinite parsing loop.
+        if let Some(filename) = filename {
+            for parent in iter::successors(Some(self), |c| c.parent()) {
+                if parent.filename == Some(filename) {
+                    warn!("Circular loop detected whilst parsing file: {}", filename.display());
+                    return Err(parent);
+                }
+            }
+        }
+
+        Ok(self.new_child_unchecked(filename, kind))
+    }*/
+
+    pub fn find_by_node_id(&self, node_id: &TreeId) -> Option<&Self> {
+        if &self.node_id == node_id {
             return Some(self);
         }
         for child in self.children.get().into_iter().flatten() {
@@ -301,8 +428,8 @@ impl<'h> JournalNode<'h> {
         self.allocator
     }
 
-    pub fn id(&self) -> &'h NodeId<'h> {
-        self.node_id
+    pub fn id(&self) -> &NodeId {
+        &self.node_id
     }
 
     pub fn file_kind(&self) -> JournalNodeKind {
@@ -315,16 +442,18 @@ impl<'h> JournalNode<'h> {
     }
 
     pub fn set_segments(&self, segments: Vec<&'h JournalNodeSegment<'h>>) {
-        self.segments.set(segments).expect("Segments already set");
+        // expect() call calls debug() which can panic, so keep it simple.
+        self.segments.set(segments).unwrap_or_else(|_| panic!("Segments already set"));
     }
 
+    /*
     pub fn input(&self) -> TextBlockInput<'h, ()> {
         self.input
     }
 
     pub fn block(&self) -> &TextBlock<'h> {
         self.input.block()
-    }
+    }*/
 
     pub fn clear_directives_filter<F>(&self, filter: F)
     where
@@ -337,7 +466,7 @@ impl<'h> JournalNode<'h> {
 
     /// Appends a new entry directive to the end of the node.
     pub(crate) fn append_entry(&self, mut entry: JournalEntry<'h>) -> &'h JournalEntry<'h> {
-        entry.attach(self.node_id);
+        entry.attach(&self);
         let alloc_entry: &'h JournalEntry<'h> = self.allocator.alloc(entry);
         self.append_directive(DirectiveKind::Entry(alloc_entry));
         alloc_entry
@@ -421,7 +550,7 @@ impl<'h> JournalNode<'h> {
 
     /// Inserts a JournalEntry within the specified file and in the correct date position.
     pub(crate) fn insert_entry(&self, mut entry: JournalEntry<'h>) -> &'h JournalEntry<'h> {
-        entry.attach(self.node_id);
+        entry.attach(&self);
         let entry: &'h JournalEntry<'h> = self.allocator.alloc(entry);
         self.insert_directive(DirectiveKind::Entry(entry));
         entry
@@ -433,7 +562,7 @@ impl<'h> JournalNode<'h> {
         mut new_entry: JournalEntry<'h>,
         allocator: &'h HerdAllocator<'h>,
     ) -> (&'h JournalEntry<'h>, &'h JournalEntry<'h>) {
-        new_entry.attach(self.node_id);
+        new_entry.attach(&self);
         let entry = allocator.alloc(new_entry);
         for seg in self.segments() {
             for dir in seg.directives().iter_mut() {
@@ -448,19 +577,6 @@ impl<'h> JournalNode<'h> {
             }
         }
         panic!("Entry no longer exists")
-    }
-
-    pub fn remove_entry(&self, date_id: u64) {
-        for seg in self.segments() {
-            let mut dir_lock = seg.directives();
-            dir_lock.retain(|dir| {
-                if let DirectiveKind::Entry(parsed_entry) = dir.kind() {
-                    parsed_entry.date_id() != date_id
-                } else {
-                    true
-                }
-            })
-        }
     }
 
     pub fn remove_directive(&self, mut index: usize) -> Option<Directive<'h>> {
@@ -478,8 +594,12 @@ impl<'h> JournalNode<'h> {
         DirectiveTreeIter::new(self)
     }
 
-    pub fn entry(&self, entry_id: EntryId) -> &'h JournalEntry<'h> {
-        assert_eq!(entry_id.node_id(), self.node_id, "Entries fileId does not match");
+    pub fn entry(&self, entry_id: &EntryId) -> &'h JournalEntry<'h> {
+        assert_eq!(
+            entry_id.parent().as_ref(),
+            Some(&*self.node_id),
+            "Entries fileId does not match"
+        );
 
         for seg in self.segments() {
             for dir in seg.directives().iter() {
@@ -493,7 +613,7 @@ impl<'h> JournalNode<'h> {
         panic!("Entry no longer exists")
     }
 
-    fn write_file(&self) -> JournResult<()> {
+    fn write_file(&self, padding_policy: PaddingPolicy) -> JournResult<()> {
         match self.filename {
             Some(file) => {
                 debug!("Writing {}", file.to_str().unwrap());
@@ -505,7 +625,9 @@ impl<'h> JournalNode<'h> {
                         .open(file)
                         .map_err(|e| err!(e; "IO Error"))?,
                 );
-                self.write(&mut writer, &AlwaysIncluded)?;
+                let mut block_writer = TextBlockWriter::new(&mut writer);
+                block_writer.set_padding_policy(padding_policy);
+                self.write(&mut block_writer, &AlwaysIncluded)?;
                 // Ensure a newline at the end of the file as is best practice.
                 writeln!(writer).map_err(|e| err!(e; "IO Error"))?;
                 Ok(())
@@ -515,12 +637,12 @@ impl<'h> JournalNode<'h> {
     }
 
     /// Writes the nearest file to this node which is the node's file or the nearest file in the parent chain.
-    pub fn write_nearest_file(&self) -> JournResult<()> {
+    pub fn write_nearest_file(&self, padding_policy: PaddingPolicy) -> JournResult<()> {
         if self.filename.is_some() {
-            self.write_file()
+            self.write_file(padding_policy)
         } else {
             match &self.parent {
-                Some(parent) => parent.write_nearest_file(),
+                Some(parent) => parent.write_nearest_file(padding_policy),
                 None => Err(err!(
                     "Cannot write journal node: node and its parents have no backing file"
                 )),
@@ -529,16 +651,16 @@ impl<'h> JournalNode<'h> {
     }
 
     /// Writes the file backing this node if it has one, and recursively, all child nodes.
-    pub fn write_file_recursive(&self) -> JournResult<()> {
+    pub fn write_file_recursive(&self, padding_policy: PaddingPolicy) -> JournResult<()> {
         if self.filename.is_some() {
-            self.write_file()?;
+            self.write_file(padding_policy)?;
         }
 
         for seg in self.segments() {
             for dir in seg.directives().iter() {
                 match dir.kind() {
                     DirectiveKind::Branch(node) | DirectiveKind::Include(node) => {
-                        node.write_file_recursive()?;
+                        node.write_file_recursive(padding_policy)?;
                     }
                     _ => {}
                 }
@@ -549,15 +671,14 @@ impl<'h> JournalNode<'h> {
 
     pub fn write<W: Write, F: Filter<Directive<'h>>>(
         &self,
-        writer: &mut W,
+        writer: &mut TextBlockWriter<W>,
         directive_filter: &F,
     ) -> JournResult<()> {
-        for (i, seg) in self.segments().into_iter().enumerate() {
+        for seg in self.segments().into_iter() {
             self.write_from_dir_iter(
                 Box::new(seg.directives().iter().map(|dir| (*seg, dir))),
                 writer,
                 directive_filter,
-                if i == 0 { "" } else { "\n" },
             )?;
         }
         Ok(())
@@ -565,73 +686,40 @@ impl<'h> JournalNode<'h> {
 
     pub fn flat_write_all<W: Write, F: Filter<Directive<'h>>>(
         &self,
-        writer: &mut W,
+        writer: &mut TextBlockWriter<W>,
         directive_filter: &F,
     ) -> JournResult<()> {
-        self.write_from_dir_iter(Box::new(self.all_directives_iter()), writer, directive_filter, "")
+        self.write_from_dir_iter(Box::new(self.all_directives_iter()), writer, directive_filter)
     }
 
     fn write_from_dir_iter<'a, W: Write, F: Filter<Directive<'h>>>(
         &self,
         dir_iter: Box<dyn Iterator<Item = (&'a JournalNodeSegment<'h>, &'a Directive<'h>)> + 'a>,
-        writer: &mut W,
+        writer: &mut TextBlockWriter<W>,
         directive_filter: &F,
-        initial_leading_space: &str,
     ) -> JournResult<()> {
         let map_err = |e| err!(e; "IO Error");
         let dir_iter: Box<dyn Iterator<Item = (&'a JournalNodeSegment, &'a Directive)>> =
             Box::new(dir_iter.filter(|(_, d)| directive_filter.is_included(d)));
-        let mut last_leading_space = initial_leading_space;
-        for (i, (seg, dir)) in dir_iter.enumerate() {
-            // For the second directive onwards, the minimal leading space is a newline.
-            if i > 0 && last_leading_space.is_empty() {
-                last_leading_space = "\n";
-            }
-            match dir.parsed() {
-                Some(parsed) => {
-                    // Makes print cmd cleaner
-                    if i == 0 {
-                        write!(writer, "{}", parsed.skip_leading_blank_lines().0)
-                            .map_err(map_err)?;
-                    } else {
-                        write!(writer, "{parsed}").map_err(map_err)?;
-                    }
-                    last_leading_space = parsed.leading_blank_lines()
-                }
-                None => {
-                    // If there is no raw text, it is expected to be because these are added/changed directives.
-                    // In this case, we copy the last leading space from the previous raw directive.
-                    match dir.kind() {
-                        DirectiveKind::Entry(entry) => {
-                            write!(writer, "{last_leading_space}{entry}").map_err(map_err)?;
-                        }
-                        DirectiveKind::Price(price) => {
-                            write!(writer, "{last_leading_space}").map_err(map_err)?;
-                            // We write the price with the segment's config which applies
-                            // to all prices in the segment.
-                            price.write(writer, seg.config()).map_err(map_err)?;
-                        }
-                        _ => panic!(
-                            "The only objects that can be written are entries and prices; write parsed text for other directives"
-                        ),
-                    }
-                }
-            }
+        for (seg, dir) in dir_iter {
+            writer.write(dir, Some(seg.config())).map_err(map_err)?;
         }
         Ok(())
     }
 
     /// Prints the journal to stdout
     pub fn print<F: Filter<Directive<'h>>>(&self, directive_filter: &F) -> JournResult<()> {
-        let stdout = std::io::stdout();
+        let stdout = io::stdout();
         let mut writer = BufWriter::new(stdout);
-        self.write(&mut writer, directive_filter)
+        let mut block_writer = TextBlockWriter::new(&mut writer);
+        self.write(&mut block_writer, directive_filter)
     }
 
     pub fn print_all<F: Filter<Directive<'h>>>(&self, directive_filter: &F) -> JournResult<()> {
-        let stdout = std::io::stdout();
+        let stdout = io::stdout();
         let mut writer = BufWriter::new(stdout);
-        self.flat_write_all(&mut writer, directive_filter)
+        let mut block_writer = TextBlockWriter::new(&mut writer);
+        self.flat_write_all(&mut block_writer, directive_filter)
     }
 }
 
@@ -643,10 +731,17 @@ impl PartialEq for JournalNode<'_> {
 
 impl Eq for JournalNode<'_> {}
 
+impl Debug for JournalNode<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "JournalNode(id={:?}, filename={:?})", self.node_id, self.filename)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::directive::Directive;
     use crate::*;
+    use indoc::indoc;
 
     #[test]
     fn insert_directive() {
@@ -671,5 +766,31 @@ mod tests {
         assert_eq!(directives.next(), Some(&e2_clone));
         assert_eq!(directives.next(), Some(&e3_clone));
         assert_eq!(directives.next(), Some(&e4_clone));
+    }
+
+    #[test]
+    fn test_segment_config() {
+        let journ = journ!(indoc! {"
+             unit $
+               format $0.00
+
+             branch
+               2000-01-01
+                 Account  $12.00
+                 Account2
+        "});
+
+        let branch_node = journ.root().children().next();
+        assert!(branch_node.is_some());
+        let branch_node = branch_node.unwrap();
+        let branch_config = branch_node.segments().last().unwrap().config();
+        println!(
+            "{}",
+            branch_node.segments().last().unwrap().directives().last().unwrap().parsed().unwrap()
+        );
+        let unit = branch_config.get_unit("$");
+        assert!(unit.is_some());
+        let unit = unit.unwrap();
+        assert_eq!(unit.with_quantity(dec!(12)).to_string(), "$12.00");
     }
 }

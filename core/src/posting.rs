@@ -8,51 +8,25 @@
 use crate::account::Account;
 use crate::alloc::HerdAllocator;
 use crate::amount::Amount;
-use crate::journal_entry::EntryId;
-use crate::parsing::text_block::TextBlock;
+use crate::configuration::Configuration;
+use crate::parsing::text_block::{BlockObject, TextBlock, TextBlockBuf};
+use crate::tree_id::TreeId;
 use crate::unit::Unit;
 use crate::valued_amount::{PostingValuation, ValuedAmount};
 use crate::valuer::Valuation;
 use std::cell::Cell;
+use std::cmp::Ordering;
 use std::fmt;
+use std::fmt::Write;
 use std::sync::Arc;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PostingId<'h> {
-    entry_id: Option<EntryId<'h>>,
-    id: u32,
-}
-
-impl<'h> PostingId<'h> {
-    pub fn dangling() -> Self {
-        Self { entry_id: None, id: 0 }
-    }
-
-    pub fn attach(&mut self, entry_id: EntryId<'h>) {
-        thread_local! {
-            static POSTING_COUNTER: Cell<u32> = Cell::new(1);
-        }
-        let new_id = POSTING_COUNTER.with(|k| {
-            let prev_id = k.get();
-            k.set(prev_id + 1);
-            prev_id + 1
-        });
-        self.id = new_id;
-        self.entry_id = Some(entry_id);
-    }
-
-    pub fn entry_id(&self) -> EntryId<'h> {
-        self.entry_id.expect("EntryId not initialized")
-    }
-}
+pub type PostingId = TreeId;
 
 #[derive(Debug, Clone)]
 pub struct Posting<'h> {
-    posting_id: PostingId<'h>,
+    posting_id: TreeId,
     /// The block from which this posting was parsed, if it was parsed.
-    text_block: Option<&'h TextBlock<'h>>,
-    // Account spacing prefix.
-    account_spacing: &'h str,
+    block: Option<&'h TextBlock<'h>>,
     account: Arc<Account<'h>>,
     valued_amount: ValuedAmount<'h>,
     balance_assertion: Option<Amount<'h>>,
@@ -62,18 +36,16 @@ pub struct Posting<'h> {
 
 impl<'h> Posting<'h> {
     pub fn new(
-        text_block: Option<&'h TextBlock<'h>>,
-        account_spacing: &'h str,
+        block: Option<&'h TextBlock<'h>>,
         account: Arc<Account<'h>>,
         valued_amount: ValuedAmount<'h>,
         balance_assertion: Option<Amount<'h>>,
         comment: Option<&'h str>,
     ) -> Self {
         Self {
-            posting_id: PostingId::dangling(),
-            text_block,
+            posting_id: TreeId::new_root(),
+            block,
             amount_elided: valued_amount.is_nil(),
-            account_spacing,
             account,
             valued_amount,
             balance_assertion,
@@ -82,29 +54,29 @@ impl<'h> Posting<'h> {
     }
 
     /// Attaches this posting to the entry specified by `entry_id`.
-    pub(crate) fn attach(&mut self, entry_id: EntryId<'h>) {
-        self.posting_id.attach(entry_id);
+    pub(crate) fn attach(&mut self, entry_id: &TreeId) {
+        thread_local! {
+            static POSTING_COUNTER: Cell<usize> = Cell::new(1);
+        }
+        let new_id = POSTING_COUNTER.with(|k| {
+            let prev_id = k.get();
+            k.set(prev_id + 1);
+            prev_id + 1
+        });
+        self.posting_id = entry_id.branch(new_id);
     }
 
     pub(super) fn detach(&mut self) {
-        self.posting_id = PostingId::dangling();
+        self.posting_id = TreeId::new_root();
     }
 
-    pub fn id(&self) -> PostingId<'h> {
-        self.posting_id
+    pub fn id(&self) -> &TreeId {
+        &self.posting_id
     }
 
     /// The block from which this posting was parsed.
     pub fn block(&self) -> Option<&'h TextBlock<'h>> {
-        self.text_block
-    }
-
-    pub fn leading_whitespace(&self) -> &'h str {
-        self.account_spacing
-    }
-
-    pub fn set_leading_whitespace(&mut self, spacing: &'h str) {
-        self.account_spacing = spacing;
+        self.block
     }
 
     pub fn account(&self) -> &Arc<Account<'h>> {
@@ -192,6 +164,10 @@ impl<'h> Posting<'h> {
         self.valued_amount.set_valuation(val)
     }
 
+    pub fn remove_valuation(&mut self, unit: &Unit<'h>) -> bool {
+        self.valued_amount.remove_valuation(unit)
+    }
+
     pub fn value_units(&self) -> impl Iterator<Item = &'h Unit<'h>> + '_ {
         debug_assert!(!self.valued_amount.is_nil(), "Amount not set; set amount first");
 
@@ -226,49 +202,54 @@ impl<'h> Posting<'h> {
 
         self.amount() < 0
     }
-
-    /*
-    pub fn clone_in<A2: Allocator>(&self, allocator: A2) -> Posting<'h, A2> {
-        Posting {
-            posting_id: OnceLock::new(),
-            account_spacing: self.account_spacing,
-            account: self.account.clone(),
-            valued_amount: self.valued_amount.clone(),
-            balance_assertion: self.balance_assertion.clone(),
-            comment: self.comment,
-            amount_elided: self.amount_elided,
-        }
-    }*/
-
-    pub fn write<W: fmt::Write>(&self, w: &mut W, include_elided: bool) -> fmt::Result {
-        write!(w, "{}{}", self.account_spacing, self.account)?;
-        if !self.valued_amount.is_nil() && (include_elided || !self.amount_elided) {
-            write!(w, "  ")?;
-            self.valued_amount.write(w)?;
-        }
-        if let Some(ba) = &self.balance_assertion {
-            write!(w, "{ba}")?;
-        }
-        if let Some(comment) = &self.comment {
-            write!(w, "{comment}")?;
-        }
-
-        Ok(())
-    }
 }
 
-/// Two postings are equal when their accounts and currencies are equal
 impl PartialEq for Posting<'_> {
     fn eq(&self, other: &Self) -> bool {
-        self.account == other.account && self.amount().unit() == other.amount().unit()
+        self.account == other.account
+            && self.valued_amount == other.valued_amount
+            && self.comment == other.comment
     }
 }
 
 impl Eq for Posting<'_> {}
 
+impl PartialOrd for Posting<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Posting<'_> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.account
+            .cmp(&other.account)
+            .then_with(|| self.valued_amount.cmp(&other.valued_amount))
+            .then_with(|| self.comment.cmp(&other.comment))
+    }
+}
+
 impl fmt::Display for Posting<'_> {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        self.write(f, false)
+        let mut buf = TextBlockBuf::new();
+        buf.write(self, None);
+        write!(f, "{}", buf)
+    }
+}
+
+impl BlockObject for Posting<'_> {
+    fn write(&self, buf: &mut TextBlockBuf, _config: Option<&Configuration<'_>>) {
+        write!(buf, "{}", self.account).unwrap();
+        if !self.valued_amount.is_nil() && (buf.include_elided() || !self.amount_elided) {
+            write!(buf, "  ").unwrap();
+            self.valued_amount.write(buf).unwrap();
+        }
+        if let Some(ba) = &self.balance_assertion {
+            write!(buf, "{ba}").unwrap();
+        }
+        if let Some(comment) = &self.comment {
+            write!(buf, "{comment}").unwrap();
+        }
     }
 }
 

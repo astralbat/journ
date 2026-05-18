@@ -84,7 +84,7 @@ impl<'h, 'e> From<&'e JournalEntry<'h>> for SystemValuerInner<'h, 'e> {
             entry_valuer: Some(EntryValuer::from(entry)),
             linear_system_valuer: LinearSystemValuer::from(entry),
             config: entry.config().clone(),
-            datetime: entry.date_and_time().average(),
+            datetime: entry.datetime_range().average(),
         }
     }
 }

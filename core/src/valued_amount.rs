@@ -40,11 +40,9 @@ impl<'h> PostingValuation<'h> {
         PostingValuation { inner: Unit(expr) }
     }
 
-    /// Creates a new total valuation. The `amount` must not be negative.
+    /// Creates a new total valuation. The sign of the `amount` must match that of the main value.
     pub fn new_total<A: Into<Amount<'h>>>(amount: A, elided: bool) -> PostingValuation<'h> {
-        let expr = amount.into();
-
-        PostingValuation { inner: Total(expr, elided) }
+        PostingValuation { inner: Total(amount.into(), elided) }
     }
 
     pub fn unit(&self) -> &'h Unit<'h> {
@@ -104,7 +102,7 @@ impl<'h> PostingValuation<'h> {
     fn write<W: fmt::Write>(&self, w: &mut W) -> fmt::Result {
         match &self.inner {
             Unit(m) => write!(w, " @ {}", m.format_precise()),
-            Total(m, _) => write!(w, " @@ {}", m.format_precise()),
+            Total(m, _) => write!(w, " @@ {}", m.abs().format_precise()),
         }
     }
 }
@@ -591,8 +589,11 @@ impl<'h> ValuedAmount<'h> {
     }
 
     /// Removes the valuation (never the amount) with the specified unit.
-    pub fn remove_valuation(&mut self, unit: &'h Unit<'h>) {
+    /// Returns `true` if it was removed.
+    pub fn remove_valuation(&mut self, unit: &Unit<'h>) -> bool {
+        let len_before = self.valuations.as_ref().unwrap().len();
         self.valuations.as_mut().unwrap().retain(|v| v.unit() != unit);
+        self.valuations.as_ref().unwrap().len() != len_before
     }
 
     /// Converts any Unit valuations to Total valuations.
@@ -778,6 +779,7 @@ impl PartialEq for ValuedAmount<'_> {
         if self.valuations.as_ref().map(Vec::len) != other.valuations.as_ref().map(Vec::len) {
             return false;
         }
+
         for unit in self.units() {
             if self.value_in(unit) != other.value_in(unit) {
                 return false;

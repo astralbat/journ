@@ -6,17 +6,17 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::account::Account;
-use crate::datetime::{DateAndTime, DateFormatMode, DateTimeFormat};
+use crate::datetime::{DateFormatMode, DateTimeFormat, JDateTimeRange};
 use crate::directive::{Directive, DirectiveKind};
 use crate::error::parsing::{IParseError, promote};
-use crate::error::{JournErrors, JournResult};
-use crate::journal_node::JournalNodeKind;
+use crate::error::{JournError, JournErrors, JournResult};
+use crate::journal_node::{JournalNode, JournalNodeKind};
 use crate::module::MODULES;
 use crate::parsing::amount::unit;
 use crate::parsing::input::{
     BlockInput, ConfigInput, LocatedInput, NodeInput, TextBlockInput, TextInput,
 };
-use crate::parsing::text_block::TextBlock;
+use crate::parsing::text_block::{TextBlock, TextBlockLocation};
 use crate::parsing::unit_directive::{unit_definition_body, unit_directive_body, units_directive};
 use crate::parsing::util::{double_quoted, line_value, param_value, rest_line1, word};
 use crate::parsing::{IParseResult, entry};
@@ -124,21 +124,18 @@ where
     's: 'p,
 {
     let orig_block = input.block();
-    let (rem, (block, path)) = stream(input.clone())?;
+
+    let (rem, node) = match stream(input.clone(), JournalNodeKind::Python) {
+        StreamResult::AlreadyStreamed(rem, node) => (rem, node),
+        StreamResult::NewStream(rem, include_input) => {
+            (rem, input.parse_node().include(include_input).map_err(NomErr::Failure)?)
+        }
+        StreamResult::Err(e) => return Err(e),
+    };
+
     // Do not branch Python execution by default. Other python directives further on may choose to depend on
     // certain functions earlier defined being available.
-    Ok((
-        rem,
-        Directive::new(
-            Some(orig_block),
-            DirectiveKind::Python(
-                input
-                    .parse_node()
-                    .include_kind(block, path, JournalNodeKind::Python)
-                    .map_err(NomErr::Failure)?,
-            ),
-        ),
-    ))
+    Ok((rem, Directive::new(Some(orig_block), DirectiveKind::Python(node))))
 }
 
 pub const E_BASE_UNIT: &str = "Unable to read base unit";
@@ -194,7 +191,7 @@ where
 }
 
 fn entry<'h, 's, 'p, I>(
-    date_and_time: DateAndTime,
+    datetime_range: JDateTimeRange,
 ) -> impl FnOnce(I) -> JParseResult<I, Directive<'h>>
 where
     I: TextInput<'h> + BlockInput<'h> + ConfigInput<'h> + NodeInput<'h, 's, 'p> + LocatedInput<'h>,
@@ -202,7 +199,7 @@ where
     's: 'p,
 {
     move |input| {
-        let (rem, entry) = entry::entry_with_date(input.clone(), date_and_time)?;
+        let (rem, entry) = entry::entry_with_date(input.clone(), datetime_range)?;
         Ok((
             rem,
             Directive::new(
@@ -239,7 +236,12 @@ where
 /// Reads the input as a new stream. This will attempt to interpret the input as a valid file path,
 /// and follow this as a new file stream. If unsuccessful, it will be assumed to be a continuation
 /// of the input.
-pub(super) fn stream<'h, 's, 'e, 'p, I>(input: I) -> JParseResult<I, (I, Option<&'h Path>)>
+pub(super) enum StreamResult<'h, I> {
+    AlreadyStreamed(I, &'h JournalNode<'h>),
+    NewStream(I, I),
+    Err(NomErr<JournError>),
+}
+pub(super) fn stream<'h, 's, 'e, 'p, I>(input: I, node_kind: JournalNodeKind) -> StreamResult<'h, I>
 where
     I: TextInput<'h> + LocatedInput<'h> + BlockInput<'h> + NodeInput<'h, 's, 'p>,
     'h: 'e,
@@ -250,23 +252,37 @@ where
     let input_is_single_line = input.text().trim().lines().nth(1).is_none();
 
     if input_is_single_line {
-        let (rem, filename) = filename(input.clone())?;
+        let (rem, filename) = match filename(input.clone()) {
+            Ok((rem, filename)) => (rem, filename),
+            Err(e) => return StreamResult::Err(e),
+        };
+
+        let node = match input.parse_node().create_child_node(Some(filename), node_kind) {
+            Ok(node) => node,
+            Err(node) => return StreamResult::AlreadyStreamed(rem, node),
+        };
 
         // Try to open the file, failing silently if it doesn't exist.
-        if let Ok(tb) =
+        if let Ok(mut block) =
             TextBlock::from_file(filename, input.parse_node().allocator(), Some(input.block()))
-                .map_err(|e| {
-                    NomErr::Error(input.clone().into_err("Cannot stream file").with_source(e))
-                })
         {
-            let new_input = input.with_child(tb);
-            return Ok((rem, (new_input, Some(filename))));
+            block.set_node(node);
+            let branch_input = input.with_child(block);
+            return StreamResult::NewStream(rem, branch_input);
         }
     }
 
-    // Interpret the input as a continuation of the current stream.
-    let (rem, input) = rest::<_, ()>(input).unwrap();
-    Ok((rem, (input, None)))
+    let node = input.parse_node().create_child_node_unchecked(None, node_kind);
+    // Interpret the input the rest of it
+    let mut block = TextBlock::new_child(
+        input.text(),
+        TextBlockLocation::new(Some(node), input.line(), input.location_offset()),
+        input.block(),
+    );
+    block.set_node(node);
+    let (rem, mut block_input) = rest::<_, ()>(input).unwrap();
+    block_input = block_input.with_child(block);
+    StreamResult::NewStream(rem, block_input)
 }
 
 fn branch<'h, 's, 'e, 'p, I>(kind: JournalNodeKind) -> impl Fn(I) -> JParseResult<I, Directive<'h>>
@@ -278,14 +294,19 @@ where
 {
     move |input| {
         let orig_block = input.block();
-        let (rem, (input, filename)) = stream(input)?;
-        Ok((
-            rem,
-            Directive::new(
-                Some(orig_block),
-                DirectiveKind::Branch(input.parse_node().branch_kind(input, filename, kind)),
-            ),
-        ))
+        match stream(input.clone(), kind) {
+            StreamResult::AlreadyStreamed(rem, node) => {
+                Ok((rem, Directive::new(Some(orig_block), DirectiveKind::Branch(node))))
+            }
+            StreamResult::NewStream(rem, branch_input) => Ok((
+                rem,
+                Directive::new(
+                    Some(orig_block),
+                    DirectiveKind::Branch(input.parse_node().branch(branch_input)),
+                ),
+            )),
+            StreamResult::Err(err) => Err(err),
+        }
     }
 }
 
@@ -296,22 +317,20 @@ where
     'e: 's,
     's: 'p,
 {
-    move |input| {
-        let orig_block = input.block();
-        let (rem, (input, filename)) = stream(input)?;
-
-        Ok((
-            rem.clone(),
-            (Directive::new(
-                Some(orig_block),
+    move |input| match stream(input.clone(), kind) {
+        StreamResult::AlreadyStreamed(rem, node) => {
+            Ok((rem, Directive::new(Some(input.block()), DirectiveKind::Include(node))))
+        }
+        StreamResult::NewStream(rem, include_input) => Ok((
+            rem,
+            Directive::new(
+                Some(input.block()),
                 DirectiveKind::Include(
-                    input
-                        .parse_node()
-                        .include_kind(input, filename, kind)
-                        .map_err(NomErr::Failure)?,
+                    input.parse_node().include(include_input).map_err(NomErr::Failure)?,
                 ),
-            )),
-        ))
+            ),
+        )),
+        StreamResult::Err(err) => Err(err),
     }
 }
 
@@ -484,7 +503,10 @@ mod tests {
         };
 
         // Description is optional
-        assert_eq!(ent("").date(), JDate::new(NaiveDate::from_ymd_opt(2000, 1, 1).unwrap()));
+        assert_eq!(
+            ent("").datetime_range().start().date(),
+            JDate::new(NaiveDate::from_ymd_opt(2000, 1, 1).unwrap())
+        );
         assert_eq!(ent("\n AccA  £0").description(), "");
         assert_eq!(ent("  desc").description(), "desc");
     }
@@ -580,10 +602,11 @@ mod tests {
     #[test]
     fn test_timeformat_directive() {
         let tf_dir = |s: &'static str, hour: u32, min: u32, sec: u32| {
-            let tf = dir_kind!(s, TimeFormat);
-            JTime::new(NaiveTime::from_hms_opt(hour, min, sec).unwrap())
-                .format_with_precision(tf, DateTimePrecision::Second)
-                .to_string()
+            with_dir_kind!(s, TimeFormat, |_, tf| {
+                JTime::new(NaiveTime::from_hms_opt(hour, min, sec).unwrap())
+                    .format_with_precision(tf, DateTimePrecision::Second)
+                    .to_string()
+            })
         };
 
         assert_eq!(tf_dir("timeformat hh:mm:ss", 1, 2, 3), "01:02:03".to_string());
@@ -599,8 +622,9 @@ mod tests {
     #[test]
     fn test_python_directive() {
         let python_str = |s: &'static str| {
-            let python = dir_kind!(s, Python);
-            python.block().text_outdented(1).intern()
+            with_dir_kind!(s, Python, |dir: &Directive, _| {
+                dir.parsed().unwrap().text_outdented(1).intern()
+            })
         };
         assert_eq!(python_str("python\n a = 123\n b = 456"), "a = 123\nb = 456");
     }

@@ -7,7 +7,6 @@
  */
 use crate::account::Account;
 use crate::amount::Amount;
-use crate::datetime::DateAndTime;
 use crate::datetime::{JDate, JDateTime, JDateTimeRange, JTime};
 use crate::error::parsing::{IErrorMsg, IParseError, promote, tag_err};
 use crate::journal_entry::{EntryObject, JournalEntry};
@@ -17,7 +16,7 @@ use crate::parsing::amount::amount_expr;
 use crate::parsing::input::{BlockInput, ConfigInput, LocatedInput, NodeInput, TextInput};
 use crate::parsing::text_block::block_remainder1;
 use crate::parsing::util::{
-    blank_lines0, comment, recognize_rtrim, spaced_word, until_line_ending0,
+    blank_line0, blank_lines0, comment, recognize_rtrim, spaced_word, until_line_ending0,
 };
 use crate::parsing::{IParseResult, JParseResult};
 use crate::posting::Posting;
@@ -26,9 +25,10 @@ use chrono_tz::Tz;
 use nom::branch::alt;
 use nom::bytes::complete::tag;
 use nom::character::complete::{space0, space1};
-use nom::combinator::{consumed, map, map_res, opt, recognize, rest};
+use nom::combinator::{consumed, cut, map, map_res, opt, recognize, rest};
+use nom::error::context;
 use nom::multi::fold_many0;
-use nom::sequence::{pair, preceded, tuple};
+use nom::sequence::{pair, tuple};
 use nom::{Err as NomErr, Finish};
 use std::sync::Arc;
 
@@ -59,7 +59,7 @@ where
     }
 }
 
-pub fn date_and_time<'h, I>(input: I) -> IParseResult<'h, I, DateAndTime>
+pub fn date_and_time<'h, I>(input: I) -> IParseResult<'h, I, JDateTimeRange>
 where
     I: TextInput<'h> + ConfigInput<'h>,
 {
@@ -89,9 +89,9 @@ where
     };
 
     // Aux datetime is optional
-    let (input, aux_date) = opt(preceded(tag("="), &mut datetime(tz)))(input)?;
+    //let (input, aux_date) = opt(preceded(tag("="), &mut datetime(tz)))(input)?;
 
-    Ok((input, DateAndTime::new(datetime_range, aux_date)))
+    Ok((input, datetime_range))
 }
 
 /// An account string must be prefixed by at least one space character (' ' or '\t').
@@ -186,10 +186,13 @@ where
     let mut balance_assertion_expr = None;
 
     // Read the account
-    let (input, (account_leading_space, account)) = account(input)?;
+    let (input, (_account_leading_space, account)) = account(input)?;
 
     // Read an optional valued amount
-    let (mut input, mut valued_amount) = opt(valued_amount)(input)?;
+    let (mut input, mut valued_amount) = context(
+        "Invalid valued amount",
+        alt((map(valued_amount, Some), map(recognize_rtrim(blank_line0), |_| None))),
+    )(input)?;
 
     // Replace the `valued_amount` primary unit if specified on the account (overrides global config)
     if let Some(valued_amount) = &mut valued_amount
@@ -214,7 +217,7 @@ where
         input,
         Posting::new(
             Some(block),
-            account_leading_space,
+            //account_leading_space,
             account,
             valued_amount.unwrap_or_else(ValuedAmount::nil),
             balance_assertion_expr,
@@ -240,7 +243,7 @@ pub(crate) fn metadata<'h, I: TextInput<'h> + BlockInput<'h> + ConfigInput<'h>>(
     Ok((input, md))
 }
 
-pub fn entry_date_and_remainder<'h, I>(input: I) -> IParseResult<'h, I, (DateAndTime, I)>
+pub fn entry_date_and_remainder<'h, I>(input: I) -> IParseResult<'h, I, (JDateTimeRange, I)>
 where
     I: TextInput<'h> + ConfigInput<'h>,
 {
@@ -264,7 +267,7 @@ where
 
 pub fn entry_with_date<'h, 's, 'e, 'p, I>(
     input: I,
-    date_and_time: DateAndTime,
+    datetime_range: JDateTimeRange,
 ) -> JParseResult<I, JournalEntry<'h>>
 where
     'h: 'e,
@@ -279,9 +282,9 @@ where
 
     let mut entry_objs = Vec::with_capacity_in(2, input.config().allocator());
     let rem = match_blocks!(input.clone(),
-        comment => |c: I| Ok(entry_objs.push(EntryObject::Comments(c.text()))),
+        comment => |c: I| Ok(entry_objs.push(EntryObject::Comment(c.text()))),
         metadata => |md| Ok(entry_objs.push(EntryObject::Metadata(md))),
-        posting => |pst| Ok(entry_objs.push(EntryObject::Posting(pst, false)))
+        cut(posting) => |pst| Ok(entry_objs.push(EntryObject::Posting(pst, false)))
     )
     .finish()
     .map_err(|e| NomErr::Failure(input.clone().into_err("Unable to parse entry").with_source(e)))?
@@ -290,9 +293,9 @@ where
     // Create the entry after parsing to ensure configuration copy is up to date with the entry's
     // configuration.
     let mut je = JournalEntry::new(
-        parse_node.node().id(),
+        parse_node.node(),
         rem.config().clone(),
-        date_and_time,
+        datetime_range,
         description,
         entry_objs,
     );
@@ -331,7 +334,7 @@ mod tests {
         "# });
         let mut dt = |s: &'static str| parse!(s, date_and_time, &mut config);
 
-        let parsed = dt("01/01/2000 00:00:00").unwrap().1.datetime_from();
+        let parsed = dt("01/01/2000 00:00:00").unwrap().1.start();
         assert_eq!(parsed.naive_utc().hour(), 13);
         assert_eq!(parsed.naive_utc().minute(), 0);
         assert_eq!(parsed.naive_utc().second(), 0);
@@ -347,7 +350,7 @@ mod tests {
         "# });
         let mut dt = |s: &'static str| parse!(s, date_and_time, &mut config);
 
-        let date = dt("2000-01-01 00:00:00Z").unwrap().1.datetime_from();
+        let date = dt("2000-01-01 00:00:00Z").unwrap().1.start();
         assert_eq!(date.naive_utc().hour(), 0);
         assert_eq!(date.naive_utc().minute(), 0);
         assert_eq!(date.naive_utc().second(), 0);
@@ -357,18 +360,18 @@ mod tests {
 
         // These times are in a different timezone
         let date_and_time = dt("2000-01-01 00:00:00..23:59:59Z").unwrap().1;
-        assert_eq!(date_and_time.datetime_from().naive_utc().hour(), 13);
-        assert_eq!(date_and_time.datetime_from().naive_utc().minute(), 0);
-        assert_eq!(date_and_time.datetime_from().naive_utc().second(), 0);
-        assert_eq!(date_and_time.datetime_from().naive_utc().day(), 31);
-        assert_eq!(date_and_time.datetime_from().naive_utc().month(), 12);
-        assert_eq!(date_and_time.datetime_from().naive_utc().year(), 1999);
-        assert_eq!(date_and_time.datetime_to().naive_utc().hour(), 23);
-        assert_eq!(date_and_time.datetime_to().naive_utc().minute(), 59);
-        assert_eq!(date_and_time.datetime_to().naive_utc().second(), 59);
-        assert_eq!(date_and_time.datetime_to().naive_utc().day(), 1);
-        assert_eq!(date_and_time.datetime_to().naive_utc().month(), 1);
-        assert_eq!(date_and_time.datetime_to().naive_utc().year(), 2000);
+        assert_eq!(date_and_time.start().naive_utc().hour(), 13);
+        assert_eq!(date_and_time.start().naive_utc().minute(), 0);
+        assert_eq!(date_and_time.start().naive_utc().second(), 0);
+        assert_eq!(date_and_time.start().naive_utc().day(), 31);
+        assert_eq!(date_and_time.start().naive_utc().month(), 12);
+        assert_eq!(date_and_time.start().naive_utc().year(), 1999);
+        assert_eq!(date_and_time.end().naive_utc().hour(), 23);
+        assert_eq!(date_and_time.end().naive_utc().minute(), 59);
+        assert_eq!(date_and_time.end().naive_utc().second(), 59);
+        assert_eq!(date_and_time.end().naive_utc().day(), 1);
+        assert_eq!(date_and_time.end().naive_utc().month(), 1);
+        assert_eq!(date_and_time.end().naive_utc().year(), 2000);
     }
 
     #[test]

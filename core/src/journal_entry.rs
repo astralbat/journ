@@ -9,184 +9,85 @@ use crate::account::Account;
 use crate::alloc::HerdAllocator;
 use crate::amount::Amount;
 use crate::configuration::Configuration;
-use crate::datetime::DateAndTime;
-use crate::datetime::{JDate, JDateTime};
+use crate::datetime::JDateTime;
+use crate::datetime::JDateTimeRange;
 use crate::error::{BlockContext, BlockContextError, JournError, JournResult};
-use crate::ext::{RangeBoundsExt, StrExt};
+use crate::ext::RangeBoundsExt;
 use crate::journal_entry_flow::{Flow, Flows};
-use crate::journal_node::{FIRST_NODE_ID, LAST_NODE_ID, NodeId};
+use crate::journal_node::JournalNode;
 use crate::metadata::Metadata;
-use crate::parsing::text_block::TextBlock;
+use crate::parsing::text_block::{BlockObject, TextBlock, TextBlockBuf};
 use crate::posting::{Posting, PostingId};
-use crate::report::command::arguments::Cmd;
+use crate::tree_id::TreeId;
 use crate::unit::Unit;
 use crate::{err, match_map};
-use chrono::{
-    DateTime, Datelike, Duration, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Timelike,
-};
-use chrono_tz::Tz;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::Zero;
 use rust_decimal_macros::*;
 use smallvec::{SmallVec, smallvec};
-use std::cell::Cell;
-use std::ops::{Add, Bound, Range, RangeBounds};
+use std::fmt::Write;
+use std::ops::{Bound, RangeBounds};
 use std::{cmp, fmt};
 
-/// An entry identifier that identifies the entry in space. This means that duplicate entries
-/// may be defined within a journal file and that is a valid thing. The two entries are distinct
-/// and will receive unique ids.
-/// Sorting the entries by id will sort them in their file declaration order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct EntryId<'h> {
-    node_id: Option<&'h NodeId<'h>>,
-    id: u32,
-}
-static U32_MIN: u32 = u32::MIN;
-static U32_MAX: u32 = u32::MAX;
-pub static FIRST_ENTRY_ID: EntryId = EntryId { node_id: Some(&FIRST_NODE_ID), id: U32_MIN };
-pub static LAST_ENTRY_ID: EntryId = EntryId { node_id: Some(&LAST_NODE_ID), id: U32_MAX };
+pub type EntryId = TreeId;
 
 /// An entry identifier that identifies entries in time order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Ord, PartialOrd)]
-pub struct EntryDateId<'h> {
-    // UTC date from compares first
-    datetime_from: NaiveDateTime,
-    // UTC date to compares second
-    datetime_to: NaiveDateTime,
+#[derive(Debug, Clone, PartialEq, Eq, Ord, PartialOrd)]
+pub struct EntryDateId {
+    timestamp: i64,
     // Fall back to comparing the entry in node/parsed order
-    id: EntryId<'h>,
+    id: TreeId,
 }
 
-impl<'h> EntryDateId<'h> {
-    pub fn date_range<R: RangeBounds<JDateTime>>(range: R) -> Range<EntryDateId<'h>> {
-        let start = match range.start_bound() {
-            Bound::Included(date) => date.naive_utc(),
-            Bound::Excluded(date) => date.add(Duration::seconds(1)).naive_utc(),
-            Bound::Unbounded => NaiveDateTime::new(
-                NaiveDate::from_ymd_opt(1, 1, 1).unwrap(),
-                NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
-            ),
-        };
-        let end = match range.end_bound() {
-            Bound::Included(date) => date.add(Duration::seconds(1)).naive_utc(),
-            Bound::Excluded(date) => date.naive_utc(),
-            // The max date where num_days_from_ce() fits in 20 bits
-            Bound::Unbounded => NaiveDateTime::new(
-                NaiveDate::from_ymd_opt(2871, 11, 25).unwrap(),
-                NaiveTime::from_hms_opt(23, 59, 59).unwrap(),
-            ),
-        };
-        EntryDateId { datetime_from: start, datetime_to: start, id: FIRST_ENTRY_ID }..EntryDateId {
-            datetime_from: end,
-            datetime_to: end,
-            id: LAST_ENTRY_ID,
-        }
+impl EntryDateId {
+    pub fn date_range<R: RangeBounds<JDateTime>>(
+        range: R,
+    ) -> (Bound<EntryDateId>, Bound<EntryDateId>) {
+        let start = range
+            .start_bound()
+            .map(|d| EntryDateId { timestamp: d.datetime().timestamp(), id: TreeId::MIN });
+        let end = range
+            .end_bound()
+            .map(|d| EntryDateId { timestamp: d.datetime().timestamp(), id: TreeId::MAX_INLINE });
+        (start, end)
+    }
+
+    pub fn timestamp(&self) -> i64 {
+        self.timestamp
+    }
+
+    pub fn with_id(&self, id: TreeId) -> Self {
+        Self { timestamp: self.timestamp, id }
     }
 }
 
-impl<'h> From<&JournalEntry<'h>> for EntryDateId<'h> {
+impl<'h> From<&JournalEntry<'h>> for EntryDateId {
     fn from(entry: &JournalEntry<'h>) -> Self {
-        let datetime_from = entry.date_and_time().datetime_from().naive_utc();
-        let datetime_to = entry.date_and_time().datetime_to().naive_utc();
-        EntryDateId { datetime_from, datetime_to, id: entry.id() }
+        // We use the end date of the entry to signify the fact that it is by this date that the entries
+        // actions have taken effect.
+        EntryDateId {
+            timestamp: entry.datetime_range.end().datetime().timestamp(),
+            id: entry.id.clone(),
+        }
     }
 }
 
-impl<'h> EntryId<'h> {
-    pub(crate) fn dangling() -> Self {
-        EntryId { node_id: None, id: 0 }
-    }
-
-    pub(crate) fn attached(node_id: &'h NodeId<'h>) -> EntryId<'h> {
-        thread_local! {
-            static ENTRY_COUNTER: Cell<u32> = const { Cell::new(1) };
-        }
-        let new_id = ENTRY_COUNTER.with(|k| {
-            let prev_id = k.get();
-            k.set(prev_id + 1);
-            prev_id + 1
-        });
-        EntryId { node_id: Some(node_id), id: new_id }
-    }
-
-    pub fn node_id(&self) -> &'h NodeId<'h> {
-        self.node_id.expect("EntryId is dangling")
-    }
-
-    /// Transforms the identifier on an entry from an identifier in space to one in time.
-    /// Sorting on the returned `date_id` will allow sorting entries in date order, whilst still preserving
-    /// their order in space for those entries which have the same date and time.
-    pub fn as_date_id(entry: &JournalEntry<'h>, use_aux_date: bool) -> u64 {
-        if use_aux_date {
-            EntryId::id_first(
-                &entry
-                    .date_and_time
-                    .aux_date_time()
-                    .map(|adt: JDateTime| adt.datetime())
-                    .unwrap_or_else(|| entry.date_and_time.datetime_from()),
-            ) + entry.id().id as u64
-        } else {
-            EntryId::id_first(&entry.date_and_time.datetime_from()) + entry.id().id as u64
-        }
-    }
-
-    /// Gets an id that points to the first entry at the particular date and time.
-    /// The id is shifted to the left by 27 bits to allow for 2^27 entries at the same date and time.
-    pub(crate) fn id_first(date: &DateTime<Tz>) -> u64 {
-        // This scheme still gives us room for a maximum 2^27 entries
-        let utc_date = date.naive_utc();
-        ((utc_date.num_days_from_ce() as u64) << 44_u64)
-            + ((utc_date.num_seconds_from_midnight() as u64) << 27_u64)
-    }
-
-    pub(crate) fn id_last(date: &DateTime<Tz>) -> u64 {
-        let utc_date = date.naive_utc();
-        ((utc_date.num_days_from_ce() as u64) << 44_u64)
-            + ((utc_date.num_seconds_from_midnight() as u64) << 27_u64)
-            + (2u64.pow(27) - 1)
-    }
-
-    pub fn id_range<R>(range: R) -> Range<u64>
-    where
-        R: RangeBounds<DateTime<Tz>>,
-    {
-        let start = match range.start_bound() {
-            Bound::Included(date) => Self::id_first(date),
-            Bound::Excluded(date) => Self::id_first(&date.add(Duration::seconds(1))),
-            Bound::Unbounded => Self::id_first(&Tz::UTC.from_utc_datetime(&NaiveDateTime::new(
-                NaiveDate::from_ymd_opt(1, 1, 1).unwrap(),
-                NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
-            ))),
-        };
-        let end = match range.end_bound() {
-            Bound::Included(date) => Self::id_first(&date.add(Duration::seconds(1))),
-            Bound::Excluded(date) => Self::id_first(date),
-            // The max date where num_days_from_ce() fits in 20 bits
-            Bound::Unbounded => Self::id_last(&Tz::UTC.from_utc_datetime(&NaiveDateTime::new(
-                NaiveDate::from_ymd_opt(2871, 11, 25).unwrap(),
-                NaiveTime::from_hms_opt(23, 59, 59).unwrap(),
-            ))),
-        };
-        start..end
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum EntryObject<'h> {
     /// The boolean argument indicates whether the posting has been elided.
     Posting(Posting<'h>, bool),
     Metadata(Metadata<'h>),
-    Comments(&'h str),
+    Comment(&'h str),
 }
 
 pub struct JournalEntry<'h> {
-    id: EntryId<'h>,
+    id: EntryId,
     /// The text block from which the entry came. This will be `None` if the entry was inserted into a node rather than parsed.
     text_block: Option<&'h TextBlock<'h>>,
-    date_id: Option<u64>,
-    date_and_time: DateAndTime,
+    datetime_range: JDateTimeRange,
     objects: Vec<EntryObject<'h>, &'h HerdAllocator<'h>>,
+    /// The description of the entry. Parsed entries will have trailing space trimmed,
+    /// but any leading spaces beyond the required number may still be present.
     description: &'h str,
     /// The state of the configuration at the time the entry was parsed.
     config: Configuration<'h>,
@@ -194,68 +95,41 @@ pub struct JournalEntry<'h> {
 
 impl<'h> JournalEntry<'h> {
     pub fn new(
-        node_id: &'h NodeId<'h>,
+        node: &JournalNode<'h>,
         config: Configuration<'h>,
-        date_and_time: DateAndTime,
+        datetime_range: JDateTimeRange,
         description: &'h str,
         objects: Vec<EntryObject<'h>, &'h HerdAllocator<'h>>,
     ) -> Self {
-        let id = EntryId::dangling();
-        let mut je = Self {
-            id,
-            config,
-            date_id: None,
-            text_block: None,
-            date_and_time,
-            description,
-            objects,
-        };
-        je.attach(node_id);
+        let id = EntryId::new_root();
+        let mut je = Self { id, config, text_block: None, datetime_range, description, objects };
+        je.attach(node);
         je
     }
 
-    pub fn id(&self) -> EntryId<'h> {
-        self.id
+    pub fn id(&self) -> &EntryId {
+        &self.id
     }
 
-    /// Attaches this entry to the node specified by `node_id`.
-    pub(super) fn attach(&mut self, node_id: &'h NodeId<'h>) {
-        let id = EntryId::attached(node_id);
-        //self.id = Some(EntryId::attach(node_id));
-        //let id = self.id.unwrap();
+    /// Attaches this entry to the node specified by `node`.
+    pub(super) fn attach(&mut self, node: &JournalNode) {
+        let id = node.id().branch();
         for pst in self.postings_mut() {
-            pst.attach(id);
+            pst.attach(&id);
         }
 
         self.id = id;
-        self.date_id = Some(EntryId::as_date_id(self, Cmd::args().aux_date()));
     }
 
     fn detach(&mut self) {
-        self.id = EntryId::dangling();
+        self.id = TreeId::new_root();
         for pst in self.postings_mut() {
             pst.detach();
         }
     }
 
-    pub fn date_id(&self) -> u64 {
-        self.date_id.unwrap()
-    }
-
-    pub fn date(&self) -> JDate {
-        self.date_and_time.date_from()
-    }
-
-    pub fn date_and_time(&self) -> &DateAndTime {
-        &self.date_and_time
-    }
-
-    pub fn aux_time(&self) -> Option<NaiveTime> {
-        self.date_and_time.aux_time()
-    }
-
-    pub fn utc_average(&self) -> NaiveDateTime {
-        self.date_and_time.utc_average()
+    pub fn datetime_range(&self) -> JDateTimeRange {
+        self.datetime_range
     }
 
     pub fn text_block(&self) -> Option<&'h TextBlock<'h>> {
@@ -286,11 +160,11 @@ impl<'h> JournalEntry<'h> {
         self.objects.push(object);
     }
 
-    pub fn find_posting(&self, posting_id: PostingId) -> Option<&Posting<'h>> {
+    pub fn find_posting(&self, posting_id: &PostingId) -> Option<&Posting<'h>> {
         self.postings().find(|pst| pst.id() == posting_id)
     }
 
-    pub fn find_posting_mut(&mut self, posting_id: PostingId) -> Option<&mut Posting<'h>> {
+    pub fn find_posting_mut(&mut self, posting_id: &PostingId) -> Option<&mut Posting<'h>> {
         self.postings_mut().find(|pst| pst.id() == posting_id)
     }
 
@@ -403,6 +277,7 @@ impl<'h> JournalEntry<'h> {
         self.objects.retain(|obj| matches!(obj, EntryObject::Metadata(..)));
     }
 
+    /*
     /// Inserts the metadata at the specified position relating to other metadata items.
     /// If there are no other metadata items, the position _must_ be 0 and the metadata will be appended
     /// to the end of the entry.
@@ -460,11 +335,12 @@ impl<'h> JournalEntry<'h> {
         let block = allocator.alloc(TextBlock::from(allocator.alloc(block_text).as_str()));
         self.objects
             .insert(insert_pos, EntryObject::Metadata(Metadata::lazy(self.config.clone(), block)))
-    }
+    }*/
 
+    /*
     pub fn append_metadata(&mut self, metadata: Metadata<'h>) {
         self.insert_metadata(self.metadata().count(), metadata);
-    }
+    }*/
 
     pub fn remove_metadata_tags_by_key(&mut self, key: &str) {
         self.objects.retain(|obj| {
@@ -529,7 +405,7 @@ impl<'h> JournalEntry<'h> {
     /// Create additional postings on the entry in situations with more than once unit
     /// # Example
     /// ```
-    /// // A1  £3         -> A1  £3     
+    /// // A1  £3         -> A1  £3
     /// // A2  $6         -> A2  $6
     /// // A4  $0         -> A4  $0
     /// // A3             -> A3  -£3
@@ -707,7 +583,6 @@ impl<'h> JournalEntry<'h> {
             }
             let sum = credits_total.rounded() + debits_total.rounded();
             if !sum.is_zero() {
-                error!("Error on entry:\n{:?}", self);
                 return Err(
                     err!(err!("Credits: {}, Debits: {} ({} difference)", credits_total.format_precise(), debits_total.format_precise(), sum.format_precise()); "Unable to balance valuations in entry"),
                 );
@@ -763,11 +638,16 @@ impl<'h> JournalEntry<'h> {
                         match entry.range.intersection(&pst_price_range) {
                             Some(intersection) => entry.range = intersection,
                             None => {
+                                let block_context = match pst.block() {
+                                    Some(block) => BlockContext::from(block),
+                                    None => {
+                                        let mut buf = TextBlockBuf::new();
+                                        buf.write(self, Some(self.config()));
+                                        BlockContext::from(&buf.as_text_block())
+                                    }
+                                };
                                 return Err(err!(BlockContextError::new(
-                                    BlockContext::from(
-                                        pst.block()
-                                            .unwrap_or(&TextBlock::from(pst.to_string().as_str()))
-                                    ),
+                                    block_context,
                                     format!(
                                         "Posting valuation: {} @@ {} is not consistent with previous postings. Expected to be in range {}",
                                         pst.amount(),
@@ -790,29 +670,6 @@ impl<'h> JournalEntry<'h> {
         Ok(())
     }
 
-    pub fn write<W: fmt::Write>(&self, w: &mut W, include_elided: bool) -> fmt::Result {
-        self.date_and_time.write(w, &self.config)?;
-        write!(w, "{}", self.description)?;
-        for obj in self.objects.iter() {
-            match obj {
-                EntryObject::Comments(s) => {
-                    writeln!(w)?;
-                    write!(w, "{s}")?
-                }
-                EntryObject::Metadata(m) => {
-                    write!(w, "{m}")?;
-                }
-                EntryObject::Posting(p, elided) => {
-                    if include_elided || !*elided {
-                        writeln!(w)?;
-                        p.write(w, include_elided)?
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
     /// Creates an error that includes the text block of the entry.
     pub fn err(&self, msg: String) -> JournError {
         let context = match self.text_block {
@@ -820,6 +677,45 @@ impl<'h> JournalEntry<'h> {
             None => BlockContext::from(&TextBlock::from(self.to_string().as_str())),
         };
         err!(BlockContextError::new(context, msg))
+    }
+
+    /// Gets whether the two entries are considered the same.
+    ///
+    /// At present, two entries are considered the same when they have:
+    /// * the same date and time
+    /// * different parent nodes
+    /// * the same postings/metadata
+    ///
+    /// This should give a good compromise in being:
+    /// * `false` for identical entries in the same file (repeated transactions on the same day).
+    /// * `true` for identical entries in different files (allowing separate files for separate accounts,
+    /// and each file to be complete).
+    ///
+    /// Possible future behaviour could allow the user to configure duplicate behaviour:
+    /// * No duplicate detection - all entries are unique
+    /// * Exact (ignoring desc) for differing nodes (current behaviour)
+    /// * Always exact everywhere (including desc).
+    /// * Metadata Value equality (the two entries may need merging for postings/metadata).
+    /// Also, if duplicate behaviour is being configured, this may need to be set before any entries
+    /// are parsed to avoid contradictions in branches.
+    pub fn is_duplicate_of(&self, other: &Self) -> bool {
+        if self.datetime_range() != other.datetime_range() {
+            return false;
+        }
+        if self.id.parent() == other.id.parent() {
+            return false;
+        }
+
+        let mut self_objs: SmallVec<[&EntryObject; 2]> =
+            self.objects.iter().filter(|obj| !matches!(obj, EntryObject::Comment(_))).collect();
+        let mut other_objs: SmallVec<[&EntryObject; 2]> =
+            other.objects.iter().filter(|obj| !matches!(obj, EntryObject::Comment(_))).collect();
+        self_objs.sort();
+        other_objs.sort();
+        if self_objs == other_objs {
+            return true;
+        }
+        false
     }
 
     #[cfg(test)]
@@ -832,21 +728,14 @@ impl Clone for JournalEntry<'_> {
     fn clone(&self) -> Self {
         let mut cloned = Self {
             id: self.id.clone(),
-            text_block: self.text_block.clone(),
-            date_id: self.date_id.clone(),
-            date_and_time: self.date_and_time.clone(),
+            text_block: None,
+            datetime_range: self.datetime_range,
             objects: self.objects.clone(),
             description: self.description,
             config: self.config.clone(),
         };
         cloned.detach();
         cloned
-    }
-}
-
-impl PartialEq for JournalEntry<'_> {
-    fn eq(&self, other: &Self) -> bool {
-        self.id == other.id
     }
 }
 
@@ -858,21 +747,88 @@ impl PartialOrd for JournalEntry<'_> {
     }
 }
 
-impl Ord for JournalEntry<'_> {
-    fn cmp(&self, other: &Self) -> cmp::Ordering {
-        self.date_id.cmp(&other.date_id)
+impl PartialEq for JournalEntry<'_> {
+    /// Two entries are equal if they have the same internal ID, or they have the same date, description
+    /// and objects.
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+        /*
+        self.date_and_time == other.date_and_time &&
+            self.id == other.id*/
+
+        /*
+        if self.date_and_time != other.date_and_time
+            || self.description.trim() != other.description.trim()
+        {
+            return false;
+        }
+
+        let mut self_objs = self.objects.clone();
+        let mut other_objs = other.objects.clone();
+        self_objs.sort();
+        other_objs.sort();
+        self_objs == other_objs*/
     }
 }
 
+impl Ord for JournalEntry<'_> {
+    /// Compares two entries in a compatible way with `PartialEq` and `Borrow<JDateTime>`.
+    ///
+    /// This implementation will order by entries by their start dates and then
+    /// by declaration order, as determined by its `id()`.
+    fn cmp(&self, other: &Self) -> cmp::Ordering {
+        self.datetime_range
+            .start()
+            .cmp(&other.datetime_range.start())
+            .then_with(|| self.id.cmp(&other.id))
+    }
+}
+
+/*
+impl<'h> std::borrow::Borrow<(&JDateTime, EntryId)> for &JournalEntry<'h> {
+    /// It is very important that this aligns with `JournalEntry::cmp()`.
+    fn borrow(&self) -> &(&JDateTime, EntryId) {
+        &(self.date_and_time.datetime_range_ref().start_ref(), self.id)
+    }
+}*/
+
 impl fmt::Display for JournalEntry<'_> {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        self.write(f, false)
+        let mut buf = TextBlockBuf::new();
+        buf.write(self, Some(self.config()));
+        write!(f, "{}", buf)
     }
 }
 
 impl fmt::Debug for JournalEntry<'_> {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        self.write(f, true)
+        let mut buf = TextBlockBuf::new();
+        buf.set_include_elided(true);
+        buf.write(self, Some(self.config()));
+        write!(f, "{}", buf)
+    }
+}
+
+impl BlockObject for JournalEntry<'_> {
+    fn write(&self, buf: &mut TextBlockBuf, config: Option<&Configuration>) {
+        self.datetime_range.write_for_entry(buf, &self.config).unwrap();
+        write!(buf, "{}", self.description).unwrap();
+        for obj in self.objects.iter() {
+            match obj {
+                EntryObject::Comment(s) => {
+                    writeln!(buf).unwrap();
+                    write!(buf, "{s}").unwrap()
+                }
+                EntryObject::Metadata(m) => {
+                    buf.write_child(m, config, true);
+                }
+                EntryObject::Posting(p, elided) => {
+                    if buf.include_elided() || !*elided {
+                        buf.write_child(p, config, true);
+                    }
+                }
+            }
+        }
     }
 }
 

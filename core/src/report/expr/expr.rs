@@ -33,6 +33,12 @@ pub enum Expr<'h> {
 }
 
 impl<'h> Expr<'h> {
+    /// Gets whether this expression or any of its children are an aggregate expression.
+    pub fn is_aggregate(&self) -> bool {
+        matches!(self, Expr::AggFunction { .. })
+            || self.children().any(|inner| matches!(inner, Expr::AggFunction { .. }))
+    }
+
     pub fn eval(&self, context: &mut dyn IdentifierContext<'h>) -> JournResult<ColumnValue<'h>> {
         use Expr::*;
         match self {
@@ -317,16 +323,31 @@ fn eval_compare_op<'h, 'a>(
     if left_value.is_undefined() || right_value.is_undefined() {
         return Ok(ColumnValue::Undefined);
     }
+    let err = || {
+        err!("Cannot compare {} and {}", left_value.as_type_string(), right_value.as_type_string())
+    };
 
     let compare_res = match op {
         CompareOp::Match => left_value.matches(&right_value)?,
         CompareOp::NotMatch => !left_value.matches(&right_value)?,
-        CompareOp::Eq => left_value.cmp(&right_value)? == std::cmp::Ordering::Equal,
-        CompareOp::Neq => left_value.cmp(&right_value)? != std::cmp::Ordering::Equal,
-        CompareOp::Lt => left_value.cmp(&right_value)? == std::cmp::Ordering::Less,
-        CompareOp::Lte => left_value.cmp(&right_value)? != std::cmp::Ordering::Greater,
-        CompareOp::Gt => left_value.cmp(&right_value)? == std::cmp::Ordering::Greater,
-        CompareOp::Gte => left_value.cmp(&right_value)? != std::cmp::Ordering::Less,
+        CompareOp::Eq => {
+            left_value.partial_cmp(&right_value).ok_or_else(err)? == std::cmp::Ordering::Equal
+        }
+        CompareOp::Neq => {
+            left_value.partial_cmp(&right_value).ok_or_else(err)? != std::cmp::Ordering::Equal
+        }
+        CompareOp::Lt => {
+            left_value.partial_cmp(&right_value).ok_or_else(err)? == std::cmp::Ordering::Less
+        }
+        CompareOp::Lte => {
+            left_value.partial_cmp(&right_value).ok_or_else(err)? != std::cmp::Ordering::Greater
+        }
+        CompareOp::Gt => {
+            left_value.partial_cmp(&right_value).ok_or_else(err)? == std::cmp::Ordering::Greater
+        }
+        CompareOp::Gte => {
+            left_value.partial_cmp(&right_value).ok_or_else(err)? != std::cmp::Ordering::Less
+        }
     };
     Ok(ColumnValue::Boolean(compare_res))
 }

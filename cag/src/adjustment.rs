@@ -9,7 +9,8 @@ use journ_core::alloc::HerdAllocator;
 use journ_core::amount::{Amount, Quantity};
 use journ_core::datetime::JDateTimeRange;
 use journ_core::error::JournResult;
-use journ_core::journal_entry::{EntryId, JournalEntry};
+use journ_core::journal_entry::EntryId;
+use journ_core::journal_entry::JournalEntry;
 use journ_core::metadata::Metadata;
 use journ_core::unit::Unit;
 use journ_core::valued_amount::{PostingValuation, ValuedAmount};
@@ -22,15 +23,15 @@ use std::fmt::Formatter;
 use yaml_rust2::Yaml;
 use yaml_rust2::yaml::Hash;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct AdjustmentId<'h> {
-    entry_id: EntryId<'h>,
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct AdjustmentId {
+    entry_id: EntryId,
     position: u32,
 }
 
-impl<'h> AdjustmentId<'h> {
-    pub(crate) fn new(entry_id: EntryId<'h>, position: u32) -> Self {
-        Self { entry_id, position }
+impl AdjustmentId {
+    pub(crate) fn new(entry_id: &EntryId, position: u32) -> Self {
+        Self { entry_id: entry_id.clone(), position }
     }
 }
 
@@ -166,7 +167,7 @@ impl From<&AmountAdjustment<'_>> for Yaml {
 /// unless they are applied to a specific pool (CAG-AdjustPool) instead.
 #[derive(Clone)]
 pub struct Adjustment<'h> {
-    id: AdjustmentId<'h>,
+    id: AdjustmentId,
     /// If set, only apply the adjustment to the specified pool
     pool: Option<&'h str>,
     entry: &'h JournalEntry<'h>,
@@ -195,7 +196,7 @@ impl<'h> Adjustment<'h> {
         }
 
         let entry_id = entry.id();
-        let datetime = entry.date_and_time().datetime_range();
+        let datetime = entry.datetime_range();
         Adjustment {
             datetime,
             entry,
@@ -224,8 +225,8 @@ impl<'h> Adjustment<'h> {
             .all(|amnt_adj| matches!(amnt_adj, AmountAdjustment::Scale(_)))
     }
 
-    pub fn id(&self) -> AdjustmentId<'h> {
-        self.id
+    pub fn id(&self) -> &AdjustmentId {
+        &self.id
     }
 
     pub fn datetime(&self) -> JDateTimeRange {
@@ -338,7 +339,7 @@ impl<'h> Adjustment<'h> {
             .unzip();
         (
             Adjustment {
-                id: self.id,
+                id: self.id.clone(),
                 entry: self.entry,
                 metadata: self.metadata.clone(),
                 pool: self.pool,

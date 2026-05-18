@@ -10,19 +10,20 @@ use journ_core::account::Account;
 use journ_core::configuration::{AccountFilter, DescriptionFilter, FileFilter, Filter, UnitFilter};
 use journ_core::error::JournResult;
 use journ_core::journal::Journal;
+use journ_core::journal_context::JournalContext;
 use journ_core::journal_entry::JournalEntry;
 use journ_core::journal_node::JournalNode;
 use journ_core::posting::Posting;
-use journ_core::report::balance::Balance;
 use journ_core::report::command::arguments::{Cmd, Command, DateTimeFormatCommand};
 use journ_core::report::command::chained_result::ChainingResult;
 use journ_core::report::command::cmd_line::BeginAndEndCommand;
 use journ_core::report::expr::parser::parse_plan;
-use journ_core::report::expr::{ColumnValue, Expr, IdentifierContext, PostingContext};
+use journ_core::report::expr::{ColumnValue, Expr, PostingContext, RowData};
 use journ_core::report::table2::{Row, StyledCell};
 use journ_core::report::term_style::{Style, Weight};
 use journ_core::unit::Unit;
 use std::collections::HashMap;
+use std::io::Write;
 
 #[derive(Default, Debug)]
 pub struct RegCommand {
@@ -33,6 +34,9 @@ pub struct RegCommand {
     pub(super) unit_filter: Vec<String>,
     pub(super) description_filter: Vec<String>,
     pub(super) column_spec: String,
+    pub(super) order_by_spec: Option<String>,
+    pub(super) order_ascending: bool,
+    pub(super) where_conditions: Option<String>,
 }
 
 impl RegCommand {
@@ -65,7 +69,8 @@ impl RegCommand {
             .entry_range(cmd.begin_and_end_cmd.begin_end_range())
             .filter(move |e| description_filter.is_included(e.description()))
             .filter(move |e| {
-                file_filter.is_included(journ.root().find_by_node_id(e.id().node_id()).unwrap())
+                file_filter
+                    .is_included(journ.root().find_by_node_id(&e.id().parent().unwrap()).unwrap())
             })
             .flat_map(|e| e.postings().map(move |p| (e, p)))
             .filter(move |(_, p)| account_filter.is_included(p.account()))
@@ -84,16 +89,21 @@ impl Command for RegCommand {
 }
 
 impl ExecCommand for RegCommand {
-    fn execute<'h>(
-        &self,
-        journ: &'h mut Journal<'h>,
-        _chained: Option<ChainingResult>,
-    ) -> JournResult<()> {
+    fn execute<'h>(&self, _chained: Option<ChainingResult>) -> JournResult<()> {
         let cmd: &RegCommand = Cmd::cast();
+        let journ = JournalContext::current().journal();
         let config = journ.config();
 
         // Parse the column specification. We need a lower-case version for evaluation.
-        let plan = parse_plan(&cmd.column_spec, None, false, None, HashMap::new(), None, true)?;
+        let plan = parse_plan(
+            &cmd.column_spec,
+            cmd.where_conditions.as_deref(),
+            false,
+            None,
+            HashMap::new(),
+            cmd.order_by_spec.as_deref(),
+            cmd.order_ascending,
+        )?;
 
         let mut table = journ_core::report::table2::Table::default();
         // Heading Row
@@ -116,13 +126,28 @@ impl ExecCommand for RegCommand {
         }
 
         // Evaluate against all the filtered postings
-        let mut balance = vec![];
-        let data = plan.execute(journ, self.filtered_postings(&journ), |(entry, pst)| {
-            let mut context = PostingContext::new(journ, entry, pst);
-            balance += pst.amount();
-            context.set_identifier("balance", ColumnValue::Amount(balance.balance(pst.unit())));
-            context
-        })?;
+        //let mut balance = vec![];
+        let balance_update_fn =
+            |prev: &[RowData<'h>],
+             row: &mut RowData<'h>,
+             (_entry, pst): (&JournalEntry<'h>, &Posting<'h>)| {
+                for prev_row in prev.iter().rev() {
+                    let amount = prev_row.running_balance("balance").unwrap().as_amount().unwrap();
+                    if amount.unit() == pst.unit() {
+                        row.set_running_balance(
+                            "balance",
+                            ColumnValue::Amount(amount + pst.amount()),
+                        );
+                        return;
+                    }
+                }
+                row.set_running_balance("balance", ColumnValue::Amount(pst.amount()));
+            };
+        let data = plan.execute(
+            self.filtered_postings(&journ),
+            |(entry, pst)| PostingContext::new(entry, pst),
+            Some(balance_update_fn),
+        )?;
 
         // Add to the table
         for row_data in data {
@@ -134,7 +159,9 @@ impl ExecCommand for RegCommand {
         // Print the table
         let mut output = String::new();
         table.print(&mut output).unwrap();
-        print!("{output}");
+        // Using print! macro can cause panic when piping. Use write and ignore the result.
+        let stdout = std::io::stdout();
+        let _ = write!(&mut stdout.lock(), "{}", &output);
 
         // Now we only need to write the price database.
         config.price_databases().into_iter().for_each(|db| db.write_file().unwrap());

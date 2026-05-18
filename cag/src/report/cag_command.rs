@@ -7,26 +7,27 @@
  */
 use crate::cgt_configuration::{EventFilter, EventPattern, PoolFilter};
 use crate::computer::CapitalGainsComputer;
-use crate::pool::PoolBalance;
+use crate::pool_event::PoolEvent;
 use crate::report::cmd_line::CagArguments;
 use crate::report::expr::context::CagContext;
 use clap::Parser;
 use journ_core::account::Account;
 use journ_core::configuration::{AccountFilter, Filter, UnitFilter};
 use journ_core::error::JournResult;
-use journ_core::journal::Journal;
+use journ_core::journal_context::JournalContext;
 use journ_core::module::ModuleCommand;
 use journ_core::report::command::arguments::{Arguments, Cmd, Command, DateTimeFormatCommand};
 use journ_core::report::command::chained_result::ChainingResult;
 use journ_core::report::command::cmd_line::BeginAndEndCommand;
 use journ_core::report::command::{ChainableCommand, ExecCommand, IntoExecCommand};
 use journ_core::report::expr::parser::parse_plan;
-use journ_core::report::expr::{ColumnValue, Expr, IdentifierContext, RowData};
+use journ_core::report::expr::{ColumnValue, Expr, RowData};
 use journ_core::report::table2::{Row, StyledCell, Table};
 use journ_core::report::term_style::{Style, Weight};
 use journ_core::unit::Unit;
 use std::collections::HashMap;
 use std::fmt;
+use std::io::Write;
 use std::ops::Deref;
 use yaml_rust2::{Yaml, YamlEmitter, yaml};
 
@@ -294,12 +295,11 @@ impl ModuleCommand for CagCommand {
 
     fn create(
         &self,
-        journal: &Journal,
         args: &Arguments,
         command_args: &[String],
     ) -> JournResult<Box<dyn ExecCommand>> {
         CagArguments::parse_from(command_args)
-            .into_exec_cmd(journal, args)
+            .into_exec_cmd(args)
             .map(Box::new)
             .map(|boxed| boxed as Box<dyn ExecCommand>)
     }
@@ -312,13 +312,9 @@ impl ChainableCommand for CagCommand {
 }
 
 impl ExecCommand for CagCommand {
-    fn execute<'h>(
-        &'h self,
-        journ: &'h mut Journal<'h>,
-        chained: Option<ChainingResult<'h>>,
-    ) -> JournResult<()> {
+    fn execute<'h>(&'h self, chained: Option<ChainingResult<'h>>) -> JournResult<()> {
         let mut computer = CapitalGainsComputer::new();
-        let capital_gains = computer.compute_gains(journ)?;
+        let capital_gains = computer.compute_gains(&JournalContext::current().journal())?;
 
         let mut additional = HashMap::new();
         if let Some(yaml_map_key) = &self.yaml_map_key {
@@ -335,36 +331,32 @@ impl ExecCommand for CagCommand {
         )?;
         let event_filter = self.event_filter();
         let pool_filter = self.pool_filter();
-        let mut balance: Vec<PoolBalance<'h>> = vec![];
+        let balance_update_fn = |prev: &[RowData<'h>],
+                                 row: &mut RowData<'h>,
+                                 event: &PoolEvent<'h>| {
+            let bal_diff = event.balance_after() - event.balance_before();
+
+            for prev_row in prev.iter().rev() {
+                let bal = prev_row.running_balance("balance").unwrap().as_valued_amount().unwrap();
+                if bal.unit() == bal_diff.amount().unit() {
+                    let new_bal = (bal + bal_diff.valued_amount()).unwrap();
+                    row.set_running_balance("balance", ColumnValue::ValuedAmount(new_bal));
+                    return;
+                }
+            }
+            row.set_running_balance(
+                "balance",
+                ColumnValue::ValuedAmount(bal_diff.into_valued_amount()),
+            );
+        };
         let data = plan.execute(
-            &*journ,
             capital_gains
                 .events()
                 .iter()
                 .filter(|e| event_filter.is_included(e))
                 .filter(|e| pool_filter.is_included(e)),
-            |e| {
-                let bal_diff = e.balance_after() - e.balance_before();
-                let bal = match balance
-                    .iter_mut()
-                    .find(|b| b.amount().unit() == bal_diff.amount().unit())
-                {
-                    Some(bal) => {
-                        *bal = &*bal + &bal_diff;
-                        &*bal
-                    }
-                    None => {
-                        balance.push(bal_diff);
-                        balance.get(balance.len() - 1).unwrap()
-                    }
-                };
-                let mut context = CagContext::new(journ, e);
-                context.set_identifier(
-                    "balance",
-                    ColumnValue::ValuedAmount(bal.valued_amount().clone()),
-                );
-                context
-            },
+            |e| CagContext::new(e),
+            Some(balance_update_fn),
         )?;
 
         // The data rows are limited by --head and/or --tail.
@@ -406,26 +398,38 @@ impl ExecCommand for CagCommand {
             ChainingResult::Yaml(self.append_yaml(yaml, plan.column_spec().exprs(), data))
         };
 
+        self.chain_or_print(chaining_res);
+
+        /*
         // Move to next chain
         if let Some(next) = Cmd::advance_chain() {
-            return next.execute(journ, Some(chaining_res));
+            return next.execute(Some(chaining_res));
         }
 
         // Otherwise print output
         match chaining_res {
             ChainingResult::Table(table) => {
-                print!("{table}")
+                // Using print! macro can cause panic when piping. Use write and ignore the result.
+                let stdout = std::io::stdout();
+                let _ = write!(&mut stdout.lock(), "{}", table);
             }
             ChainingResult::Yaml(root) => {
                 let mut string = String::new();
                 let mut emitter = YamlEmitter::new(&mut string);
                 emitter.dump(&root).map_err(|_| fmt::Error).unwrap();
-                print!("{string}")
+                // Using print! macro can cause panic when piping. Use write and ignore the result.
+                let stdout = std::io::stdout();
+                let _ = write!(&mut stdout.lock(), "{}", string);
             }
-        }
+        }*/
 
         // Always write the price databases.
-        journ.config().price_databases().into_iter().for_each(|db| db.write_file().unwrap());
+        JournalContext::current()
+            .journal()
+            .config()
+            .price_databases()
+            .into_iter()
+            .for_each(|db| db.write_file().unwrap());
         Ok(())
     }
 

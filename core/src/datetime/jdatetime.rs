@@ -21,6 +21,7 @@ use chrono::{
 };
 use chrono_tz::Tz;
 use nom::{Err as NomErr, InputLength};
+use once_cell::sync::Lazy;
 use std::cmp::Ordering;
 use std::fmt;
 use std::hash::Hash;
@@ -33,6 +34,15 @@ pub struct JDateTime {
     precision: DateTimePrecision, //pub(super) datetime_format: &'h DateTimeFormat<'h>,
                                   //print_utc_marker: bool,
 }
+
+pub static MIN_DATETIME: Lazy<JDateTime> = Lazy::new(|| JDateTime {
+    datetime: Tz::UTC.from_utc_datetime(&NaiveDateTime::MIN),
+    precision: DateTimePrecision::Second,
+});
+pub static MAX_DATETIME: Lazy<JDateTime> = Lazy::new(|| JDateTime {
+    datetime: Tz::UTC.from_utc_datetime(&NaiveDateTime::MAX),
+    precision: DateTimePrecision::Second,
+});
 
 impl JDateTime {
     pub fn new(
@@ -66,15 +76,6 @@ impl JDateTime {
         mut tz: Tz,
     ) -> impl FnMut(I) -> IParseResult<'i, I, Self> {
         move |input: I| {
-            //let (rem, datetime) = dtf.datetime_string()(input.clone())?;
-
-            //let mut datetime = datetime.text();
-            //let has_utc_marker = datetime.ends_with('Z');
-            //if has_utc_marker {
-            //    datetime = &datetime[0..datetime.len() - 1];
-            //    tz = Tz::UTC;
-            //}
-
             let mut parsed = Parsed::new();
             // We must be able to at least read the date part
             let mut parsed_remainder =

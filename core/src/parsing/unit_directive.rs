@@ -8,7 +8,7 @@
 use crate::directive::{Directive, DirectiveKind};
 use crate::error::parsing::promote;
 use crate::journal_node::JournalNodeKind;
-use crate::parsing::directive::stream;
+use crate::parsing::directive::{StreamResult, stream};
 use crate::parsing::input::{BlockInput, ConfigInput, LocatedInput, NodeInput, TextInput};
 use crate::parsing::util::{
     line_value, multiline_value_string, param_value, repeat0, separated_field,
@@ -87,9 +87,14 @@ where
                 Ok(())
             },
             param_value("prices") => |input: I| {
-                let (_, (block, path)) = stream(input)?;
-                let pd = Arc::new(PriceDatabase::new(node.branch_kind(block, path, JournalNodeKind::Prices)));
-                PythonLedgerModule::set_default_price_database(&pd, node.node().id().journal_incarnation());
+                let node = match stream(input, JournalNodeKind::Prices) {
+                    StreamResult::AlreadyStreamed(_, node) => node,
+                    StreamResult::NewStream(_, branch_input) => node.branch(branch_input),
+                    StreamResult::Err(e) => return Err(e)
+                };
+
+                let pd = Arc::new(PriceDatabase::new(node));
+                PythonLedgerModule::set_default_price_database(&pd);
                 def_unit.set_prices(Some(pd));
                 Ok(())
             },
@@ -150,20 +155,23 @@ where
                     Ok(())
                 },
                 param_value("prices") => |input| {
-                    let (_, (block, path)) = stream(input)?;
-
-                        // Don't parse the price database multiple times.
-                        match primary {
-                            Some(primary) => {
-                                if let Some(pd) = primary.prices() {
-                                    unit.set_prices(Some(Arc::clone(pd)));
-                                }
-                            }
-                            None => {
-                                let pd = Arc::new(PriceDatabase::new(node.branch_kind(block, path, JournalNodeKind::Prices)));
-                                unit.set_prices(Some(pd));
+                    // Don't parse the price database multiple times.
+                    match primary {
+                        Some(primary) => {
+                            if let Some(pd) = primary.prices() {
+                                unit.set_prices(Some(Arc::clone(pd)));
                             }
                         }
+                        None => {
+                            let node = match stream(input, JournalNodeKind::Prices) {
+                                StreamResult::AlreadyStreamed(_, node) => node,
+                                StreamResult::NewStream(_, branch_input) => node.branch(branch_input),
+                                StreamResult::Err(e) => return Err(e)
+                            };
+                            let pd = Arc::new(PriceDatabase::new(node));
+                            unit.set_prices(Some(pd));
+                        }
+                    }
                     Ok(())
                 },
                 util::comment => |_| Ok(()),
@@ -177,6 +185,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    use crate::parsing::text_block::{TextBlockBuf, TextBlockWriter};
     use crate::python::lambda::Lambda;
     use crate::unit::RoundingStrategy;
     use crate::{journ, parse, parsing};
@@ -216,8 +225,12 @@ mod tests {
         assert!(unit.prices().is_some());
         assert_eq!(unit.prices().unwrap().prices().len(), 1, "Price DB contains one price");
 
+        let price = unit.prices().unwrap().prices().iter().next().cloned().unwrap();
         let mut buf = Vec::new();
-        unit.prices().unwrap().prices().iter().next().unwrap().write(&mut buf, config).unwrap();
+        let mut block_writer = TextBlockWriter::new(&mut buf);
+        block_writer
+            .write(&TextBlockBuf::with_obj(price.as_ref(), Some(config)).as_text_block(), None)
+            .unwrap();
         assert_eq!(String::from_utf8(buf).unwrap().as_str(), "P 2000-01-01 10:11:12Z \"€\" $1.00")
     }
 
@@ -240,8 +253,11 @@ mod tests {
         );
         assert!(unit.prices().is_some());
         assert_eq!(unit.prices().unwrap().prices().len(), 1, "Price DB contains one price");
+
+        let price = unit.prices().unwrap().prices().iter().next().cloned().unwrap();
         let mut buf = Vec::new();
-        unit.prices().unwrap().prices().iter().next().unwrap().write(&mut buf, config).unwrap();
+        let mut block_writer = TextBlockWriter::new(&mut buf);
+        block_writer.write(price.as_ref(), Some(config)).unwrap();
         assert_eq!(String::from_utf8(buf).unwrap().as_str(), "P 2000-01-01 10:11:12Z \"€\" $1.00")
     }
 }

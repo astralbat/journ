@@ -164,6 +164,7 @@ pub trait StrExt {
     fn indented_amount(&self) -> u16;
     /// Trims the start of the string according to the indented amount from [`Self::indented_amount()`].
     /// Returns `None` if outdenting was not successful.
+    /// Note if tab characters are removed, this may overshoot the `outdent_amount`.
     fn outdent(&self, outdent_amount: u16) -> Option<&str>;
     fn outdent_lines(&self) -> Option<String>;
     /// Compares ignoring case for the ascii characters. Non-ascii characters are compared without
@@ -174,6 +175,8 @@ pub trait StringExt {
     fn trim_newline(&mut self);
 
     fn capitalize_first(&mut self);
+
+    //fn outdent_exact(&mut self, outdent_amount: u16);
 }
 impl StrExt for str {
     #[inline]
@@ -399,6 +402,24 @@ impl StringExt for String {
             self.replace_range(0..first_char.len_utf8(), &first_char_upper.to_string());
         }
     }
+
+    /*
+    fn outdent_exact(&mut self, outdent_amount: u16) {
+        let indent_amount = self.indented_amount();
+        assert!(
+            indent_amount >= outdent_amount,
+            "Outdent_amount > indented_amount: {} > {}",
+            outdent_amount,
+            indent_amount
+        );
+        let wanted_indent = indent_amount - outdent_amount;
+
+        *self = self.outdent(outdent_amount).to_string();
+        let overshoot = wanted_indent - self.indented_amount();
+        for _ in 0..overshoot {
+            self.insert(0, ' ');
+        }
+    }*/
 }
 
 pub trait RangeBoundsExt<T>: RangeBounds<T> {

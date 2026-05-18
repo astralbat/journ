@@ -8,6 +8,7 @@
 use crate::bindings_pyo3::{PyLedgerError, PyLedgerResult};
 use journ_core::journal_entry::JournalEntry as CoreJournalEntry;
 use journ_core::posting::PostingId;
+use journ_core::unit::Unit;
 use journ_core::valued_amount::PostingValuation;
 use journ_core::{err, parse, parsing};
 use rust_decimal::Decimal;
@@ -16,14 +17,11 @@ use std::sync::{Arc, Mutex};
 #[pyclass(unsendable)]
 pub struct Posting {
     entry: Arc<Mutex<CoreJournalEntry<'static>>>,
-    posting_id: PostingId<'static>,
+    posting_id: PostingId,
 }
 impl Posting {
-    pub fn new(
-        entry: Arc<Mutex<CoreJournalEntry<'static>>>,
-        posting_id: PostingId<'static>,
-    ) -> Self {
-        Posting { entry, posting_id }
+    pub fn new(entry: Arc<Mutex<CoreJournalEntry<'static>>>, posting_id: &PostingId) -> Self {
+        Posting { entry, posting_id: posting_id.clone() }
     }
 }
 
@@ -31,29 +29,53 @@ impl Posting {
 impl Posting {
     fn account(&self) -> PyLedgerResult<String> {
         let entry = self.entry.lock().unwrap();
-        let pst = entry.find_posting(self.posting_id).unwrap();
+        let pst = entry.find_posting(&self.posting_id).unwrap();
         Ok(pst.account().to_string())
+    }
+
+    fn amount(&self) -> String {
+        let entry = self.entry.lock().unwrap();
+        let pst = entry.find_posting(&self.posting_id).unwrap();
+        pst.amount().to_string()
     }
 
     fn amount_quantity(&self) -> PyLedgerResult<Decimal> {
         let entry = self.entry.lock().unwrap();
-        let pst = entry.find_posting(self.posting_id).unwrap();
+        let pst = entry.find_posting(&self.posting_id).unwrap();
         Ok(pst.amount().quantity())
+    }
+
+    fn unit(&self) -> String {
+        let entry = self.entry.lock().unwrap();
+        let pst = entry.find_posting(&self.posting_id).unwrap();
+        pst.unit().to_string()
+    }
+
+    fn set_amount(&self, amount_str: &str) -> PyLedgerResult<()> {
+        let mut entry = self.entry.lock().unwrap();
+        let mut config = entry.config().clone();
+        let pst = entry.find_posting_mut(&self.posting_id).unwrap();
+        let amount =
+            parse!(config.alloc(amount_str.to_string()), parsing::amount::amount, &mut config)
+                .map(|r| r.1)
+                .map_err(|e| err!(e; "append_posting()"))?;
+        pst.set_amount(amount, false, config.allocator());
+        Ok(())
     }
 
     fn set_unit_value(&self, unit_value: &str) -> PyLedgerResult<()> {
         let mut entry = self.entry.lock().unwrap();
         let mut config = entry.config().clone();
-        let pst = entry.find_posting_mut(self.posting_id).unwrap();
+        let pst = entry.find_posting_mut(&self.posting_id).unwrap();
         let unit_value_alloc = crate::bindings_pyo3::ALLOCATOR.alloc(unit_value.to_string());
 
         let parse_res = parse!(unit_value_alloc, parsing::amount::amount, &mut config)?.1;
 
         if !parse_res.is_positive() {
-            return Err(PyLedgerError(err!("Unit value must be positive")));
+            return Err(PyLedgerError::new(err!("Unit value must be positive")));
         }
         if pst.value_units().any(|u| u == parse_res.unit()) {
-            return Err(PyLedgerError(err!(
+            return Err(PyLedgerError::new(err!(
                 "Valuation already set for unit: {}",
                 parse_res.unit()
             )));
@@ -66,21 +88,44 @@ impl Posting {
     fn set_total_value(&self, total_value: &str) -> PyLedgerResult<()> {
         let mut entry = self.entry.lock().unwrap();
         let mut config = entry.config().clone();
-        let pst = entry.find_posting_mut(self.posting_id).unwrap();
+        let pst = entry.find_posting_mut(&self.posting_id).unwrap();
         let total_value_alloc = crate::bindings_pyo3::ALLOCATOR.alloc(total_value.to_string());
 
-        let parse_res = parse!(total_value_alloc, parsing::amount::amount, &mut config)?.1;
+        let mut parse_res = parse!(total_value_alloc, parsing::amount::amount, &mut config)?.1;
         if !parse_res.is_positive() {
-            return Err(PyLedgerError(err!("Total value must be positive")));
+            return Err(PyLedgerError::new(err!("Total value must be positive")));
         }
         if pst.value_units().any(|u| u == parse_res.unit()) {
-            return Err(PyLedgerError(err!(
+            return Err(PyLedgerError::new(err!(
                 "Valuation already set for unit: {}",
                 parse_res.unit()
             )));
         }
 
+        if pst.amount().is_negative() {
+            parse_res = -parse_res;
+        }
         pst.set_valuation(PostingValuation::new_total(parse_res, false));
         Ok(())
+    }
+
+    /// Removes the valuation specified by the unit code `unit`, returning `true`
+    /// if successful.
+    fn remove_value(&self, unit: &str) -> PyLedgerResult<bool> {
+        let mut entry = self.entry.lock().unwrap();
+        let config = entry.config().clone();
+        let pst = entry.find_posting_mut(&self.posting_id).unwrap();
+        let new_unit = Unit::new(unit);
+        let unit = match config.get_unit(unit) {
+            Some(unit) => unit,
+            None => &new_unit,
+        };
+        Ok(pst.remove_valuation(&unit))
+    }
+
+    fn __str__(&self) -> String {
+        let mut entry = self.entry.lock().unwrap();
+        let pst = entry.find_posting_mut(&self.posting_id).unwrap();
+        format!("{}", pst)
     }
 }

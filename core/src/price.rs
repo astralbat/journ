@@ -9,8 +9,10 @@ use crate::amount::Amount;
 use crate::configuration::Configuration;
 use crate::datetime::JDateTime;
 use crate::parsing;
+use crate::parsing::text_block::{BlockObject, TextBlockBuf};
 use crate::unit::Unit;
-use std::{cmp, io};
+use std::cmp;
+use std::fmt::Write;
 
 #[derive(Debug, Clone)]
 pub struct Price<'h> {
@@ -83,6 +85,7 @@ impl<'h> Price<'h> {
         )
     }
 
+    /*
     pub fn write<W: io::Write>(
         &self,
         writer: &mut W,
@@ -101,7 +104,7 @@ impl<'h> Price<'h> {
             write!(writer, " {}", sources)?;
         }
         Ok(())
-    }
+    }*/
 }
 
 /*
@@ -145,5 +148,25 @@ impl Ord for Price<'_> {
 impl PartialOrd for Price<'_> {
     fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
         Some(self.cmp(other))
+    }
+}
+
+impl BlockObject for Price<'_> {
+    fn write(&self, buf: &mut TextBlockBuf, config: Option<&Configuration>) {
+        let config = config.expect("Configuration must be provided when writing price objects");
+
+        let dtf = config.datetime_format();
+        let tz = config.timezone();
+        write!(
+            buf,
+            "P {} \"{}\" {}",
+            self.datetime.with_timezone(tz).format(dtf),
+            self.base_unit.code(),
+            self.price.format_precise()
+        )
+        .unwrap();
+        if let Some(sources) = self.sources {
+            write!(buf, " {}", sources).unwrap();
+        }
     }
 }

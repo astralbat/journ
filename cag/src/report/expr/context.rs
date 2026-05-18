@@ -11,11 +11,10 @@ use crate::deal_group::DealGroup;
 use crate::deal_holding::DealHolding;
 use crate::pool::PoolBalance;
 use crate::pool_event::{MatchDetails, PoolEvent, PoolEventKind};
-use journ_core::configuration::Configuration;
 use journ_core::datetime::JDateTime;
 use journ_core::error::JournResult;
 use journ_core::eval_identifier;
-use journ_core::journal::Journal;
+use journ_core::journal_context::JournalContext;
 use journ_core::report::expr::{ColumnValue, EvalContext, IdentifierContext, ValuerContext};
 use journ_core::valued_amount::ValuedAmount;
 use journ_core::valuer::{SystemValuer, Valuer};
@@ -23,22 +22,17 @@ use smartstring::alias::String as SS;
 use std::collections::HashMap;
 
 pub struct CagContext<'h, 'e> {
-    journal: &'e Journal<'h>,
     event: &'e PoolEvent<'h>,
     variables: HashMap<SS, ColumnValue<'h>>,
 }
 
 impl<'h, 'e> CagContext<'h, 'e> {
-    pub fn new(journal: &'e Journal<'h>, event: &'e PoolEvent<'h>) -> Self {
-        CagContext { journal, event, variables: HashMap::new() }
+    pub fn new(event: &'e PoolEvent<'h>) -> Self {
+        CagContext { event, variables: HashMap::new() }
     }
 }
 
 impl<'h, 'e> EvalContext<'h> for CagContext<'h, 'e> {
-    fn config(&self) -> &Configuration<'h> {
-        self.journal.config()
-    }
-
     fn as_valuer_context(&self) -> Option<&dyn ValuerContext<'h>> {
         Some(self)
     }
@@ -54,9 +48,12 @@ impl<'h> ValuerContext<'h> for CagContext<'h, '_> {
         'h: 'a,
     {
         let sys_valuer = match datetime {
-            Some(datetime) => SystemValuer::on_date(self.journal.config().clone(), datetime),
+            Some(datetime) => SystemValuer::on_date(
+                JournalContext::current().journal().config().clone(),
+                datetime,
+            ),
             None => SystemValuer::on_date(
-                self.journal.config().clone(),
+                JournalContext::current().journal().config().clone(),
                 self.event.event_datetime().start(),
             ),
         };
@@ -157,7 +154,7 @@ where
                         self.event
                             .metadata_by_key(&identifier[1..])
                             .iter()
-                            .filter_map(|m| m.value().map(|v| ColumnValue::String(v.trim().into())))
+                            .filter_map(|m| m.value().map(|v| ColumnValue::String(v.into())))
                             .collect(),
                     ))
                 } else {

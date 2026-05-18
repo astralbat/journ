@@ -6,29 +6,28 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::entry_iterator::EntryIterator;
+use crate::file_id::FileId;
 use crate::journal_entry::JournalEntry;
 use crate::posting::Posting;
-use ansi_term::{Color, Style};
-use atty::Stream;
 use bumpalo_herd::Herd;
 use chrono::DateTime;
 use chrono_tz::Tz;
 use env_logger::Builder;
 use journ_core::alloc::HerdAllocator;
 use journ_core::configuration::AlwaysIncluded;
-use journ_core::datetime::{DateAndTime, DateTimePrecision, JDateTime, JDateTimeRange};
+use journ_core::datetime::{DateTimePrecision, JDateTime, JDateTimeRange};
 use journ_core::err;
-use journ_core::error::JournError;
-use journ_core::journal_node::NodeId;
+use journ_core::error::{BlockContextError, JournError};
+use journ_core::journal_context::JournalContext;
 use journ_core::module::MODULES;
-use journ_core::parsing::text_block::TextBlock;
+use journ_core::parsing::text_block::{PaddingPolicy, TextBlock};
 use journ_core::python::mod_ledger;
 use journ_core::report::balance::AccountBalances;
-use journ_core::report::command::arguments::{Arguments, Cmd};
+use journ_core::tree_id::TreeId;
 use journ_core::unit::{RoundingStrategy, UnitFormat};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyAnyMethods, PyDateTime, PyStringMethods};
+use pyo3::types::{PyAnyMethods, PyDateTime, PyList, PyStringMethods};
 use rust_decimal::Decimal;
 use std::error::Error;
 use std::fmt;
@@ -72,7 +71,15 @@ fn journ<'py>(m: &Bound<'py, PyModule>) -> PyResult<()> {
 
 /// Create a wrapper error so that we can override its display behaviour.
 #[derive(Debug)]
-pub(crate) struct PyLedgerError(pub JournError);
+pub(crate) struct PyLedgerError {
+    inner: JournError,
+}
+impl PyLedgerError {
+    pub(crate) fn new(mut error: JournError) -> Self {
+        error.prune_except_last::<BlockContextError>();
+        Self { inner: error }
+    }
+}
 
 pub(crate) type PyLedgerResult<T> = Result<T, PyLedgerError>;
 
@@ -80,18 +87,19 @@ impl Error for PyLedgerError {}
 
 impl Display for PyLedgerError {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        let mut err_style = Style::default();
-        if atty::is(Stream::Stderr) {
-            err_style = err_style.fg(Color::Red);
-        }
+        //let mut err_style = Style::default();
+        //if atty::is(Stream::Stderr) {
+        //    err_style = err_style.fg(Color::Red);
+        //}
 
-        write!(f, "{}", err_style.paint(&self.0.to_string()))
+        write!(f, "{}", self.inner)
+        //write!(f, "{}", err_style.paint(&self.0.to_string()))
     }
 }
 
 impl From<JournError> for PyLedgerError {
     fn from(err: JournError) -> Self {
-        PyLedgerError(err)
+        PyLedgerError::new(err)
     }
 }
 
@@ -100,6 +108,7 @@ impl From<PyLedgerError> for PyErr {
         JournPyError::new_err(err.to_string())
     }
 }
+
 create_exception!(journ, JournPyError, pyo3::exceptions::PyException);
 
 /// This needs to be a static global as the Journal pyclass cannot have lifetime parameters.
@@ -114,122 +123,156 @@ pub(crate) static ALLOCATOR: LazyLock<HerdAllocator<'static>> =
 /// Journal isn't Send through the use of Rc.
 #[pyclass(unsendable)]
 struct Journal {
-    journal: Arc<Mutex<journ_core::journal::Journal<'static>>>,
+    context: Arc<JournalContext<'static>>,
     //allocator: HerdAllocator<'static>,
-    edit_node_id: Mutex<NodeId<'static>>,
+    edit_node_id: Mutex<FileId>,
 }
 
 #[pymethods]
 impl Journal {
     #[new]
     fn new(filename: &str) -> PyLedgerResult<Self> {
-        //let allocator = HerdAllocator::new(&HERD);
-        let args = Cmd::set_args(Arguments::default());
         let filename = &**ALLOCATOR.alloc(PathBuf::from(filename));
 
         if MODULES.lock().unwrap().is_empty() {
             MODULES.lock().unwrap().push(journ_cag::module_init::initialize());
         }
-        /*
-        let rust_journal = TextBlock::from_file(filename, &ALLOCATOR, None).and_then(|block| {
-            journ_core::journal::Journal::parse(args, filename, block, &ALLOCATOR)
-        })?;*/
 
-        let rust_journal = Python::with_gil(|py| {
+        let parse_result = Python::with_gil(|py| {
             let python = py;
 
             // Create the ledger module if it doesn't exist.
-            let sys_modules = py.import("sys").unwrap().getattr("modules").unwrap();
+            let sys = py.import("sys")?;
+            let sys_modules = sys.getattr("modules")?;
             if sys_modules.get_item("ledger").is_err() {
-                let mod_ledger = PyModule::new(py, "ledger").unwrap();
-                mod_ledger::ledger(py, &mod_ledger).unwrap();
+                let mod_ledger = PyModule::new(py, "ledger")?;
+                mod_ledger::ledger(py, &mod_ledger)?;
                 // Insert the module into sys.modules
-                sys_modules.set_item("ledger", mod_ledger).unwrap();
+                sys_modules.set_item("ledger", mod_ledger)?;
             }
             // Import the ledger module to ensure it is initialized.
             // The main script can exit with an exception during shutdown unless we import the
             // threading module in the main thread. See https://bugs.python.org/issue31517.
-            python.import("threading").unwrap();
+            python.import("threading")?;
+
+            // Add the directory of the ledger file to sys.path. This allows Python code
+            // within the ledger to import modules from the relative path.
+            if let Some(parent) = filename.parent() {
+                // We haven't validated yet so we need this check. Also, the parent may be "".
+                if let Ok(parent) = parent.canonicalize()
+                    && parent.is_dir()
+                {
+                    let path = sys.getattr("path")?.downcast_into::<PyList>()?;
+                    path.insert(0, parent.display().to_string())?;
+                }
+            }
 
             // The parser works with Python in another thread so we need to release the gil
             // temporarily.
             python.allow_threads(|| {
                 TextBlock::from_file(filename, &ALLOCATOR, None).and_then(|block| {
-                    journ_core::journal::Journal::parse(args, Some(filename), block, &ALLOCATOR)
+                    journ_core::journal::Journal::parse(Some(filename), block, &ALLOCATOR)
                 })
             })
-        })
-        .map_err(PyLedgerError)?;
-        let node_id = rust_journal.find_node_by_filename(filename).unwrap().id();
-        let journal = Journal {
-            journal: Arc::new(Mutex::new(rust_journal)),
-            //allocator,
-            edit_node_id: Mutex::new(*node_id),
-        };
+        });
+
+        let context = parse_result.map_err(PyLedgerError::new)?;
+        let node_id =
+            context.journal().find_node_by_filename(filename).unwrap().id().as_ref().clone();
+        let journal =
+            Journal { context: Arc::new(context), edit_node_id: Mutex::new(FileId(node_id)) };
         Ok(journal)
     }
 
     fn edit_file(&self, name: &str) -> PyLedgerResult<()> {
-        let journal = self.journal.lock().unwrap();
-        match journal.find_node_by_filename(&PathBuf::from(name)) {
-            Some(jf) => {
-                *self.edit_node_id.lock().unwrap() = *jf.id();
-                Ok(())
+        *self.edit_node_id.lock().unwrap() = self.file_id(name)?;
+        Ok(())
+    }
+
+    fn file_id(&self, name: &str) -> PyLedgerResult<FileId> {
+        self.context.with(|| {
+            match self.context.journal().find_node_by_filename(&PathBuf::from(name)) {
+                Some(jf) => Ok(FileId(jf.id().as_ref().clone())),
+                None => Err(PyLedgerError::new(err!("No filename found: {}", name))),
             }
-            None => Err(PyLedgerError(err!("No filename found: {}", name))),
-        }
+        })
     }
 
-    fn edit_file_id(&self) -> PyLedgerResult<u32> {
-        Ok(self.edit_node_id.lock().unwrap().id())
+    fn edit_file_id(&self) -> PyLedgerResult<FileId> {
+        Ok(self.edit_node_id.lock().unwrap().clone())
     }
 
+    #[pyo3(signature = (start_time, end_time, callback))]
     fn with_entry_range<'py>(
         &self,
         start_time: &Bound<'py, PyDateTime>,
         end_time: &Bound<'py, PyDateTime>,
         callback: &Bound<'py, PyAny>,
     ) -> PyResult<()> {
-        let journal = self.journal.lock().unwrap();
-        let chrono_start =
-            JDateTime::new(start_time.extract::<DateTime<Tz>>()?, DateTimePrecision::Second);
-        let chrono_end =
-            JDateTime::new(end_time.extract::<DateTime<Tz>>()?, DateTimePrecision::Second);
+        self.context.with(|| {
+            let journal = self.context.journal();
+            let chrono_start =
+                JDateTime::new(start_time.extract::<DateTime<Tz>>()?, DateTimePrecision::Second);
+            let chrono_end =
+                JDateTime::new(end_time.extract::<DateTime<Tz>>()?, DateTimePrecision::Second);
 
-        for entry in journal.entry_range(chrono_start..chrono_end) {
-            let entry = JournalEntry::new(
-                Arc::clone(&self.journal),
-                Arc::new(Mutex::new(journ_core::journal_entry::JournalEntry::clone(entry))),
-                *entry.id().node_id(),
-            );
-            callback.call1((entry,))?;
-        }
-        Ok(())
+            for entry in journal.entry_range(chrono_start..chrono_end) {
+                let entry = JournalEntry::new(
+                    Arc::clone(&self.context),
+                    Arc::new(Mutex::new(journ_core::journal_entry::JournalEntry::clone(entry))),
+                    FileId(entry.id().parent().unwrap().clone()),
+                );
+                callback.call1((entry,))?;
+            }
+            Ok(())
+        })
     }
 
-    /// Finds all entries between `start_time` and `end_time` exclusive, and having an entry description
-    /// equal to `description`.
+    /// Finds all entries between `start_time` and `end_time` exclusive.
+    ///
+    /// If `description` is provided, only those entries whose description is
+    /// equal to `description` are returned.
+    ///
+    /// If `file_id` is provided, only those entries found within that file specified
+    /// are returned. This can also include entries within nested files (those branched/included).
+    ///
+    /// The entries are returned in date/location order, with any duplicates later found being ignored.
+    #[pyo3(signature = (start_time, end_time, file_id=None, description=None))]
     fn find_entries<'py>(
         &self,
         start_time: &Bound<'py, PyDateTime>,
         end_time: &Bound<'py, PyDateTime>,
-        description: &str,
+        file_id: Option<&FileId>,
+        description: Option<&str>,
     ) -> PyResult<Vec<JournalEntry>> {
-        let journal = self.journal.lock().unwrap();
-        let chrono_start =
-            JDateTime::new(start_time.extract::<DateTime<Tz>>()?, DateTimePrecision::Second);
-        let chrono_end =
-            JDateTime::new(end_time.extract::<DateTime<Tz>>()?, DateTimePrecision::Second);
+        self.context.with(|| {
+            let journal = self.context.journal();
+            let chrono_start =
+                JDateTime::new(start_time.extract::<DateTime<Tz>>()?, DateTimePrecision::Second);
+            let chrono_end =
+                JDateTime::new(end_time.extract::<DateTime<Tz>>()?, DateTimePrecision::Second);
 
-        let mut entries = vec![];
-        for entry in journal.find_entries(chrono_start..chrono_end, description) {
-            entries.push(JournalEntry::new(
-                Arc::clone(&self.journal),
-                Arc::new(Mutex::new(journ_core::journal_entry::JournalEntry::clone(entry))),
-                *entry.id().node_id(),
-            ));
-        }
-        Ok(entries)
+            let mut entries = vec![];
+            for entry in journal.find_entries(
+                chrono_start..chrono_end,
+                description,
+                file_id.map(|fid| &fid.0),
+            ) {
+                entries.push(JournalEntry::new(
+                    Arc::clone(&self.context),
+                    Arc::new(Mutex::new(journ_core::journal_entry::JournalEntry::clone(entry))),
+                    FileId(entry.id().parent().unwrap().clone()),
+                ));
+            }
+            Ok(entries)
+        })
+    }
+
+    fn contains_entry(&self, entry: &JournalEntry) -> bool {
+        self.context.with(|| {
+            let journal = self.context.journal();
+            journal.contains_entry(&*entry.entry_ref())
+        })
     }
 
     /// Gets the quantity balance of the specified `account`, in the specified `unit` between `start`..`end`.
@@ -247,7 +290,7 @@ impl Journal {
                 Some(t) => {
                     let chrono_start: DateTime<Tz> = t
                         .extract()
-                        .map_err(|e| PyLedgerError(err!("Invalid start time: {}", e)))?;
+                        .map_err(|e| PyLedgerError::new(err!("Invalid start time: {}", e)))?;
                     std::ops::Bound::Included(JDateTime::new(
                         chrono_start,
                         DateTimePrecision::Second,
@@ -257,101 +300,102 @@ impl Journal {
             },
             match end {
                 Some(t) => {
-                    let chrono_end: DateTime<Tz> =
-                        t.extract().map_err(|e| PyLedgerError(err!("Invalid end time: {}", e)))?;
+                    let chrono_end: DateTime<Tz> = t
+                        .extract()
+                        .map_err(|e| PyLedgerError::new(err!("Invalid end time: {}", e)))?;
                     std::ops::Bound::Excluded(JDateTime::new(chrono_end, DateTimePrecision::Second))
                 }
                 None => std::ops::Bound::Unbounded,
             },
         );
-        let journal = self.journal.lock().unwrap();
-        let account_obj = journal.config().clone().get_or_create_account(account);
-        for entry in journal.entry_range(time_range) {
-            for pst in entry.postings() {
-                if pst.account() != &account_obj {
-                    continue;
+        self.context.with(|| {
+            let journal = self.context.journal();
+            let account_obj = journal.config().clone().get_or_create_account(account);
+            for entry in journal.entry_range(time_range) {
+                for pst in entry.postings() {
+                    if pst.account() != &account_obj {
+                        continue;
+                    }
+                    bals.update_balance(pst.account(), pst.valued_amount(), false);
                 }
-                bals.update_balance(pst.account(), pst.valued_amount(), false);
             }
-        }
-        let quantity = bals
-            .account_balances(&account_obj)
-            .find(|a| a.unit().code() == unit)
-            .map(|a| a.quantity().to_string());
-        Ok(quantity)
+            let quantity = bals
+                .account_balances(&account_obj)
+                .find(|a| a.unit().code() == unit)
+                .map(|a| a.quantity().to_string());
+            Ok(quantity)
+        })
     }
 
-    #[pyo3(signature = (py_datetime, description, aux_datetime=None, write_time=true))]
+    #[pyo3(signature = (py_datetime, description, write_time=true))]
     fn new_entry<'py>(
         &self,
         py_datetime: &Bound<'py, PyDateTime>,
         mut description: String,
-        aux_datetime: Option<&Bound<'py, PyDateTime>>,
         write_time: bool,
     ) -> PyLedgerResult<JournalEntry> {
-        let journal = self.journal.lock().unwrap();
-        let rust_jf = journal.node(&self.edit_node_id.lock().unwrap());
-        let config = rust_jf.segments().last().unwrap().config().clone();
+        self.context.with(|| {
+            let journal = self.context.journal();
+            let rust_jf = journal.node(&self.edit_node_id.lock().unwrap().0);
+            let config = rust_jf.segments().last().unwrap().config().clone();
 
-        // Convert the python datetime object in to a DateAndTime object.
-        let chrono_date: DateTime<Tz> =
-            py_datetime.extract().map_err(|e| PyLedgerError(err!("Invalid datetime: {}", e)))?;
-        let dt = DateAndTime::new(
-            JDateTimeRange::new(
+            // Convert the python datetime object in to a DateAndTime object.
+            let chrono_date: DateTime<Tz> = py_datetime
+                .extract()
+                .map_err(|e| PyLedgerError::new(err!("Invalid datetime: {}", e)))?;
+            let dt = JDateTimeRange::new(
                 JDateTime::new(
                     chrono_date.with_timezone(&config.timezone()),
                     if write_time { DateTimePrecision::Second } else { DateTimePrecision::Day },
                 ),
                 None,
-            ),
-            aux_datetime
-                .map(|aux| {
-                    let aux_date: DateTime<Tz> = aux
-                        .extract()
-                        .map_err(|e| PyLedgerError(err!("Invalid aux datetime: {}", e)))?;
-                    Ok::<_, PyLedgerError>(JDateTime::new(
-                        aux_date.with_timezone(&config.timezone()),
-                        if write_time { DateTimePrecision::Second } else { DateTimePrecision::Day },
-                    ))
-                })
-                .transpose()?,
-        );
+            );
 
-        description.insert_str(0, "  ");
-        let entry = journ_core::journal_entry::JournalEntry::new(
-            ALLOCATOR.alloc(*self.edit_node_id.lock().unwrap()),
-            config.clone(),
-            dt,
-            ALLOCATOR.alloc(description),
-            Vec::new_in(&ALLOCATOR),
-        );
+            description.insert_str(0, "  ");
+            let entry = journ_core::journal_entry::JournalEntry::new(
+                rust_jf,
+                config.clone(),
+                dt,
+                ALLOCATOR.alloc(description),
+                Vec::new_in(&ALLOCATOR),
+            );
 
-        Ok(JournalEntry::new(
-            Arc::clone(&self.journal),
-            Arc::new(Mutex::new(entry)),
-            *self.edit_node_id.lock().unwrap(),
-        ))
+            Ok(JournalEntry::new(
+                Arc::clone(&self.context),
+                Arc::new(Mutex::new(entry)),
+                self.edit_node_id.lock().unwrap().clone(),
+            ))
+        })
     }
 
     fn print(&self) -> PyLedgerResult<()> {
-        let journal = self.journal.lock().unwrap();
-        journal.root().print(&AlwaysIncluded)?;
-        Ok(())
+        self.context.with(|| {
+            let journal = self.context.journal();
+            journal.root().print(&AlwaysIncluded)?;
+            Ok(())
+        })
     }
 
     fn print_file(&self, name: &str) -> PyLedgerResult<()> {
-        let journal = self.journal.lock().unwrap();
-        journal
-            .find_node_by_filename(&PathBuf::from(name))
-            .ok_or(PyLedgerError(err!("No filename ends with: {}", name)))?
-            .print(&AlwaysIncluded)?;
-        Ok(())
+        self.context.with(|| {
+            let journal = self.context.journal();
+            journal
+                .find_node_by_filename(&PathBuf::from(name))
+                .ok_or(PyLedgerError::new(err!("No filename ends with: {}", name)))?
+                .print(&AlwaysIncluded)?;
+            Ok(())
+        })
     }
 
-    fn write(&self) -> PyLedgerResult<()> {
-        let journal = self.journal.lock().unwrap();
-        journal.root().write_file_recursive()?;
-        Ok(())
+    #[pyo3(signature = (padding=None))]
+    fn write(&self, padding: Option<usize>) -> PyLedgerResult<()> {
+        self.context.with(|| {
+            let journal = self.context.journal();
+            journal
+                .root()
+                .write_file_recursive(padding.map(PaddingPolicy::Retain).unwrap_or_default())?;
+            Ok(())
+        })
     }
 }
 
@@ -382,7 +426,7 @@ fn format_amount<'py>(
                     "quantity cannot be parsed: '{}': {}",
                     quantity,
                     e.to_string()
-                )))
+                )));
             }
         },
     };

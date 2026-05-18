@@ -11,11 +11,13 @@ use crate::datetime::{
     DEFAULT_DATE_FORMAT, DEFAULT_DATETIME_FORMAT, DEFAULT_NUMBER_FORMAT, DEFAULT_TIME_FORMAT,
     DateTimeFormat,
 };
-use crate::journal_node::{JournalNode, NodeId};
+use crate::journal_context::JournalContext;
+use crate::journal_node::JournalNode;
 use crate::module::MODULES;
 use crate::module::{ModuleConfiguration, ModuleConfigurationEq};
 use crate::parsing::DerefMutAndDebug;
 use crate::price_db::PriceDatabase;
+use crate::tree_id::{BranchCountingTreeId, TreeId};
 use crate::unit::{NumberFormat, RoundingStrategy, Unit};
 use chrono_tz::Tz;
 use im::HashMap;
@@ -27,38 +29,48 @@ use std::ops::Deref;
 use std::string::ToString;
 use std::sync::Arc;
 
-#[derive(Debug, PartialEq, Eq, Hash, Copy, Clone)]
-pub struct ConfigurationVersion<'h> {
-    node_id: &'h NodeId<'h>,
-    version: u32,
+#[derive(Debug)]
+pub struct ConfigurationVersion {
+    id: BranchCountingTreeId,
+    // The canonical version
+    version: TreeId,
 }
 
-impl<'h> ConfigurationVersion<'h> {
-    fn initial(node_id: &'h NodeId<'h>) -> Self {
-        Self { node_id, version: 0 }
+impl ConfigurationVersion {
+    pub fn new_root() -> Self {
+        let id: BranchCountingTreeId = TreeId::new_root().branch(1).into();
+        Self { version: id.as_ref().clone(), id }
     }
 
-    /// Gets the next version from the current one.
-    fn next(self) -> Self {
-        Self { node_id: self.node_id, version: self.version + 1 }
+    /// Branch the version so that the id now points to the first child. E.g. 1.2 -> 1.2.1.
+    /// The version is unchanged until the next time [Self::increment()] is called.
+    pub fn branch(&self) -> ConfigurationVersion {
+        ConfigurationVersion { id: self.id.branch().into(), version: self.version.clone() }
     }
 
-    pub fn node_id(&self) -> &'h NodeId<'h> {
-        self.node_id
+    pub fn increment(&self) -> ConfigurationVersion {
+        let new_id: BranchCountingTreeId = self.id.incremented().into();
+        ConfigurationVersion { version: new_id.as_ref().clone(), id: new_id }
     }
 }
 
-impl fmt::Display for ConfigurationVersion<'_> {
+impl fmt::Display for ConfigurationVersion {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "{}-{}", self.node_id, self.version)
+        write!(f, "{}", self.version)
+    }
+}
+
+impl PartialEq for ConfigurationVersion {
+    fn eq(&self, other: &Self) -> bool {
+        self.version == other.version
     }
 }
 
 struct BaseConfiguration<'h> {
+    parent: Option<Arc<BaseConfiguration<'h>>>,
     /// The version sequence of the `Configuration`. The version changes whenever the `BaseConfiguration`
     /// changes _and_ it is in use elsewhere (`Configuration::clone`).
-    parent: Option<Arc<BaseConfiguration<'h>>>,
-    version: ConfigurationVersion<'h>,
+    version: ConfigurationVersion,
     date_format: &'h DateTimeFormat<'h>,
     time_format: &'h DateTimeFormat<'h>,
     datetime_format: &'h DateTimeFormat<'h>,
@@ -69,15 +81,11 @@ struct BaseConfiguration<'h> {
     accounts: HashMap<String, Arc<Account<'h>>>,
     /// Maps module names to their configuration.
     module_config: HashMap<&'static str, &'h dyn ModuleConfiguration>,
-    herd_allocator: &'h HerdAllocator<'h>,
 }
 
 impl<'h> BaseConfiguration<'h> {
-    fn new(
-        parent: Option<Arc<BaseConfiguration<'h>>>,
-        allocator: &'h HerdAllocator<'h>,
-        node_id: &'h NodeId<'h>,
-    ) -> Self {
+    fn new(parent: Option<Arc<BaseConfiguration<'h>>>) -> Self {
+        let allocator = JournalContext::current().allocator();
         let mut bc = Self {
             parent,
             number_format: DEFAULT_NUMBER_FORMAT.deref(),
@@ -89,8 +97,7 @@ impl<'h> BaseConfiguration<'h> {
             units: Default::default(),
             accounts: Default::default(),
             module_config: Default::default(),
-            version: ConfigurationVersion::initial(node_id),
-            herd_allocator: allocator,
+            version: ConfigurationVersion::new_root(),
         };
         for module in MODULES.lock().unwrap().iter() {
             if let Some(default_config) = module.default_config() {
@@ -107,7 +114,7 @@ impl<'h> BaseConfiguration<'h> {
         if Arc::strong_count(self) > 1 {
             let new_base = Self {
                 parent: self.parent.clone(),
-                version: ConfigurationVersion::next(self.version),
+                version: self.version.increment(),
                 units: self.units.clone(),
                 accounts: self.accounts.clone(),
                 module_config: self.module_config.clone(),
@@ -116,7 +123,7 @@ impl<'h> BaseConfiguration<'h> {
             *self = Arc::new(new_base);
             Arc::get_mut(self).unwrap()
         } else {
-            // This should be ok still since we borrowed self as &mut at the
+            // This should be ok since we borrowed self as &mut at the
             // start of the call.
             Arc::get_mut(self).unwrap()
         }
@@ -293,13 +300,13 @@ pub struct Configuration<'h> {
 }
 
 impl<'h> Configuration<'h> {
-    pub fn new(allocator: &'h HerdAllocator<'h>, node_id: &'h NodeId<'h>) -> Self {
-        Self { base_config: Arc::new(BaseConfiguration::new(None, allocator, node_id)) }
+    pub fn new() -> Self {
+        Self { base_config: Arc::new(BaseConfiguration::new(None)) }
     }
 
     /// Creates a new `Configuration` that is a branch of the current one. The new configuration
     /// is essentially the same as the current one.
-    pub fn branch(&self, node_id: &'h NodeId<'h>) -> Self {
+    pub fn create_child(&self) -> Self {
         // We may link parent to our base_config or directly to a parent of the base_config if the version has
         // been unchanged.
         let mut parent = self.base_config.clone();
@@ -312,11 +319,7 @@ impl<'h> Configuration<'h> {
         Configuration {
             base_config: Arc::new(BaseConfiguration {
                 parent: Some(parent),
-                version: if self.base_config.version.node_id == node_id {
-                    self.base_config.version
-                } else {
-                    ConfigurationVersion::initial(node_id)
-                },
+                version: self.base_config.version.branch(),
                 units: HashMap::new(),
                 accounts: HashMap::new(),
                 module_config: HashMap::new(),
@@ -325,8 +328,8 @@ impl<'h> Configuration<'h> {
         }
     }
 
-    pub fn version(&self) -> ConfigurationVersion<'h> {
-        self.base_config.version
+    pub fn version(&self) -> &ConfigurationVersion {
+        &self.base_config.version
     }
 
     /// Gets the date format in use.
@@ -377,7 +380,6 @@ impl<'h> Configuration<'h> {
     pub fn set_time_zone(&mut self, tz: Tz) {
         let base_config = self.get_mut();
         base_config.timezone = tz;
-        base_config.version = base_config.version.next();
     }
 
     pub fn number_format(&self) -> &'h NumberFormat {
@@ -501,7 +503,7 @@ impl<'h> Configuration<'h> {
         for (k, v) in config.base_config.module_config.iter() {
             base_config.module_config.insert(k, *v);
         }
-        base_config.version = base_config.version.next();
+        base_config.version.increment();
     }
 
     /// The set of all unique price databases.
@@ -617,12 +619,12 @@ impl<'h> Configuration<'h> {
     }
 
     pub fn allocator(&self) -> &'h HerdAllocator<'h> {
-        self.base_config.herd_allocator
+        JournalContext::current().allocator()
     }
 
     /// Allocates an object.
     pub fn alloc<T>(&self, t: T) -> &'h mut T {
-        self.base_config.herd_allocator.alloc(t)
+        self.allocator().alloc(t)
     }
 
     fn get_mut(&mut self) -> &mut BaseConfiguration<'h> {

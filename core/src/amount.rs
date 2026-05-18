@@ -580,7 +580,7 @@ macro_rules! checked_op {
 checked_op!(Amount<'h>, Mul, mul, Decimal::checked_mul);
 checked_op!(&Amount<'h>, Mul, mul, Decimal::checked_mul);
 checked_op!(Amount<'h>, Add, add, Decimal::checked_add);
-checked_op!(&Amount<'h>, Add, add, Decimal::checked_mul);
+checked_op!(&Amount<'h>, Add, add, Decimal::checked_add);
 checked_op!(Amount<'h>, Sub, sub, Decimal::checked_sub);
 checked_op!(&Amount<'h>, Sub, sub, Decimal::checked_sub);
 

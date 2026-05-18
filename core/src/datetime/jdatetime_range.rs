@@ -6,10 +6,12 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::configuration::Configuration;
+use crate::datetime;
 use crate::datetime::{DateTimeFormat, DateTimePrecision, JDateTime};
 use crate::report::command::arguments::Cmd;
 use chrono::Duration;
 use chrono_tz::Tz;
+use once_cell::sync::Lazy;
 use std::cmp::Ordering;
 use std::fmt;
 use std::ops::Add;
@@ -25,6 +27,17 @@ pub struct JDateTimeRange {
     /// Indicator to print only the common date parts of the range.
     brief_format: bool,
 }
+
+pub static MIN_RANGE: Lazy<JDateTimeRange> = Lazy::new(|| JDateTimeRange {
+    start: *datetime::MIN_DATETIME,
+    end: Some(*datetime::MIN_DATETIME + Duration::seconds(1)),
+    brief_format: false,
+});
+pub static MAX_RANGE: Lazy<JDateTimeRange> = Lazy::new(|| JDateTimeRange {
+    start: *datetime::MAX_DATETIME - Duration::seconds(1),
+    end: Some(*datetime::MAX_DATETIME),
+    brief_format: false,
+});
 
 impl JDateTimeRange {
     pub fn new(start: JDateTime, end: Option<JDateTime>) -> Self {
@@ -96,6 +109,10 @@ impl JDateTimeRange {
         self.start
     }
 
+    pub fn start_ref(&self) -> &JDateTime {
+        &self.start
+    }
+
     pub fn set_start(&mut self, start: JDateTime) {
         assert!(start < self.end(), "Start must be < end");
 
@@ -118,6 +135,11 @@ impl JDateTimeRange {
         assert!(self.start < end, "Start must be < end");
 
         self.end = Some(end);
+    }
+
+    pub fn average(&self) -> JDateTime {
+        let duration: Duration = self.end().datetime() - self.start().datetime();
+        JDateTime::new(self.start().datetime() + duration / 2, self.start().precision())
     }
 
     pub fn intersects(&self, other: &Self) -> bool {

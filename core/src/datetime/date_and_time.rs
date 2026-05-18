@@ -8,7 +8,7 @@
 use crate::configuration::Configuration;
 use crate::datetime::{JDate, JDateTime, JDateTimeRange};
 use crate::ext::RangeBoundsExt;
-use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, NaiveTime};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime};
 use chrono_tz::Tz;
 use std::fmt;
 use std::ops::Range;
@@ -28,6 +28,10 @@ impl DateAndTime {
         self.datetime_range
     }
 
+    pub fn datetime_range_ref(&self) -> &JDateTimeRange {
+        &self.datetime_range
+    }
+
     /// Writes the entry date and time with the entry `config`.
     pub fn write<'h, W: fmt::Write>(
         &self,
@@ -45,6 +49,10 @@ impl DateAndTime {
 
     pub fn from(&self) -> JDateTime {
         self.datetime_range.start()
+    }
+
+    pub fn to(&self) -> JDateTime {
+        self.datetime_range.end()
     }
 
     pub fn datetime_from(&self) -> DateTime<Tz> {
@@ -89,6 +97,14 @@ impl DateAndTime {
             .unwrap_or_else(|| self.datetime_range.start().time())
     }
 
+    pub fn aux_datetime_or_datetime_from(&self) -> JDateTime {
+        self.datetime_aux.as_ref().map(|adt| *adt).unwrap_or_else(|| self.datetime_range.start())
+    }
+
+    pub fn aux_datetime_or_datetime_to(&self) -> JDateTime {
+        self.datetime_aux.as_ref().map(|adt| *adt).unwrap_or_else(|| self.datetime_range.end())
+    }
+
     pub fn time_from(&self) -> NaiveTime {
         self.datetime_range.start().time()
     }
@@ -115,15 +131,6 @@ impl DateAndTime {
             ..self.datetime_range.end().datetime().naive_utc()
     }
 
-    pub fn average(&self) -> JDateTime {
-        let duration: Duration =
-            self.datetime_range.end().datetime() - self.datetime_range.start().datetime();
-        JDateTime::new(
-            self.datetime_range.start().datetime() + duration / 2,
-            self.datetime_range.start().precision(),
-        )
-    }
-
     /// Gets the mid point between the time range.
     pub fn utc_average(&self) -> NaiveDateTime {
         let range = self.utc_range();
@@ -136,6 +143,27 @@ impl DateAndTime {
         let r1 = self.utc_range();
         let r2 = other.utc_range();
         r1.intersection(&r2).is_some()
+    }
+}
+
+impl PartialEq for DateAndTime {
+    fn eq(&self, other: &Self) -> bool {
+        self.datetime_range == other.datetime_range && self.datetime_aux == other.datetime_aux
+    }
+}
+
+impl Eq for DateAndTime {}
+impl PartialOrd for DateAndTime {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for DateAndTime {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.datetime_range
+            .cmp(&other.datetime_range)
+            .then_with(|| self.aux_date_time().cmp(&other.aux_date_time()))
     }
 }
 

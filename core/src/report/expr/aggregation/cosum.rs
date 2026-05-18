@@ -9,9 +9,9 @@ use crate::amount::Amount;
 use crate::configuration::{AccountFilter, Filter};
 use crate::err;
 use crate::error::{JournError, JournResult};
-use crate::journal_entry::EntryId;
 use crate::report::expr::aggregation::AggState;
 use crate::report::expr::{ColumnValue, Expr, IdentifierContext};
+use crate::tree_id::TreeId;
 use smallvec::SmallVec;
 
 #[derive(Debug, PartialEq)]
@@ -19,7 +19,7 @@ pub struct CoSum<'h> {
     args: Vec<Expr<'h>>,
     account_filter: Option<AccountFilter>,
     totals: SmallVec<[Amount<'h>; 2]>,
-    completed_entries: Vec<EntryId<'h>>,
+    completed_entries: Vec<TreeId>,
 }
 impl<'h> CoSum<'h> {
     pub fn new(args: Vec<Expr<'h>>) -> JournResult<Self> {
@@ -51,7 +51,7 @@ impl<'h> AggState<'h> for CoSum<'h> {
                         self.totals += pst.amount();
                     }
                 }
-                self.completed_entries.push(context.entry().id());
+                self.completed_entries.push(context.entry().id().clone());
                 Ok(())
             }
             None => Err(err!("Cosum() is not supported in this context")),

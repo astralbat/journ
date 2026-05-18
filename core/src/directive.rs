@@ -6,15 +6,17 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::account::Account;
+use crate::configuration::Configuration;
 use crate::datetime::DateTimeFormat;
 use crate::journal_entry::JournalEntry;
 use crate::journal_node::JournalNode;
 use crate::module::ModuleDirectiveObj;
-use crate::parsing::text_block::TextBlock;
+use crate::parsing::text_block::{BlockObject, TextBlock, TextBlockBuf};
 use crate::price::Price;
 use crate::unit::{Unit, Units};
 use chrono_tz::Tz;
 use std::cmp::Ordering;
+use std::fmt::{Debug, Write};
 use std::sync::Arc;
 //pub type ParsedJournalEntry<'h> = Arc<Mutex<ParsedDirective<'h, JournalEntry<'h>>>>;
 
@@ -170,6 +172,26 @@ impl<'h> Eq for Directive<'h> {}
 impl<'h> PartialOrd<Directive<'h>> for Directive<'h> {
     fn partial_cmp(&self, other: &Directive<'h>) -> Option<Ordering> {
         self.kind.partial_cmp(&other.kind)
+    }
+}
+
+impl BlockObject for Directive<'_> {
+    fn write(&self, buf: &mut TextBlockBuf, config: Option<&Configuration>) {
+        match self.parsed {
+            Some(parsed) => write!(buf, "{}", parsed).unwrap(),
+            None => match self.kind() {
+                DirectiveKind::Entry(entry) => {
+                    buf.write(*entry, config);
+                }
+                DirectiveKind::Price(price) => {
+                    buf.write(&**price, config);
+                }
+                _ => panic!(
+                    "Can't write {:?}. The only objects that can be written are entries and prices; write parsed text for other directives",
+                    self.kind()
+                ),
+            },
+        }
     }
 }
 

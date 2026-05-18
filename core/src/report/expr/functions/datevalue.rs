@@ -19,7 +19,7 @@ pub fn datevalue<'h>(
 ) -> JournResult<ColumnValue<'h>> {
     if args.is_empty() || args.len() > 4 {
         return Err(err!(
-            "Function 'datevalue(text [,date_format [,time_format [,time_zone]])' requires one, two, three or four arguments"
+            "Function 'datevalue(text [,datetime_format [,time_zone]])' requires one, two or three arguments"
         ));
     }
     let text_arg = &args[0].eval(context)?;
@@ -38,7 +38,16 @@ pub fn datevalue<'h>(
         .map(|v| {
             v.as_str()
                 .ok_or_else(|| err!("Function 'datevalue' second argument must be a String"))
-                .and_then(|s| DateTimeFormat::parse_to_owned(s, DateFormatMode::DateTime))
+                .and_then(|s| {
+                    DateTimeFormat::parse_to_owned(
+                        s,
+                        if args.len() > 2 {
+                            DateFormatMode::DateTime
+                        } else {
+                            DateFormatMode::Date
+                        },
+                    )
+                })
         })
         .unwrap_or_else(|| Ok(Cmd::get().datetime_fmt_cmd().date_format_or_default()))?;
     let tz = time_zone_arg

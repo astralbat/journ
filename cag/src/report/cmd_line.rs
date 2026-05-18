@@ -9,7 +9,7 @@ use crate::cgt_configuration::EventPattern;
 use crate::report::cag_command::CagCommand;
 use clap::Parser;
 use journ_core::error::JournResult;
-use journ_core::journal::Journal;
+use journ_core::journal_context::JournalContext;
 use journ_core::report::command::IntoExecCommand;
 use journ_core::report::command::arguments::{Arguments, DateTimeFormatCommand};
 use journ_core::report::command::cmd_line::BeginAndEndArguments;
@@ -45,12 +45,11 @@ pub struct CagArguments {
     group_by: Option<String>,
     #[arg(
         long = "order-by",
-        value_delimiter = ',',
         value_name = "ORDER_BY",
         help = "Order the output by the specified column(s). Valid values are: event-date, deal-date, unit, actual-cost, total-cost"
     )]
     order_by: Option<String>,
-    #[arg(long = "descending")]
+    #[arg(long = "descending", alias = "desc")]
     order_descending: bool,
     #[arg(
         short = 'o',
@@ -89,8 +88,9 @@ impl IntoExecCommand for CagArguments {
     type Command = CagCommand;
 
     #[allow(clippy::field_reassign_with_default)]
-    fn into_exec_cmd(self, journ: &Journal, args: &Arguments) -> JournResult<CagCommand> {
-        let datetime_fmt_cmd = DateTimeFormatCommand::from_args_or_config(args, journ.config());
+    fn into_exec_cmd(self, args: &Arguments) -> JournResult<CagCommand> {
+        let config = JournalContext::current().journal().config();
+        let datetime_fmt_cmd = DateTimeFormatCommand::from_args_or_config(args, config);
         let cmd: CagCommand = CagCommand {
             begin_and_end_cmd: self.begin_and_end.into_cmd(&datetime_fmt_cmd),
             datetime_fmt_cmd,
@@ -122,7 +122,7 @@ impl IntoExecCommand for CagArguments {
                 // Clap ignores first argument
                 let mut chain_args = vec!["cag".to_string()];
                 chain_args.append(&mut self.chain.clone());
-                Some(Box::new(CagArguments::parse_from(chain_args).into_exec_cmd(journ, args)?))
+                Some(Box::new(CagArguments::parse_from(chain_args).into_exec_cmd(args)?))
             },
         };
         Ok(cmd)

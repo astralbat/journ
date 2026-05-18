@@ -104,7 +104,6 @@ impl<'h, 'p, 'l> Valuer<'h> for LambdaValuer<'h, 'p, 'l> {
                 self.datetime.datetime().format("%FT%T%z")
             ),
             None,
-            None,
         ) {
             Ok(r) => r,
             Err(e) => panic!("Unable to prepare datetime for valuation call: {}", e),
@@ -127,22 +126,19 @@ impl<'h, 'p, 'l> Valuer<'h> for LambdaValuer<'h, 'p, 'l> {
             )
         };
 
-        let result = self
-            .lambda
-            .eval(args, self.config.version().node_id().journal_incarnation())
-            .map_err(|e| {
-                ValuationError::EvalFailure(
-                    err!(
-                        "Eval failure with: {}",
-                        self.lambda.expression_with_args(vec![
-                            quote_unit.to_string(),
-                            amount.unit().to_string(),
-                            py_datetime.0.format("%FT%T%z").to_string()
-                        ])
-                    )
-                    .with_source(e),
+        let result = self.lambda.eval(args).map_err(|e| {
+            ValuationError::EvalFailure(
+                err!(
+                    "Eval failure with: {}",
+                    self.lambda.expression_with_args(vec![
+                        quote_unit.to_string(),
+                        amount.unit().to_string(),
+                        py_datetime.0.format("%FT%T%z").to_string()
+                    ])
                 )
-            })?;
+                .with_source(e),
+            )
+        })?;
         let mut prices = match LambdaValuer::extract_price_from_python_result(
             &mut self.config,
             amount.unit(),

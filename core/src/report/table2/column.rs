@@ -121,7 +121,7 @@ impl ColumnsVec for &mut [TableColumn<'_>] {
                     // If the cell is wider than the summed width...
                     if diff > 0 {
                         // Distribute the extra width across the spanned columns
-                        let mut new_width = available_width.distribute(diff as usize);
+                        let mut new_width = available_width.distribute(diff);
                         // Then dissect the updated width repeatedly to get the new widths for each column.
                         for i in icol + cell.hspan() - 1..icol {
                             self[i].width = new_width.pop_right().unwrap();
@@ -175,7 +175,7 @@ impl ColumnsVec for &mut [TableColumn<'_>] {
         }
         if total_width < min_width {
             let diff = min_width - total_width.width();
-            let mut distributed = total_width.distribute(diff);
+            let mut distributed = total_width.distribute(diff as isize);
             for col in self.iter_mut().rev() {
                 col.width = distributed.pop_right().unwrap();
             }
@@ -193,7 +193,7 @@ impl ColumnsVec for &mut [TableColumn<'_>] {
             total_width.push_right(col.width.clone());
         }
         let diff = width_to_use - total_width.width();
-        let mut distributed = total_width.distribute(diff);
+        let mut distributed = total_width.distribute(diff as isize);
         for col in self.iter_mut().filter(|c| c.preferences.allow_expand()).rev() {
             col.width = distributed.pop_right().unwrap();
         }

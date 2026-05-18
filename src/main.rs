@@ -31,6 +31,7 @@ use journ_core::alloc::HerdAllocator;
 use journ_core::datetime::{DateFormat, DateTimeFormat, TimeFormat};
 use journ_core::error::JournResult;
 use journ_core::journal::Journal;
+use journ_core::journal_context::JournalContext;
 use journ_core::module::{MODULES, Module};
 use journ_core::parsing::text_block::TextBlock;
 use journ_core::python::environment::PythonEnvironment;
@@ -65,11 +66,6 @@ struct MainArguments {
         help = "Sets the journal file to parse"
     )]
     file: String,
-    #[arg(
-        long = "aux-date",
-        help = "Use auxiliary date on postings instead as if it were the primary date"
-    )]
-    aux_date: bool,
     #[arg(long = "real", help = "Display/process only real, non-virtual postings")]
     real_postings: bool,
     #[command(subcommand)]
@@ -126,16 +122,16 @@ enum CommandArguments {
 }
 
 impl CommandArguments {
-    pub fn exec<'j, 'h: 'j>(self, journ: &'j mut Journal<'j>, args: &Arguments) -> JournResult<()> {
-        match self {
+    pub fn exec(self, args: &Arguments) -> JournResult<()> {
+        let cmd = match self {
             CommandArguments::Print(print_args) => {
-                Cmd::set(Box::new(print_args.into_exec_cmd(journ, args)?)).execute(journ, None)
+                Ok(Cmd::set(Box::new(print_args.into_exec_cmd(args)?)))
             }
             CommandArguments::Bal(bal_args) => {
-                Cmd::set(Box::new(bal_args.into_exec_cmd(journ, args)?)).execute(journ, None)
+                Ok(Cmd::set(Box::new(bal_args.into_exec_cmd(args)?)))
             }
             CommandArguments::Reg(reg_args) => {
-                Cmd::set(Box::new(reg_args.into_exec_cmd(journ, args)?)).execute(journ, None)
+                Ok(Cmd::set(Box::new(reg_args.into_exec_cmd(args)?)))
             }
             CommandArguments::Module(module_args) => {
                 match MODULES
@@ -145,15 +141,12 @@ impl CommandArguments {
                     .filter_map(Module::command)
                     .find(|c| c.name() == module_args[0])
                 {
-                    Some(command) => {
-                        let cmd: &dyn ExecCommand =
-                            Cmd::set(command.create(journ, args, &module_args)?);
-                        cmd.execute(journ, None)
-                    }
+                    Some(command) => Ok(Cmd::set(command.create(args, &module_args)?)),
                     None => Err(err!("Unknown command: '{}'", module_args[0])),
                 }
             }
-        }
+        }?;
+        cmd.execute(None)
     }
 }
 
@@ -201,7 +194,6 @@ fn main() {
             main_args.datetime_args.datetime_format,
             main_args.datetime_args.timezone,
         ),
-        aux_date: main_args.aux_date,
         real_postings: main_args.real_postings,
         color: main_args.color,
         no_color: main_args.no_color,
@@ -220,26 +212,25 @@ fn main() {
 
     let herd = Herd::new();
     let herd_allocator = herd.get().alloc(HerdAllocator::new(&herd));
-    let mut journ = parse(&file_path, args, herd_allocator);
+    let context = parse(&file_path, herd_allocator);
+
     // Execute the command
-    if let Err(e) = main_args.command.exec(&mut journ, &args) {
-        print_jerror(e);
-        exit(1)
-    }
+    context.with(|| {
+        if let Err(e) = main_args.command.exec(&args) {
+            print_jerror(e);
+            exit(1)
+        }
+    });
     //herd.reset();
 }
 
 /// Parse the ledger
-fn parse<'h>(
-    file_path: &Path,
-    args: &Arguments,
-    herd_allocator: &'h HerdAllocator<'h>,
-) -> Journal<'h> {
+fn parse<'h>(file_path: &Path, herd_allocator: &'h HerdAllocator<'h>) -> JournalContext<'h> {
     let now = SystemTime::now();
     let file_name = herd_allocator.alloc(PathBuf::from(file_path.file_name().unwrap()));
     PythonEnvironment::startup();
     match TextBlock::from_file(file_name.as_path(), herd_allocator, None)
-        .and_then(|block| Journal::parse(args, Some(file_name.as_path()), block, herd_allocator))
+        .and_then(|block| Journal::parse(Some(file_name.as_path()), block, herd_allocator))
     {
         Ok(journ) => {
             info!(

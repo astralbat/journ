@@ -9,7 +9,6 @@ use crate::alloc::HerdAllocator;
 use crate::configuration::Configuration;
 use crate::journal::Journal;
 use crate::parsing::text_block::TextBlock;
-use crate::report::command::arguments::Arguments;
 use bumpalo_herd::Herd;
 
 #[macro_export]
@@ -21,8 +20,8 @@ macro_rules! journ {
 pub fn journ<'h>(text: &'h str) -> Journal<'h> {
     let herd = Box::leak(Box::new(Herd::new()));
     let allocator = herd.get().alloc(HerdAllocator::new(herd));
-    match Journal::parse(&Arguments::default(), None, TextBlock::from(text), allocator) {
-        Ok(journal) => journal,
+    match Journal::parse(None, TextBlock::from(text), allocator) {
+        Ok(jc) => jc.into_journal(),
         Err(err) => {
             eprintln!("{}", err);
             panic!("Parsing errors encountered. See above")
@@ -90,8 +89,8 @@ macro_rules! entry {
 #[macro_export]
 macro_rules! parse_node {
     ($text:expr, $func:expr) => {{
-        use $crate::parsing::testing::node_input;
         use $crate::ext::StrExt;
+        use $crate::parsing::testing::node_input;
 
         let text = $text;
         //if text.starts_with("\n") {
@@ -99,13 +98,17 @@ macro_rules! parse_node {
         //}
         let outdented = text.outdent_lines().unwrap().intern();
         std::thread::scope(|s| {
-            let jpn = node_input(&outdented, None, s);
-            $func(jpn.input())
-                .finish()
-            .map_err($crate::error::JournError::from)
-                .map(move |(rem, out)| ((rem.config().clone(), rem.fragment().to_string()), out)) //.map(|(rem, out)| out)
+            let herd = Box::leak(Box::new(Herd::new()));
+            let allocator = herd.get().alloc(HerdAllocator::new(herd));
+
+            JournalContext::with(JournalContext::new(allocator), || {
+                let jpn = node_input(&outdented, None, s);
+                $func(jpn.input()).finish().map_err($crate::error::JournError::from).map(
+                    move |(rem, out)| ((rem.config().clone(), rem.fragment().to_string()), out),
+                ) //.map(|(rem, out)| out)
+            })
         })
-    }}
+    }};
 }
 
 /// Parses a directive reading result, reading only the first one and returning it together with the remainder of the stream.
@@ -137,11 +140,11 @@ macro_rules! dir {
 }
 
 #[macro_export]
-macro_rules! dir_kind {
-    ($text:expr, $kind:tt) => {{
-        let dir = dir!($text);
+macro_rules! with_dir_kind {
+    ($text:expr, $kind:tt, $f:expr) => {{
+        let dir: Directive = dir!($text);
         if let $crate::directive::DirectiveKind::$kind(obj) = dir.kind() {
-            *obj
+            $f(&dir, *obj)
         } else {
             panic!("Wrong directive kind");
         }

@@ -6,10 +6,12 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::alloc::HerdAllocator;
+use crate::configuration::Configuration;
 use crate::err;
 use crate::error::JournResult;
 use crate::error::parsing::{IErrorMsg, IParseError};
 use crate::ext::StrExt;
+use crate::journal_node::JournalNode;
 use crate::parsing::IParseResult;
 use crate::parsing::input::{BlockInput, LocatedInput, TextBlockInput, TextInput};
 use crate::parsing::util::{
@@ -20,14 +22,17 @@ use nom::combinator::{recognize, rest};
 use nom::sequence::{pair, preceded, tuple};
 use nom::{Err as NomErr, Parser};
 use nom_locate::LocatedSpan;
-use std::borrow::Cow;
+use smartstring::alias::String as SS;
 use std::cmp::Ordering;
-use std::fmt;
+use std::fmt::Write;
+use std::io::ErrorKind;
+use std::ops::Add;
 use std::path::Path;
+use std::{fmt, io};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct TextBlockLocation<'h> {
-    file: Option<&'h str>,
+    node: Option<&'h JournalNode<'h>>,
     /// The row number where the first row is 1. This will be `None` when row information
     /// is not being tracked.
     line: u32,
@@ -36,14 +41,14 @@ pub struct TextBlockLocation<'h> {
 }
 
 impl<'h> TextBlockLocation<'h> {
-    pub fn new(file: Option<&'h str>, line: u32, offset: usize) -> Self {
+    pub fn new(node: Option<&'h JournalNode<'h>>, line: u32, offset: usize) -> Self {
         debug_assert!(line >= 1);
 
-        Self { file, line, offset }
+        Self { node, line, offset }
     }
 
-    pub fn file(&self) -> Option<&'h str> {
-        self.file
+    pub fn file(&self) -> Option<&'h Path> {
+        self.node?.nearest_filename()
     }
 
     pub fn line(&self) -> u32 {
@@ -57,11 +62,28 @@ impl<'h> TextBlockLocation<'h> {
 
 impl<'h> fmt::Display for TextBlockLocation<'h> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.file {
-            Some(file) => write!(f, "{}:{}", file, self.line)?,
+        match self.file() {
+            Some(file) => write!(f, "{}:{}", file.display(), self.line)?,
             None => write!(f, "{}", self.line)?,
         }
         Ok(())
+    }
+}
+
+impl<'h> Default for TextBlockLocation<'h> {
+    fn default() -> Self {
+        TextBlockLocation { node: None, line: 1, offset: 0 }
+    }
+}
+
+impl<'h> Add<&str> for TextBlockLocation<'h> {
+    type Output = Self;
+    fn add(self, other: &str) -> Self {
+        TextBlockLocation {
+            node: self.node,
+            line: self.line + other.lines().count() as u32,
+            offset: self.offset + other.len(),
+        }
     }
 }
 
@@ -75,10 +97,9 @@ impl<'h> fmt::Display for TextBlockLocation<'h> {
 /// 4. A block always terminates before spaces or newlines (these are part of the next block).
 #[derive(Debug, Clone)]
 pub struct TextBlock<'h> {
-    text: Cow<'h, str>,
+    text: &'h str,
     parent: Option<&'h TextBlock<'h>>,
-    /// All blocks will have a location when `parent` is `Some`.
-    location: Option<TextBlockLocation<'h>>,
+    location: TextBlockLocation<'h>,
 }
 
 impl<'h> TextBlock<'h> {
@@ -88,26 +109,25 @@ impl<'h> TextBlock<'h> {
         parent: Option<&'h TextBlock<'h>>,
     ) -> JournResult<Self> {
         if !file.exists() {
-            return Err(err!("File '{}' does not exist", file.display()));
+            return Err(err!(io::Error::new(
+                ErrorKind::InvalidFilename,
+                file.display().to_string()
+            )));
         }
         let text = std::fs::read_to_string(file).map_err(
             |e| err!(err!("IO Error: {}", e); "Cannot open file for reading; check that it exists"),
         )?;
+
         match parent {
-            Some(parent) => Ok(Self::new_child(
-                allocator.alloc(text),
-                TextBlockLocation::new(Some(file.to_str().unwrap()), 1, 0),
-                parent,
-            )),
-            None => Ok(Self::new_root(
-                allocator.alloc(text),
-                Some(TextBlockLocation::new(Some(file.to_str().unwrap()), 1, 0)),
-            )),
+            Some(parent) => {
+                Ok(Self::new_child(allocator.alloc(text), TextBlockLocation::default(), parent))
+            }
+            None => Ok(Self::new_root(allocator.alloc(text))),
         }
     }
 
-    fn new_root(text: &'h str, location: Option<TextBlockLocation<'h>>) -> Self {
-        TextBlock { text: Cow::Borrowed(text), location, parent: None }
+    fn new_root(text: &'h str) -> Self {
+        TextBlock { text, location: TextBlockLocation::default(), parent: None }
     }
 
     pub(super) fn new_child(
@@ -115,7 +135,11 @@ impl<'h> TextBlock<'h> {
         location: TextBlockLocation<'h>,
         parent: &'h TextBlock<'h>,
     ) -> Self {
-        Self { text: Cow::Borrowed(text), location: Some(location), parent: Some(parent) }
+        Self { text, location, parent: Some(parent) }
+    }
+
+    pub fn set_node(&mut self, node: &'h JournalNode<'h>) {
+        self.location.node = Some(node)
     }
 
     pub fn parent(&self) -> Option<&'h TextBlock<'h>> {
@@ -125,33 +149,35 @@ impl<'h> TextBlock<'h> {
     /// Gets whether this block is the file root. There are two primary circumstances to consider:
     /// whether the block is part of a node or not.
     pub fn is_file_root(&self) -> bool {
-        // If the block has no parent, then being the root is always true.
-        if self.parent.is_none() {
-            return true;
-        }
+        let parent = match self.parent() {
+            Some(parent) => parent,
+            // If the block has no parent, then being the root is always true.
+            None => return true,
+        };
+
         // Otherwise, look at the parent's node and see whether it changes.
-        match self.location.map(|l| l.file) {
-            Some(file) => file != self.parent.unwrap().location.map(|l| l.file).unwrap(),
+        match self.location.node {
+            Some(node) => node != parent.location.node.unwrap(),
             None => false,
         }
     }
 
-    pub fn location(&self) -> Option<TextBlockLocation<'h>> {
+    pub fn location(&self) -> TextBlockLocation<'h> {
         self.location
         //TextBlockLocation::new(self.filename(), self.text.location_line(), self.text.naive_get_utf8_column())
     }
 
-    pub fn file(&self) -> Option<&'h str> {
-        self.location.and_then(|l| l.file)
+    pub fn node(&self) -> Option<&'h JournalNode<'h>> {
+        self.location.node
     }
 
     /// Gets the location line where this block starts.
     pub fn line(&self) -> u32 {
-        self.location.map(|l| l.line).unwrap_or(1)
+        self.location.line
     }
 
     pub fn location_offset(&self) -> usize {
-        self.location.map(|l| l.offset).unwrap_or(0)
+        self.location.offset
     }
 
     /// Gets the location column of where this block starts.
@@ -161,42 +187,37 @@ impl<'h> TextBlock<'h> {
     ///
     /// The column is a 1-based index.
     pub fn column(&self) -> u32 {
-        match self.location {
-            Some(loc) => unsafe {
-                LocatedSpan::new_from_raw_offset(loc.offset, loc.line, &*self.text, ())
-                    .naive_get_utf8_column() as u32
-            },
-            // No location means there's no parent, so we're the root block.
-            None => 1,
+        unsafe {
+            LocatedSpan::new_from_raw_offset(
+                self.location.offset,
+                self.location.line,
+                &*self.text,
+                (),
+            )
+            .naive_get_utf8_column() as u32
         }
     }
 
-    pub fn trimmed_start_lines(&self) -> TextBlock<'_> {
+    pub fn trimmed_start_lines(&self) -> TextBlock<'h> {
         let (rem, blanks) = blank_lines0(&*self.text).unwrap();
         let blank_lines_count = blanks.lines().count();
 
-        let location = match &self.location {
-            Some(loc) => {
-                if blank_lines_count > 0 {
-                    TextBlockLocation::new(
-                        loc.file,
-                        loc.line + blank_lines_count as u32,
-                        loc.offset + blanks.len(),
-                    )
-                } else {
-                    loc.clone()
-                }
-            }
-            None => TextBlockLocation::new(None, 1 + blank_lines_count as u32, blanks.len()),
+        let location = if blank_lines_count > 0 {
+            TextBlockLocation::new(
+                self.location.node,
+                self.location.line + blank_lines_count as u32,
+                self.location.offset + blanks.len(),
+            )
+        } else {
+            self.location.clone()
         };
-        TextBlock { text: Cow::Borrowed(rem), parent: self.parent, location: Some(location) }
+        TextBlock { text: rem, parent: self.parent, location }
     }
 
     /// Gets the line number after any leading blank lines.
     pub fn first_content_line(&self) -> u32 {
         let lines_skipped = self.skip_leading_blank_lines().1.lines().count();
-        // No location means there's no parent, so we're the root block.
-        self.location.map(|loc| loc.line + lines_skipped as u32).unwrap_or(lines_skipped as u32 + 1)
+        self.location.line + lines_skipped as u32
     }
 
     pub fn last_line(&self) -> u32 {
@@ -215,7 +236,7 @@ impl<'h> TextBlock<'h> {
         // where this block starts; otherwise, the block always starts with the newline of the preceding
         // block (or the start of the file) so the indent is 0.
         let mut indent = match self.parent() {
-            Some(parent) if parent.location().unwrap().line == self.line() => self.column() - 1,
+            Some(parent) if parent.location().line == self.line() => self.column() - 1,
             _ => 0,
         };
         for c in self.text().chars() {
@@ -315,7 +336,7 @@ impl<'h> TextBlock<'h> {
         t.push_str(self.text.trim_start());
 
         let mut block = self.clone();
-        block.text = Cow::Borrowed(allocator.alloc(t));
+        block.text = allocator.alloc(t);
         block
     }
 
@@ -330,8 +351,8 @@ impl<'h> TextBlock<'h> {
         unsafe {
             TextBlockInput::new(
                 LocatedSpan::new_from_raw_offset(
-                    self.location().unwrap().offset(),
-                    self.location().unwrap().line(),
+                    self.location().offset(),
+                    self.location().line(),
                     self.text(),
                     (),
                 ),
@@ -362,7 +383,7 @@ impl<'h> PartialOrd for TextBlock<'h> {
 
 impl<'h> From<&'h str> for TextBlock<'h> {
     fn from(text: &'h str) -> Self {
-        TextBlock::new_root(text, Some(TextBlockLocation::new(None, 1, 0)))
+        TextBlock::new_root(text)
     }
 }
 
@@ -413,7 +434,7 @@ where
     }
     let block = TextBlock::new_child(
         block_text.text(),
-        TextBlockLocation::new(orig_input.file(), orig_input.line(), orig_input.location_offset()),
+        TextBlockLocation::new(orig_input.node(), orig_input.line(), orig_input.location_offset()),
         orig_input.block(),
     );
     let new_input = block_text.with_child(block);
@@ -454,4 +475,399 @@ macro_rules! block {
     ($text:expr) => {
         TextBlock::from($text)
     };
+}
+
+/// `PaddingPolicies` are used to add newlines between block objects written
+/// to a `TextBlockBuf` or `TextBlockWriter`.
+#[derive(Copy, Clone, Default)]
+pub enum PaddingPolicy {
+    /// Always write the same padding before every block written, except the first block.
+    Fixed(usize),
+    /// Retains the padding from the block written, falling back to the fixed
+    /// amount if it does not write any.
+    Retain(usize),
+    /// Use the padding from the last block written.
+    Last,
+    /// Retains the padding from the block written, falling back to the padding from the last block
+    /// written, or 0 if this is the first block.
+    #[default]
+    RetainOrLast,
+}
+
+/// A writeable `TextBlock`.
+pub struct TextBlockBuf {
+    text: String,
+    //parent: Option<Box<RefCell<&'h TextBlockBuf<'h>>>>,
+    //location: TextBlockLocation<'h>,
+    include_elided: bool,
+    /// The number of spaces to indent child blocks with
+    child_indent_size: usize,
+    /// The style of newlines. Either "\n" or "\r\n".
+    newline_style: &'static str,
+    /// Padding between blocks.
+    padding_policy: PaddingPolicy,
+    last_block_padding: Option<usize>,
+}
+
+impl TextBlockBuf {
+    pub fn new() -> Self {
+        TextBlockBuf {
+            text: String::new(),
+            //location: TextBlockLocation::new(node, 1, 0),
+            include_elided: false,
+            child_indent_size: 2,
+            newline_style: "\n",
+            padding_policy: PaddingPolicy::default(),
+            last_block_padding: None,
+        }
+    }
+
+    pub fn with_obj<Obj: BlockObject>(obj: &Obj, config: Option<&Configuration>) -> Self {
+        let mut buf = TextBlockBuf::new();
+        buf.write(obj, config);
+        buf
+    }
+
+    pub fn include_elided(&self) -> bool {
+        self.include_elided
+    }
+
+    pub fn set_include_elided(&mut self, include: bool) {
+        self.include_elided = include;
+    }
+
+    pub fn set_padding_policy(&mut self, padding_policy: PaddingPolicy) {
+        self.padding_policy = padding_policy;
+    }
+
+    fn new_child(&self) -> Self {
+        TextBlockBuf {
+            text: String::new(),
+            //location: self.location + self.text.as_str(),
+            include_elided: self.include_elided,
+            child_indent_size: self.child_indent_size,
+            newline_style: self.newline_style,
+            padding_policy: self.padding_policy,
+            last_block_padding: None,
+        }
+    }
+
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    pub fn clear(&mut self) {
+        self.text.clear();
+    }
+
+    pub fn as_text_block(&self) -> TextBlock<'_> {
+        TextBlock::from(self.text.as_str())
+        //TextBlock { text: self.text.as_str(), parent: None, location: TextBlock }
+    }
+
+    /// Appends the block to this one without any indentation.
+    pub fn write<Obj: BlockObject + ?Sized>(&mut self, obj: &Obj, config: Option<&Configuration>) {
+        let pad_start = self.text.len();
+        obj.write(self, config);
+        let (padding, _pad_len) = Self::get_padding(&self.text[pad_start..]);
+
+        let get_last = || match self.last_block_padding {
+            Some(last_block_padding) => last_block_padding.max(1),
+            None => 0,
+        };
+        match self.padding_policy {
+            PaddingPolicy::Fixed(size) => {
+                if !self.text.is_empty() {
+                    self.write_padding(size, pad_start);
+                }
+            }
+            PaddingPolicy::Retain(size) => {
+                if padding == 0 && self.last_block_padding.is_some() {
+                    self.write_padding(size, pad_start);
+                }
+            }
+            PaddingPolicy::Last => self.write_padding(get_last(), pad_start),
+            PaddingPolicy::RetainOrLast => {
+                if padding == 0 {
+                    self.write_padding(get_last(), pad_start);
+                }
+            }
+        }
+        self.last_block_padding = Some(padding);
+    }
+
+    /// Appends a child block, indented with the configured indent.
+    ///
+    /// If `newline` is set, this ensures the child is always written on an indented newline.
+    pub fn write_child<Obj: BlockObject>(
+        &mut self,
+        child: &Obj,
+        config: Option<&Configuration>,
+        newline: bool,
+    ) {
+        /*
+        match child.block() {
+            Some(block) => {
+                let indent_to_add = self.child_indent_size as isize - block.indented_amount() as isize;
+                if newline
+                    && (!block.text().trim_matches(char::is_space).starts_with('\n')
+                        || !block.text().trim_matches(char::is_whitespace).starts_with("\r\n"))
+                {
+                    self.text.push_str(self.newline_style);
+                    self.write_indent();
+                }
+                for line in block.text().lines() {
+                    if indent_to_add >= 0 {
+                        for _ in 0..indent_to_add {
+                            self.text.push(' ');
+                        }
+                        self.text.push_str(self.newline_style);
+                        self.text.push_str(line);
+                    } else {
+                        let mut line_text = line.to_string();
+                        line_text.outdent_exact(-indent_to_add as u16);
+                    }
+                }
+            }
+            None => {*/
+        let mut child_buf = self.new_child();
+        if newline {
+            //child_buf.text.push_str(self.newline_style);
+            child_buf.write_indent();
+        }
+        child.write(&mut child_buf, config);
+
+        // The base indent of the child if it were appended to this buffer.
+        let lws = &child_buf.text[0..child_buf.text.len() - child_buf.text.trim_start().len()];
+        let lws_has_newline = lws.contains("\n");
+        let child_base_indent = if newline || lws_has_newline {
+            0
+        } else {
+            self.text.lines().last().map(|ll| ll.chars().count()).unwrap_or(0)
+                + lws.indented_amount() as usize
+        };
+        child_buf.set_indent(child_base_indent + self.child_indent_size, child_base_indent == 0);
+
+        if newline && !lws_has_newline {
+            child_buf.text.insert_str(0, self.newline_style);
+        }
+        write!(self, "{}", child_buf.text).unwrap()
+        //}
+        //}
+    }
+
+    fn set_indent(&mut self, indent: usize, include_first_line: bool) {
+        let mut indent_str = SS::new();
+        for _ in 0..indent {
+            indent_str.push(' ');
+        }
+
+        let mut text_len = self.text.len();
+        let mut i = 0;
+        while i < text_len {
+            if (i == 0 && include_first_line) || self.text.as_bytes()[i] == b'\n' {
+                let ws_start = if i == 0 { 0 } else { i + 1 };
+                let ws = self.text[ws_start..].leading_whitespace();
+                let ws_len = ws.len();
+                self.text.replace_range(ws_start..ws_start + ws.len(), &indent_str);
+                text_len = text_len - ws_len + indent_str.len();
+            }
+            i += 1;
+        }
+    }
+
+    /// Gets the number of newlines at the start of the block.
+    ///
+    /// Blocks should have a padding of at least 1 if they aren't the first block.
+    /// Returns a tuple of the (padding, num_padding_chars).
+    fn get_padding(text: &str) -> (usize, usize) {
+        let mut pos = 0;
+        let mut padding = 0;
+        while text.as_bytes()[pos] == b'\n'
+            || text.as_bytes()[pos] == b'\r'
+            || text.as_bytes()[pos] == b' '
+            || text.as_bytes()[pos] == b'\t'
+        {
+            if text.as_bytes()[pos] == b'\n' {
+                padding += 1
+            }
+            pos += 1;
+        }
+        (padding, pos)
+    }
+
+    fn write_padding(&mut self, padding: usize, pos: usize) {
+        let (_, padding_chars) = Self::get_padding(&self.text[pos..]);
+
+        self.text.replace_range(pos..pos + padding_chars, "");
+        for _ in 0..padding {
+            self.text.insert_str(pos, self.newline_style);
+        }
+    }
+
+    fn write_indent(&mut self) {
+        for _ in 0..self.child_indent_size {
+            self.text.push(' ');
+        }
+    }
+}
+
+impl fmt::Display for TextBlockBuf {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        write!(f, "{}", self.text)
+    }
+}
+
+impl Write for TextBlockBuf {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        self.text.push_str(s);
+        Ok(())
+
+        /*
+        if self.text.is_empty() || self.text.ends_with('\n') {
+            self.write_indent();
+        }
+        if s.trim().is_empty() {
+            self.text.push_str(s);
+            return Ok(());
+        }
+
+        // Get whitespace prefix and suffix.
+        let prefix = &s[..s.len() - s.trim_start().len()];
+        let suffix = if s.len() > prefix.len() { &s[s.trim_end().len()..] } else { "" };
+
+        // Write indent between newlines
+        self.text.push_str(prefix);
+        for line_or_nl in s.trim().split("\n").intersperse("\n") {
+            self.text.push_str(line_or_nl);
+            if line_or_nl == "\n" {
+                self.write_indent();
+            }
+        }
+        self.text.push_str(suffix);
+        Ok(())*/
+    }
+}
+
+/*
+impl<Obj: BlockObject> From<&Obj> for TextBlockBuf {
+    fn from(value: &Obj) -> Self {
+        let mut buf = TextBlockBuf::new();
+        buf.write(value);
+        buf
+    }
+}*/
+
+pub struct TextBlockWriter<W: io::Write> {
+    writer: W,
+    padding_policy: PaddingPolicy,
+    buf: TextBlockBuf,
+    written: usize,
+}
+
+impl<W: io::Write> TextBlockWriter<W> {
+    pub fn new(writer: W) -> Self {
+        Self {
+            writer,
+            padding_policy: PaddingPolicy::default(),
+            buf: TextBlockBuf::new(),
+            written: 0,
+        }
+    }
+
+    pub fn set_padding_policy(&mut self, new_padding: PaddingPolicy) {
+        self.padding_policy = new_padding;
+    }
+
+    /// Writes the block object to the stream.
+    pub fn write<Obj: BlockObject + ?Sized>(
+        &mut self,
+        obj: &Obj,
+        config: Option<&Configuration>,
+    ) -> io::Result<()> {
+        self.buf.clear();
+
+        if let PaddingPolicy::Fixed(size) = self.padding_policy {
+            self.buf.set_padding_policy(PaddingPolicy::Fixed(0));
+            if self.written > 0 {
+                for _ in 0..size {
+                    write!(self.writer, "{}", self.buf.newline_style)?;
+                    self.written += self.buf.newline_style.len();
+                }
+            }
+        } else {
+            self.buf.set_padding_policy(self.padding_policy);
+        }
+        self.buf.write(obj, config);
+        let res = write!(self.writer, "{}", self.buf.text());
+        self.written += self.buf.text().len();
+        res
+    }
+
+    /*
+    pub fn write_block(&mut self, block: &TextBlock) -> io::Result<()> {
+        if self.written > 0 {
+            for _ in 0..self.padding {
+                writeln!(self.writer)?;
+                self.written += 1;
+            }
+        }
+        writeln!(self.writer, "{}", block.text)?;
+        self.written += block.text.len() + 1;
+        Ok(())
+    }*/
+}
+
+/// Block objects are those that relate to a `TextBlock`.
+pub trait BlockObject {
+    /// Write the object to the `buf`.
+    ///
+    /// The `config` may be passed if known and should reflect the configuration
+    /// state of the object when it was parsed. It is not always possible to be `Some`.
+    /// For instance, `Posting` objects do not store their Configuration.
+    fn write(&self, buf: &mut TextBlockBuf, config: Option<&Configuration>);
+}
+
+impl BlockObject for TextBlock<'_> {
+    fn write(&self, buf: &mut TextBlockBuf, _config: Option<&Configuration>) {
+        write!(buf, "{}", self.text).unwrap();
+    }
+}
+
+impl BlockObject for str {
+    fn write(&self, buf: &mut TextBlockBuf, _config: Option<&Configuration>) {
+        write!(buf, "{}", self).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::parsing::text_block::{PaddingPolicy, TextBlockBuf, TextBlockWriter};
+    use std::fmt::Write;
+
+    #[test]
+    fn test_fixed_padding() {
+        let mut buf = Vec::new();
+        let mut writer = TextBlockWriter::new(&mut buf);
+        writer.set_padding_policy(PaddingPolicy::Fixed(2));
+        writer.write("hello block", None).unwrap();
+        writer.write("goodbye block", None).unwrap();
+        // Two newlines between the two is fixed
+        assert_eq!(str::from_utf8(&buf).unwrap(), "hello block\n\ngoodbye block");
+    }
+
+    #[test]
+    fn test_set_indent() {
+        // Indent can be added to unindented block
+        let mut buf = TextBlockBuf::new();
+        write!(&mut buf, "hello block").unwrap();
+        buf.set_indent(2, true);
+        assert_eq!(buf.text, "  hello block");
+
+        // Indent can be removed from indented block
+        let mut buf = TextBlockBuf::new();
+        write!(&mut buf, "  hello block").unwrap();
+        buf.set_indent(0, true);
+        assert_eq!(buf.text, "hello block");
+    }
 }

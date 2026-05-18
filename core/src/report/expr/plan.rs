@@ -7,13 +7,33 @@
  */
 use crate::err;
 use crate::error::JournResult;
-use crate::journal::Journal;
 use crate::report::expr::column_spec::ColumnSpec;
 use crate::report::expr::{
     ColumnValue, Expr, GroupKey, GroupState, IdentifierContext, LateContext, TotalContext,
 };
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashMap};
+use std::marker::PhantomData;
+
+pub trait BalanceUpdater<'h, E> {
+    fn update(&self, prev_rows: &[RowData<'h>], row: &mut RowData<'h>, item: E);
+}
+
+impl<'h, E, F> BalanceUpdater<'h, E> for F
+where
+    F: Fn(&[RowData<'h>], &mut RowData<'h>, E),
+{
+    fn update(&self, prev_rows: &[RowData<'h>], row: &mut RowData<'h>, item: E) {
+        self(prev_rows, row, item);
+    }
+}
+
+pub struct NullBalanceUpdater<'h, E> {
+    _phantom: PhantomData<&'h E>,
+}
+impl<'h, E> BalanceUpdater<'h, E> for NullBalanceUpdater<'h, E> {
+    fn update(&self, _: &[RowData<'h>], _row: &mut RowData<'h>, _item: E) {}
+}
 
 pub struct Plan<'h> {
     column_spec: ColumnSpec<'h>,
@@ -63,42 +83,12 @@ impl<'h> Plan<'h> {
     /// - Nested aggregation functions are not allowed.
     pub fn validate(&self) -> JournResult<()> {
         if self.group_by.is_empty() {
-            /*
-            let is_agg = |expr: &Expr| expr.iter().any(|e| matches!(e, Expr::AggFunction { .. }));
-            if self.column_spec.exprs().iter().chain(self.additional.values()).any(is_agg) {
-                if !self
-                    .column_spec
-                    .exprs()
-                    .iter()
-                    .all(Self::validate_expr_is_agg_or_no_identifiers)
-                {
-                    return Err(err!(
-                        "Aggregate functions cannot be mixed with identifiers unless using --group-by"
-                    ));
-                }
-            }*/
             Ok(())
         } else {
             self.validate_no_nested_aggregates()?;
             Ok(())
         }
     }
-
-    /*
-    fn validate_expr_is_agg_or_no_identifiers(expr: &Expr) -> bool {
-        if matches!(expr, Expr::Identifier(_)) {
-            false
-        } else if matches!(expr, Expr::AggFunction { .. }) {
-            true
-        } else {
-            for c in expr.children() {
-                if !Self::validate_expr_is_agg_or_no_identifiers(c) {
-                    return false;
-                }
-            }
-            true
-        }
-    }*/
 
     fn validate_no_nested_aggregates(&self) -> JournResult<()> {
         for expr in self.column_spec.exprs().iter().chain(self.additional.values()) {
@@ -112,24 +102,25 @@ impl<'h> Plan<'h> {
         Ok(())
     }
 
-    pub fn execute<'e, 'j, E, F, C>(
+    pub fn execute<'e, 'j, E, F, B, C>(
         &self,
-        journ: &'j Journal<'h>,
         items: impl Iterator<Item = E>,
         context_fn: F,
+        balance_updater: Option<B>,
     ) -> JournResult<Vec<RowData<'h>>>
     where
+        B: BalanceUpdater<'h, E>,
         C: IdentifierContext<'h> + 'e,
         F: FnMut(E) -> C,
-        E: 'e,
+        E: Copy + 'e,
     {
         // Either we are executing in a grouping way or we are not. These two modes cannot
         // be mixed. Also, when aggregate functions have been specified but no group-by clause -
         // the whole dataset effectively becomes a single group.
         if !self.group_by.is_empty() || !self.column_spec.agg_functions().is_empty() {
-            self.execute_with_groups(journ, items, context_fn)
+            self.execute_with_groups(items, context_fn)
         } else {
-            self.execute_without_groups(items, context_fn)
+            self.execute_without_groups(items, context_fn, balance_updater)
         }
     }
 
@@ -173,28 +164,22 @@ impl<'h> Plan<'h> {
 
     fn execute_with_groups<'e, 'j, E, F, C>(
         &self,
-        journ: &'j Journal<'h>,
         items: impl Iterator<Item = E>,
         context_fn: F,
     ) -> JournResult<Vec<RowData<'h>>>
     where
         C: IdentifierContext<'h> + 'e,
         F: FnMut(E) -> C,
-        E: 'e,
+        E: Copy + 'e,
     {
         let (groups, total_group) = self.execute_to_groups(items, context_fn)?;
 
         let mut rows = Vec::new();
         'next_row: for (key, group) in groups {
-            let mut context = LateContext::new(journ, key.clone(), group.finalize());
+            let mut context = LateContext::new(key.clone(), group.finalize());
             let mut row_data = RowData::default();
 
-            for sort_res in self.sort_exprs.iter().map(|k| {
-                k.eval(&mut context)
-                    .map_err(|e| err!(e; "Unable to evaluate sort key from context"))
-            }) {
-                row_data.push_sort_value(sort_res?);
-            }
+            self.eval_sort_exprs(&mut context, &mut row_data)?;
 
             for (additional_key, col) in self
                 .column_spec()
@@ -237,7 +222,7 @@ impl<'h> Plan<'h> {
         }
         // Evaluate total row
         if self.show_total {
-            let mut total_context = TotalContext::new(journ, total_group.finalize());
+            let mut total_context = TotalContext::new(total_group.finalize());
             let mut row_data = RowData::default();
             for col in self.column_spec.exprs() {
                 row_data.push_column_value(
@@ -249,26 +234,58 @@ impl<'h> Plan<'h> {
         Ok(rows)
     }
 
-    fn execute_without_groups<'e, E, F, C>(
+    fn execute_without_groups<'e, E, F, B, C>(
         &self,
         items: impl Iterator<Item = E>,
         mut context_fn: F,
+        balance_updater: Option<B>,
     ) -> JournResult<Vec<RowData<'h>>>
     where
         C: IdentifierContext<'h> + 'e,
         F: FnMut(E) -> C,
-        E: 'e,
+        B: BalanceUpdater<'h, E>,
+        E: Copy + 'e,
     {
-        let mut rows = Vec::new();
-        for item in items {
+        // First Pass - sort the data
+        let mut sorted_items = Vec::new();
+        'next_item: for item in items {
             let mut context = context_fn(item);
             let mut row_data = RowData::default();
 
-            for eval_res in self.sort_exprs.iter().map(|k| {
-                k.eval(&mut context)
-                    .map_err(|e| err!(e; "Unable to evaluate sort key from context"))
-            }) {
-                row_data.push_sort_value(eval_res?);
+            self.eval_sort_exprs(&mut context, &mut row_data)?;
+
+            for cond in self.where_conditions.iter() {
+                match cond.eval(&mut context)? {
+                    ColumnValue::Boolean(bool) => {
+                        if !bool {
+                            continue 'next_item;
+                        }
+                    }
+                    val => {
+                        return Err(err!("Unable to evaluate where condition: '{}'", cond)
+                            .with_source(err!("Value is not a boolean: '{}'", val)));
+                    }
+                }
+            }
+
+            let insert_pos = self.sorted_row_insert_pos(&sorted_items, &row_data);
+            sorted_items.insert(insert_pos, (item, row_data));
+        }
+
+        // Second Pass - Update balances and evaluate columns. Column evaluations may depend
+        // on balance identifier.
+        let mut rows = Vec::new();
+        for (item, mut row_data) in sorted_items {
+            let mut context = context_fn(item);
+
+            // Update any running balances
+            if let Some(ref balance_updater) = balance_updater {
+                balance_updater.update(&rows, &mut row_data, item);
+                if let Some(running_bals) = &mut row_data.running_balances {
+                    for (key, col) in running_bals.iter() {
+                        context.set_identifier(key, col.clone());
+                    }
+                }
             }
 
             for (additional_key, col) in self
@@ -287,18 +304,58 @@ impl<'h> Plan<'h> {
                     None => row_data.push_column_value(value),
                 }
             }
-            rows.insert(self.row_insert_pos(&rows, &row_data), row_data);
+            rows.push(row_data);
         }
         Ok(rows)
     }
 
-    fn row_insert_pos(&self, rows: &Vec<RowData<'h>>, row: &RowData<'h>) -> usize {
+    fn eval_sort_exprs<C: IdentifierContext<'h>>(
+        &self,
+        context: &mut C,
+        row_data: &mut RowData<'h>,
+    ) -> JournResult<()> {
+        for sort_res in self.sort_exprs.iter().map(|k| {
+            k.eval(context)
+                .map_err(|e| err!(e; "Unable to evaluate sort key from context"))
+                .and_then(|v| {
+                    if v.is_undefined() {
+                        Err(err!("Sort key cannot evaluate as undefined: {}", k))
+                    } else {
+                        Ok(v)
+                    }
+                })
+        }) {
+            row_data.push_sort_value(sort_res?);
+        }
+        Ok(())
+    }
+
+    fn sorted_row_insert_pos<E>(&self, rows: &[(E, RowData<'h>)], row: &RowData<'h>) -> usize {
+        // No sort expression specified; insert at the end.
+        if self.sort_exprs.is_empty() {
+            return rows.len();
+        }
+        match rows.binary_search_by(|r: &(E, RowData<'h>)| {
+            let cmp = r.1.sort_values.partial_cmp(&row.sort_values).expect(&format!(
+                "{:?} and {:?} to be comparable",
+                &r.1.sort_values, &row.sort_values
+            ));
+            if !self.sort_ascending { cmp.reverse() } else { cmp }
+        }) {
+            Ok(i) | Err(i) => i,
+        }
+    }
+
+    fn row_insert_pos(&self, rows: &[RowData<'h>], row: &RowData<'h>) -> usize {
         // No sort expression specified; insert at the end.
         if self.sort_exprs.is_empty() {
             return rows.len();
         }
         match rows.binary_search_by(|r: &RowData<'h>| {
-            let cmp = r.sort_values.cmp(&row.sort_values);
+            let cmp = r.sort_values.partial_cmp(&row.sort_values).expect(&format!(
+                "{:?} and {:?} to be comparable",
+                &r.sort_values, &row.sort_values
+            ));
             if !self.sort_ascending { cmp.reverse() } else { cmp }
         }) {
             Ok(i) | Err(i) => i,
@@ -311,6 +368,7 @@ pub struct RowData<'h> {
     pub column_values: Vec<ColumnValue<'h>>,
     pub additional: HashMap<&'static str, ColumnValue<'h>>,
     pub sort_values: Vec<ColumnValue<'h>>,
+    pub running_balances: Option<HashMap<&'static str, ColumnValue<'h>>>,
 }
 impl<'h> RowData<'h> {
     pub fn column_count(&self) -> usize {
@@ -332,4 +390,44 @@ impl<'h> RowData<'h> {
     pub fn remove_additional_value(&mut self, key: &'static str) -> Option<ColumnValue<'h>> {
         self.additional.remove(key)
     }
+
+    pub fn running_balance(&self, key: &str) -> Option<&ColumnValue<'h>> {
+        self.running_balances.as_ref().and_then(|rb| rb.get(key))
+    }
+
+    pub fn set_running_balance(&mut self, key: &'static str, value: ColumnValue<'h>) {
+        if self.running_balances.is_none() {
+            self.running_balances = Some(HashMap::with_capacity(1));
+        }
+        self.running_balances.as_mut().unwrap().insert(key, value);
+    }
 }
+
+/*
+trait DataList {
+    fn insert_row<'h>(
+        &mut self,
+        row_data: RowData<'h>,
+        ascending: bool,
+    ) -> (usize, &mut RowData<'h>);
+}
+
+impl<'h> DataList for Vec<RowData<'h>> {
+    fn insert_row(&mut self, row: RowData<'h>, ascending: bool) -> (usize, &mut RowData<'h>) {
+        // No sort expression specified; insert at the end.
+        if row.sort_values.is_empty() {
+            self.push(row);
+            return (self.len(), self.last_mut().unwrap());
+        }
+
+        match self.binary_search_by(|r: &RowData<'h>| {
+            let cmp = r.sort_values.cmp(&row.sort_values);
+            if !ascending { cmp.reverse() } else { cmp }
+        }) {
+            Ok(i) | Err(i) => {
+                self.insert(i, row);
+                (i, self.last_mut().unwrap())
+            }
+        }
+    }
+}*/

@@ -1,11 +1,12 @@
 /*
- * Copyright (c) 2022-2024. Mark Barrett
+ * Copyright (c) 2022-2026. Mark Barrett
  * This file is part of Journ.
  * Journ is free software: you can redistribute it and/or modify it under the terms of the GNU Affero General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::error::{BlockContext, BlockContextError, JournError, JournResult};
+use crate::journal_context::JournalContext;
 use crate::parsing::text_block::TextBlock;
 use crate::python::conversion::{DateTimeWrapper, DeferredArg};
 use crate::{err, pyerr};
@@ -165,10 +166,10 @@ impl PythonEnvironment {
         prepare_freethreaded_python();
     }
 
-    pub fn run_code(code: &str, ji: u32) -> JournResult<()> {
+    pub fn run_code(code: &str) -> JournResult<()> {
         Self::wait_for();
         Python::with_gil(|py| {
-            let globals = PythonEnvironment::journal_dict(py, ji, None);
+            let globals = PythonEnvironment::journal_dict(py, None);
             py.run(
                 &CString::new(code).map_err(|_| err!("Error converting code to CStr: {}", code))?,
                 Some(&globals),
@@ -181,7 +182,6 @@ impl PythonEnvironment {
     pub fn eval<T>(
         expr: &str,
         args: Option<HashMap<String, Box<dyn DeferredArg>>>,
-        ji: Option<u32>,
     ) -> JournResult<T>
     where
         T: FromPyObjectOwned,
@@ -205,33 +205,27 @@ impl PythonEnvironment {
                 }
                 None => None,
             };
-            if let Some(ji) = ji {
-                PythonEnvironment::set_active_journal(py, ji);
-            }
-            py.eval(
-                &expr,
-                ji.map(|ji| PythonEnvironment::journal_dict(py, ji, None)).as_ref(),
-                locals.as_ref(),
-            )
-            .map_err(convert_err)
-            .and_then(move |res| FromPyObjectOwned::extract(res.unbind(), py).map_err(convert_err))
+            PythonEnvironment::set_active_journal(py);
+            py.eval(&expr, Some(&PythonEnvironment::journal_dict(py, None)), locals.as_ref())
+                .map_err(convert_err)
+                .and_then(move |res| {
+                    FromPyObjectOwned::extract(res.unbind(), py).map_err(convert_err)
+                })
         })
     }
 
     pub fn run<'a>(
         code: &str,
-        ji: Option<u32>,
         args: Option<HashMap<String, Box<dyn DeferredArg>>>,
         file: Option<&str>,
     ) -> JournResult<()> {
         let code =
             CString::new(code).map_err(|_| err!("Error converting code to CStr: {}", code))?;
-        Self::run_then(&code, ji, args, file, |_py, _locals| Ok(()))
+        Self::run_then(&code, args, file, |_py, _locals| Ok(()))
     }
 
     pub fn run_then<'a, 'py, F, R>(
         code: &CStr,
-        ji: Option<u32>,
         args: Option<HashMap<String, Box<dyn DeferredArg>>>,
         file: Option<&str>,
         func: F,
@@ -264,87 +258,80 @@ impl PythonEnvironment {
                 }
                 None => None,
             };
-            if let Some(ji) = ji {
-                PythonEnvironment::set_active_journal(py, ji);
-            }
+            PythonEnvironment::set_active_journal(py);
 
             // We allow different locals to be passed in, but caution with this: using `None` for
             // the locals will make sure it is the same as the globals which is fine. But when it is `Some` can
             // lead to issues if not calling a function. If executing script logic for example, the imports at the top
             // will go in to the locals map, but the function will access them from the globals.
-            py.run(
-                code,
-                ji.map(|ji| PythonEnvironment::journal_dict(py, ji, file)).as_ref(),
-                locals.as_ref(),
-            )
-            .map_err(|e| {
-                let mut bc = BlockContext::from(&TextBlock::from(code.to_str().unwrap()));
+            py.run(code, Some(&PythonEnvironment::journal_dict(py, file)), locals.as_ref())
+                .map_err(|e| {
+                    let mut bc = BlockContext::from(&TextBlock::from(code.to_str().unwrap()));
 
-                // Try to highlight the line number in the error message.
-                let mut lowest_cause = e.clone_ref(py);
-                while let Some(cause) = lowest_cause.cause(py) {
-                    lowest_cause = cause;
-                }
-                let py_err_str = match lowest_cause.traceback(py) {
-                    Some(tb) => tb.format().unwrap(),
-                    None => lowest_cause.to_string(),
-                };
-                // Check the filenames match and only highlight the line if they do.
-                if let Some(begin) = py_err_str.rfind("File \"") {
-                    let py_err_filename = py_err_str[begin..]
-                        .find("\",")
-                        .map(|end| &py_err_str[begin + "File \"".len()..begin + end]);
-                    if let (Some(filename), Some(py_err_filename)) = (file, py_err_filename) {
-                        let canonical_bc_filename = Path::new(filename).canonicalize();
-                        let canonical_py_err_filename = Path::new(py_err_filename).canonicalize();
+                    // Try to highlight the line number in the error message.
+                    let mut lowest_cause = e.clone_ref(py);
+                    while let Some(cause) = lowest_cause.cause(py) {
+                        lowest_cause = cause;
+                    }
+                    let py_err_str = match lowest_cause.traceback(py) {
+                        Some(tb) => tb.format().unwrap(),
+                        None => lowest_cause.to_string(),
+                    };
+                    // Check the filenames match and only highlight the line if they do.
+                    if let Some(begin) = py_err_str.rfind("File \"") {
+                        let py_err_filename = py_err_str[begin..]
+                            .find("\",")
+                            .map(|end| &py_err_str[begin + "File \"".len()..begin + end]);
+                        if let (Some(filename), Some(py_err_filename)) = (file, py_err_filename) {
+                            let canonical_bc_filename = Path::new(filename).canonicalize();
+                            let canonical_py_err_filename =
+                                Path::new(py_err_filename).canonicalize();
 
-                        if let (Ok(can_bc_filename), Ok(can_py_err_filename)) =
-                            (canonical_bc_filename, canonical_py_err_filename)
-                        {
-                            if can_bc_filename == can_py_err_filename {
-                                py_err_str.rfind("line ").map(|pos| {
-                                    if let Ok((_, line_num)) =
-                                        take_while1::<_, &str, JournError>(|c: char| {
-                                            c.is_ascii_digit()
-                                        })(
-                                            &py_err_str[pos + "line ".len()..]
-                                        )
-                                    {
-                                        let line_num = line_num.parse::<usize>().unwrap();
-                                        bc.clear_highlights();
-                                        bc.highlight_line(line_num);
-                                        bc.shrink(5);
-                                        bc.set_line(Some(line_num));
-                                    }
-                                });
+                            if let (Ok(can_bc_filename), Ok(can_py_err_filename)) =
+                                (canonical_bc_filename, canonical_py_err_filename)
+                            {
+                                if can_bc_filename == can_py_err_filename {
+                                    py_err_str.rfind("line ").map(|pos| {
+                                        if let Ok((_, line_num)) =
+                                            take_while1::<_, &str, JournError>(|c: char| {
+                                                c.is_ascii_digit()
+                                            })(
+                                                &py_err_str[pos + "line ".len()..]
+                                            )
+                                        {
+                                            let line_num = line_num.parse::<usize>().unwrap();
+                                            bc.clear_highlights();
+                                            bc.highlight_line(line_num);
+                                            bc.shrink(5);
+                                            bc.set_line(Some(line_num));
+                                        }
+                                    });
+                                }
                             }
                         }
                     }
-                }
 
-                let bce = BlockContextError::new(bc, "Error executing python code".to_string());
-                JournError::new(bce).with_source(pyerr!(py, e))
-            })?;
+                    let bce = BlockContextError::new(bc, "Error executing python code".to_string());
+                    JournError::new(bce).with_source(pyerr!(py, e))
+                })?;
             func(py, locals.map(|l| l.unbind()))
         })
     }
 
-    pub(super) fn set_active_journal(py: Python, journal_incarnation: u32) {
-        py.run(
-            CString::new(format!("__active_journal={}", journal_incarnation)).unwrap().as_c_str(),
-            None,
-            None,
-        )
-        .unwrap();
+    pub(super) fn set_active_journal(py: Python) -> u16 {
+        let jid = JournalContext::current().jid();
+        py.run(CString::new(format!("__active_journal={}", jid)).unwrap().as_c_str(), None, None)
+            .unwrap();
+        jid
     }
 
     pub(super) fn journal_dict<'a, 'py>(
         py: Python<'py>,
-        journal_incarnation: u32,
         file: Option<&'a str>,
     ) -> Bound<'py, PyDict> {
         let mod_main = py.import("__main__").unwrap();
         let main_dict = mod_main.dict();
+        let jid = JournalContext::current().jid();
 
         let journal_dict = match main_dict
             .get_item(intern!(py, "__journals"))
@@ -353,16 +340,16 @@ impl PythonEnvironment {
             .map(|j| j.downcast_into::<PyDict>().unwrap())
         {
             Some(journals) => match journals
-                .get_item(journal_incarnation)
+                .get_item(jid)
                 .ok()
                 .flatten()
                 .map(|j| j.downcast_into::<PyDict>().unwrap())
             {
                 Some(journal) => journal,
                 None => {
-                    journals.set_item(journal_incarnation, PyDict::new(py)).unwrap();
+                    journals.set_item(jid, PyDict::new(py)).unwrap();
                     journals
-                        .get_item(journal_incarnation)
+                        .get_item(jid)
                         .ok()
                         .flatten()
                         .map(|j| j.downcast_into::<PyDict>().unwrap())
@@ -377,12 +364,12 @@ impl PythonEnvironment {
                     .unwrap()
                     .downcast_into::<PyDict>()
                     .unwrap();
-                journals.set_item(journal_incarnation, PyDict::new(py)).unwrap();
+                journals.set_item(jid, PyDict::new(py)).unwrap();
 
                 // This dictionary will be used as the globals for Python execution. We need to make
                 // sure that builtins is defined otherwise some things don't work.
                 let journal_dict = journals
-                    .get_item(journal_incarnation)
+                    .get_item(jid)
                     .ok()
                     .flatten()
                     .map(|j| j.downcast_into::<PyDict>().unwrap())
@@ -421,8 +408,8 @@ mod tests {
     pub fn test_add_code() {
         PythonEnvironment::startup();
         let code = "def abc():\n return \"Hello\"".to_string();
-        PythonEnvironment::run_code(&code, 1).unwrap();
-        let s = PythonEnvironment::eval::<String>("abc()", None, None).unwrap();
+        PythonEnvironment::run_code(&code).unwrap();
+        let s = PythonEnvironment::eval::<String>("abc()", None).unwrap();
         assert_eq!(s, "Hello");
     }
 }

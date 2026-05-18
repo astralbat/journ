@@ -7,7 +7,7 @@
  */
 use crate::reg::reg_command::RegCommand;
 use journ_core::error::JournResult;
-use journ_core::journal::Journal;
+use journ_core::journal_context::JournalContext;
 use journ_core::report::command::IntoExecCommand;
 use journ_core::report::command::arguments::{Arguments, DateTimeFormatCommand};
 use journ_core::report::command::cmd_line::BeginAndEndArguments;
@@ -57,12 +57,25 @@ pub struct RegArguments {
         default_value = "Date,Description,Account,Amount,Balance"
     )]
     column_spec: String,
+    #[arg(long = "where", help = "Filter the results on conditions")]
+    where_conditions: Vec<String>,
+    #[arg(
+        long = "order-by",
+        value_name = "ORDER_BY",
+        help = "Order the output by the specified column(s). Valid values are: event-date, deal-date, unit, actual-cost, total-cost"
+    )]
+    order_by: Option<String>,
+    #[arg(long = "descending", alias = "desc")]
+    order_descending: bool,
 }
 
 impl IntoExecCommand for RegArguments {
     type Command = RegCommand;
-    fn into_exec_cmd(self, journ: &Journal, args: &Arguments) -> JournResult<Self::Command> {
-        let datetime_fmt_cmd = DateTimeFormatCommand::from_args_or_config(args, journ.config());
+    fn into_exec_cmd(self, args: &Arguments) -> JournResult<Self::Command> {
+        let datetime_fmt_cmd = DateTimeFormatCommand::from_args_or_config(
+            args,
+            JournalContext::current().journal().config(),
+        );
         let cmd = RegCommand {
             begin_and_end_cmd: self.begin_and_end.into_cmd(&datetime_fmt_cmd),
             datetime_fmt_cmd,
@@ -71,6 +84,13 @@ impl IntoExecCommand for RegArguments {
             description_filter: self.description_filter,
             file_filter: self.file_filter,
             column_spec: self.column_spec,
+            order_by_spec: self.order_by,
+            order_ascending: !self.order_descending,
+            where_conditions: if self.where_conditions.is_empty() {
+                None
+            } else {
+                Some(self.where_conditions.join(","))
+            },
         };
         Ok(cmd)
     }

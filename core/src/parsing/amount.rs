@@ -181,7 +181,7 @@ where
                     Some(unit) => unit.clone(),
                     None => Unit::new(unit_code),
                 };
-                unit.set_format(unit_format(false)(consumed)?.1);
+                unit.set_format(unit_format(false)(consumed.clone())?.1);
                 let mut mut_config = input.config_mut();
                 let allocator = mut_config.allocator();
                 mut_config.merge_unit(&unit, allocator);
@@ -189,7 +189,11 @@ where
             }
         };
 
-        let decimal = decimal_s.to_decimal(unit.number_format()).unwrap();
+        // The invalid amount error can be thrown when, for example, the number has multiple
+        // decimal separators.
+        let decimal = decimal_s
+            .to_decimal(unit.number_format())
+            .map_err(|_| nom::Err::Error(IParseError::new("Invalid amount", consumed)))?;
         Ok((input, Amount::new(unit, decimal)))
     }
 }
@@ -219,6 +223,7 @@ where
 /// # use journ_core::parsing::amount::amount;
 ///
 /// assert_eq!(parse_obj!("$12", amount).quantity(), dec!(12));
+/// assert_eq!(parse_obj!("$12.00", amount).to_string(), "$12".to_string(), "non-definitive format does not have zero padding");
 /// assert_eq!(parse_obj!("$12", amount).unit().code(), "$");
 /// assert_eq!(parse_obj!("12e-5 ABC", amount).quantity(), dec!(0.00012));
 /// assert_eq!(parse_obj!("12E+5 ABC", amount).quantity(), dec!(1200000));

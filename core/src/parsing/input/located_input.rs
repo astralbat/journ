@@ -6,14 +6,17 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::configuration::Configuration;
+use crate::journal_node::JournalNode;
 use crate::parsing::DerefMutAndDebug;
 use crate::parsing::input::TextBlockInput;
 use crate::parsing::parser::JournalParseNode;
+use crate::parsing::text_block::TextBlockLocation;
 use nom_locate::LocatedSpan;
 use std::cell::RefCell;
 
 pub trait LocatedInput<'h> {
-    fn file(&self) -> Option<&'h str>;
+    /// Gets the node (carrying the file) of the input if it has one.
+    fn node(&self) -> Option<&'h JournalNode<'h>>;
 
     /// Gets the current line number where the first line is 1.
     fn line(&self) -> u32;
@@ -24,12 +27,16 @@ pub trait LocatedInput<'h> {
     fn location_offset(&self) -> usize;
 
     fn into_located_span<X>(self, extra: X) -> LocatedSpan<&'h str, X>;
+
+    fn text_block_location(&self) -> TextBlockLocation<'h> {
+        TextBlockLocation::new(self.node(), self.line(), self.location_offset())
+    }
 }
 
 macro_rules! impl_located_input1 {
     ($ty:ty) => {
         impl<'h, 's> LocatedInput<'h> for $ty {
-            fn file(&self) -> Option<&'h str> {
+            fn node(&self) -> Option<&'h JournalNode<'h>> {
                 None
             }
 
@@ -61,7 +68,7 @@ impl_located_input1!(LocatedSpan<&'h str, RefCell<&mut Configuration<'h>>>);
 macro_rules! impl_located_input2 {
     ($ty:ty) => {
         impl<'h, 's> LocatedInput<'h> for $ty {
-            fn file(&self) -> Option<&'h str> {
+            fn node(&self) -> Option<&'h JournalNode<'h>> {
                 None
             }
 
@@ -92,8 +99,8 @@ impl<'h, 's, 'p> LocatedInput<'h> for LocatedSpan<&'h str, &'p JournalParseNode<
 where
     'h: 's,
 {
-    fn file(&self) -> Option<&'h str> {
-        self.extra.node().nearest_filename().map(|f| f.to_str().unwrap())
+    fn node(&self) -> Option<&'h JournalNode<'h>> {
+        Some(self.extra.node())
     }
 
     fn line(&self) -> u32 {
@@ -117,8 +124,8 @@ impl<'h, 's, 'p> LocatedInput<'h> for TextBlockInput<'h, &'p JournalParseNode<'h
 where
     'h: 's,
 {
-    fn file(&self) -> Option<&'h str> {
-        self.inner.extra.node().nearest_filename().map(|f| f.to_str().unwrap())
+    fn node(&self) -> Option<&'h JournalNode<'h>> {
+        self.block().node()
     }
 
     fn line(&self) -> u32 {

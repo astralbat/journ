@@ -448,11 +448,25 @@ pub fn parse_plan<'h>(
             parse_non_aggregate(wc).map_err(|e| err!("Unable to parse --where").with_source(e))
         })
         .transpose()?;
-    let group_by_expr = group_by
-        .map(|s| {
-            parse_non_aggregate(s).map_err(|e| err!("Unable to parse --group-by").with_source(e))
-        })
-        .transpose()?;
+    let group_by_expr = match group_by {
+        Some(group_by) => Some(
+            parse_non_aggregate(group_by)
+                .map_err(|e| err!("Unable to parse --group-by").with_source(e))?,
+        ),
+        None => {
+            // Auto-detect group-by based on the columns being output.
+            let mut group_by_exprs = vec![];
+            let mut found_agg = false;
+            for expr in column_spec.exprs().iter() {
+                if !expr.is_aggregate() {
+                    group_by_exprs.push(expr.clone());
+                } else {
+                    found_agg = true;
+                }
+            }
+            if !found_agg || group_by_exprs.is_empty() { None } else { Some(group_by_exprs) }
+        }
+    };
     let sort_exprs = sort_spec
         .map(|s| {
             parse_non_aggregate(s).map_err(|e| err!("Unable to parse --sort-by").with_source(e))
@@ -474,4 +488,31 @@ pub fn parse_plan<'h>(
     );
     plan.validate()?;
     Ok(plan)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::report::expr::Expr;
+    use crate::report::expr::parser::{CompareOp, compare};
+    use Expr::*;
+    use std::cell::RefCell;
+
+    #[test]
+    fn test_compare() {
+        let agg_funcs = RefCell::new(Vec::new());
+        let res = compare(&agg_funcs)("iferror('abc', 'acb') < 'def'");
+        assert!(res.is_ok());
+        let res = res.unwrap();
+        assert_eq!(
+            res.1,
+            Compare {
+                left: Box::new(ScalarFunction {
+                    name: "iferror".into(),
+                    args: vec![Literal("abc"), Literal("acb")]
+                }),
+                op: CompareOp::Lt,
+                right: Box::new(Literal("def"))
+            }
+        )
+    }
 }

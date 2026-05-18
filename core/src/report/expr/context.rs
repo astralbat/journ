@@ -5,10 +5,9 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
-use crate::configuration::Configuration;
 use crate::datetime::JDateTime;
 use crate::error::JournResult;
-use crate::journal::Journal;
+use crate::journal_context::JournalContext;
 use crate::journal_entry::JournalEntry;
 use crate::posting::Posting;
 use crate::report::expr::{ColumnValue, GroupKey};
@@ -19,8 +18,6 @@ use std::collections::hash_map::Entry;
 use std::sync::Arc;
 
 pub trait EvalContext<'h> {
-    fn config(&self) -> &Configuration<'h>;
-
     fn as_valuer_context(&self) -> Option<&dyn ValuerContext<'h>> {
         None
     }
@@ -85,26 +82,26 @@ pub trait ValuerContext<'h>: IdentifierContext<'h> {
         'h: 'a,
     {
         match date {
-            Some(date) => Ok(Box::new(SystemValuer::on_date(self.config().clone(), date))),
-            None => Ok(Box::new(SystemValuer::on_date(self.config().clone(), JDateTime::now()))),
+            Some(date) => Ok(Box::new(SystemValuer::on_date(
+                JournalContext::current().journal().config().clone(),
+                date,
+            ))),
+            None => Ok(Box::new(SystemValuer::on_date(
+                JournalContext::current().journal().config().clone(),
+                JDateTime::now(),
+            ))),
         }
     }
 }
 
-pub struct LateContext<'h, 'j> {
-    journal: &'j Journal<'h>,
+pub struct LateContext<'h> {
     aggregate_values: Vec<ColumnValue<'h>>,
     group_key: GroupKey<'h>,
     variables: HashMap<SS, ColumnValue<'h>>,
 }
-impl<'h, 'j> LateContext<'h, 'j> {
-    pub fn new(
-        journal: &'j Journal<'h>,
-        group_key: GroupKey<'h>,
-        aggregate_values: Vec<ColumnValue<'h>>,
-    ) -> LateContext<'h, 'j> {
-        let mut context =
-            LateContext { journal, aggregate_values, group_key, variables: HashMap::new() };
+impl<'h> LateContext<'h> {
+    pub fn new(group_key: GroupKey<'h>, aggregate_values: Vec<ColumnValue<'h>>) -> LateContext<'h> {
+        let mut context = LateContext { aggregate_values, group_key, variables: HashMap::new() };
 
         // Make the --group-by aliases available as identifiers in the context. E.g. -o ALIAS
         let aliases_and_values = context
@@ -119,11 +116,7 @@ impl<'h, 'j> LateContext<'h, 'j> {
         context
     }
 }
-impl<'h, 'j> EvalContext<'h> for LateContext<'h, 'j> {
-    fn config(&self) -> &Configuration<'h> {
-        self.journal.config()
-    }
-
+impl<'h, 'j> EvalContext<'h> for LateContext<'h> {
     fn as_valuer_context(&self) -> Option<&dyn ValuerContext<'h>> {
         Some(self)
     }
@@ -136,7 +129,7 @@ impl<'h, 'j> EvalContext<'h> for LateContext<'h, 'j> {
         self.aggregate_values.get(index).cloned()
     }
 }
-impl<'h, 'j> IdentifierContext<'h> for LateContext<'h, 'j> {
+impl<'h, 'j> IdentifierContext<'h> for LateContext<'h> {
     fn variables(&self) -> &HashMap<SS, ColumnValue<'h>> {
         &self.variables
     }
@@ -162,23 +155,18 @@ impl<'h, 'j> IdentifierContext<'h> for LateContext<'h, 'j> {
     }
 }
 
-impl<'h> ValuerContext<'h> for LateContext<'h, '_> {}
+impl<'h> ValuerContext<'h> for LateContext<'h> {}
 
-pub struct TotalContext<'h, 'j> {
-    journal: &'j Journal<'h>,
+pub struct TotalContext<'h> {
     aggregate_values: Vec<ColumnValue<'h>>,
     variables: HashMap<SS, ColumnValue<'h>>,
 }
-impl<'h, 'j> TotalContext<'h, 'j> {
-    pub fn new(journal: &'j Journal<'h>, aggregate_values: Vec<ColumnValue<'h>>) -> Self {
-        TotalContext { journal, aggregate_values, variables: HashMap::new() }
+impl<'h> TotalContext<'h> {
+    pub fn new(aggregate_values: Vec<ColumnValue<'h>>) -> Self {
+        TotalContext { aggregate_values, variables: HashMap::new() }
     }
 }
-impl<'h> EvalContext<'h> for TotalContext<'h, '_> {
-    fn config(&self) -> &Configuration<'h> {
-        self.journal.config()
-    }
-
+impl<'h> EvalContext<'h> for TotalContext<'h> {
     fn as_valuer_context(&self) -> Option<&dyn ValuerContext<'h>> {
         Some(self)
     }
@@ -190,7 +178,7 @@ impl<'h> EvalContext<'h> for TotalContext<'h, '_> {
         self.aggregate_values.get(index).cloned()
     }
 }
-impl<'h> IdentifierContext<'h> for TotalContext<'h, '_> {
+impl<'h> IdentifierContext<'h> for TotalContext<'h> {
     fn variables(&self) -> &HashMap<SS, ColumnValue<'h>> {
         &self.variables
     }
@@ -200,26 +188,25 @@ impl<'h> IdentifierContext<'h> for TotalContext<'h, '_> {
     }
 }
 
-impl<'h> ValuerContext<'h> for TotalContext<'h, '_> {}
+impl<'h> ValuerContext<'h> for TotalContext<'h> {}
 
 pub struct PostingContext<'h> {
-    journal: &'h Journal<'h>,
     entry: &'h JournalEntry<'h>,
     posting: &'h Posting<'h>,
     variables: HashMap<SS, ColumnValue<'h>>,
 }
 impl<'h> PostingContext<'h> {
     pub fn new(
-        journal: &'h Journal<'h>,
+        //journal: &'j Journal<'h>,
         entry: &'h JournalEntry<'h>,
         posting: &'h Posting<'h>,
     ) -> PostingContext<'h> {
-        PostingContext { journal, entry, posting, variables: HashMap::new() }
+        PostingContext { entry, posting, variables: HashMap::new() }
     }
 
-    pub fn journal(&self) -> &'h Journal<'h> {
-        self.journal
-    }
+    //pub fn journal(&self) -> &'h Journal<'h> {
+    //    self.journal
+    //}
 
     pub fn entry(&self) -> &JournalEntry<'h> {
         self.entry
@@ -231,10 +218,6 @@ impl<'h> PostingContext<'h> {
 }
 
 impl<'h> EvalContext<'h> for PostingContext<'h> {
-    fn config(&self) -> &Configuration<'h> {
-        self.journal.config()
-    }
-
     fn as_valuer_context(&self) -> Option<&dyn ValuerContext<'h>> {
         Some(self)
     }
@@ -252,7 +235,7 @@ impl<'h> EvalContext<'h> for PostingContext<'h> {
     }
 }
 
-impl<'h> IdentifierContext<'h> for PostingContext<'h> {
+impl<'h, 'j> IdentifierContext<'h> for PostingContext<'h> {
     fn variables(&self) -> &HashMap<SS, ColumnValue<'h>> {
         &self.variables
     }
@@ -265,17 +248,28 @@ impl<'h> IdentifierContext<'h> for PostingContext<'h> {
         if identifier.eq_ignore_ascii_case("account") {
             Some(ColumnValue::Account(Arc::clone(self.posting.account())))
         } else if identifier.eq_ignore_ascii_case("date") {
-            Some(ColumnValue::Date(self.entry.date_and_time().datetime_range().start().date()))
+            Some(ColumnValue::Date(self.entry.datetime_range().start().date()))
         } else if identifier.eq_ignore_ascii_case("datetime_from") {
-            Some(ColumnValue::Datetime(self.entry.date_and_time().datetime_range().start()))
+            Some(ColumnValue::Datetime(self.entry.datetime_range().start()))
         } else if identifier.eq_ignore_ascii_case("datetime_to") {
-            Some(ColumnValue::Datetime(self.entry.date_and_time().datetime_range().end()))
+            Some(ColumnValue::Datetime(self.entry.datetime_range().end()))
         } else if identifier.eq_ignore_ascii_case("datetime_mid") {
-            Some(ColumnValue::Datetime(self.entry.date_and_time().average()))
+            Some(ColumnValue::Datetime(self.entry.datetime_range().average()))
         } else if identifier.eq_ignore_ascii_case("description") {
             Some(ColumnValue::Description(self.entry.description().into()))
         } else if identifier.eq_ignore_ascii_case("amount") {
             Some(ColumnValue::Amount(self.posting.amount()))
+        } else if identifier.eq_ignore_ascii_case("file") {
+            Some(
+                JournalContext::current()
+                    .journal()
+                    .root()
+                    .find_by_node_id(&self.entry.id().parent().unwrap())
+                    .unwrap()
+                    .nearest_filename()
+                    .map(|p| ColumnValue::String(p.to_str().unwrap().into()))
+                    .unwrap_or(ColumnValue::Undefined),
+            )
         } else if identifier.starts_with('+') {
             Some(
                 self.entry
@@ -296,7 +290,10 @@ impl<'h> ValuerContext<'h> for PostingContext<'h> {
         'h: 'a,
     {
         let sys_valuer = match datetime {
-            Some(datetime) => SystemValuer::on_date(self.journal().config().clone(), datetime),
+            Some(datetime) => SystemValuer::on_date(
+                JournalContext::current().journal().config().clone(),
+                datetime,
+            ),
             None => SystemValuer::from(self.entry()),
         };
         Ok(Box::new(sys_valuer))

@@ -39,7 +39,7 @@ pub enum PushError<'h> {
 /// A `DealGroup` can never be empty; there will always be at least one deal in the group.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DealGroup<'h> {
-    id: DealId<'h>,
+    id: DealId,
     /// The group will always have a unit of account: explicit or implied. Initially, this will be implied to be the first valuation on the `holding`,
     /// or if none, the primary unit of the `holding`. When added to a pool, it should be changed to the pool's accounting unit.
     unit_of_account: Option<&'h Unit<'h>>,
@@ -56,7 +56,7 @@ impl<'h> DealGroup<'h> {
         let cgt_config =
             deal.entry().config().module_config::<CagConfiguration>(MODULE_NAME).unwrap();
         let next_rule = cgt_config.ruleset();
-        let id = deal.id();
+        let id = deal.id().clone();
         let holding = AverageDealHolding::from(&deal);
 
         DealGroup {
@@ -71,8 +71,8 @@ impl<'h> DealGroup<'h> {
         }
     }
 
-    pub fn id(&self) -> DealId<'h> {
-        self.id
+    pub fn id(&self) -> &DealId {
+        &self.id
     }
 
     pub fn allocator(&self) -> &'h HerdAllocator<'h> {
@@ -140,6 +140,7 @@ impl<'h> DealGroup<'h> {
                     .unwrap_or((None, None));
 
                 let left = Self {
+                    id: self.id.clone(),
                     holding: left,
                     deals: self.deals.clone(),
                     taxable_gain: left_tg,

@@ -29,9 +29,17 @@ impl BeginAndEndArguments {
 
         let begin = if let Some(begin) = self.begin {
             match JDateTime::parse(dtf, tz)(begin.as_str()).finish() {
-                Ok((_, date)) => Some(date),
+                // All the input must be used
+                Ok((rem, date)) if rem.is_empty() => Some(date),
+                Ok((_, _)) => {
+                    print_jerror(err!("Invalid start date: expected format {}", dtf));
+                    exit(1)
+                }
                 Err(e) => {
-                    print_jerror(err!("Expected format {}", dtf).with_source(e.into_err()));
+                    print_jerror(
+                        err!("Invalid start date: expected format {}", dtf)
+                            .with_source(e.into_err()),
+                    );
                     exit(1)
                 }
             }
@@ -41,9 +49,16 @@ impl BeginAndEndArguments {
 
         let end = if let Some(end) = self.end {
             match JDateTime::parse(dtf, tz)(end.as_str()).finish() {
-                Ok((_, date)) => Some(date),
+                // All the input must be used
+                Ok((rem, date)) if rem.is_empty() => Some(date),
+                Ok((_, _)) => {
+                    print_jerror(err!("Invalid end date: expected format {}", dtf));
+                    exit(1)
+                }
                 Err(e) => {
-                    print_jerror(err!("Expected format {}", dtf).with_source(e.into_err()));
+                    print_jerror(
+                        err!("Invalid end date: expected format {}", dtf).with_source(e.into_err()),
+                    );
                     exit(1)
                 }
             }
@@ -62,8 +77,10 @@ pub struct BeginAndEndCommand {
 
 impl BeginAndEndCommand {
     pub fn begin_end_range(&self) -> (Bound<JDateTime>, Bound<JDateTime>) {
-        let begin = self.begin.map(Bound::Included);
-        let end = self.end.map(Bound::Excluded);
+        // Range focuses on the entry date and time being the end date of the entry.
+        // Therefore we want a (from, to] range.
+        let begin = self.begin.map(Bound::Excluded);
+        let end = self.end.map(Bound::Included);
         (begin.unwrap_or(Bound::Unbounded), end.unwrap_or(Bound::Unbounded))
     }
 

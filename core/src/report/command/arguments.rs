@@ -96,7 +96,6 @@ pub struct Arguments {
     pub datetime_cmd: DateTimeFormatCommand,
     //pub begin: Option<DateTime<Tz>>,
     //pub end: Option<DateTime<Tz>>,
-    pub aux_date: bool,
     pub color: bool,
     pub no_color: bool,
     pub real_postings: bool,
@@ -251,14 +250,6 @@ impl Arguments {
         let end = self.end().map(Bound::Excluded);
         (Bound::Unbounded, end.unwrap_or(Bound::Unbounded))
     }*/
-
-    pub fn aux_date(&self) -> bool {
-        self.aux_date
-    }
-
-    pub fn set_aux_date(&mut self, aux_date: bool) {
-        self.aux_date = aux_date
-    }
 
     pub fn real_postings(&self) -> bool {
         self.real_postings

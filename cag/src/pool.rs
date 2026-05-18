@@ -139,11 +139,7 @@ impl<'h> Pool<'h> {
         Ok(())
     }
 
-    pub fn extract(
-        &mut self,
-        group_id: DealId<'h>,
-        deal_unit: &'h Unit<'h>,
-    ) -> Option<DealGroup<'h>> {
+    pub fn extract(&mut self, group_id: &DealId, deal_unit: &'h Unit<'h>) -> Option<DealGroup<'h>> {
         let holding = self.holdings.remove(deal_unit)?;
 
         match holding.extract(group_id) {

@@ -7,32 +7,18 @@
  */
 use crate::configuration::Configuration;
 use crate::directive::Directive;
-use crate::journal_node::{JournalNode, NodeId};
-use std::sync::atomic::{AtomicU32, Ordering};
+use crate::journal_node::JournalNode;
+use crate::tree_id::BranchCountingTreeId;
+use std::fmt::{Debug, Formatter};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct SegmentId<'h> {
-    node_id: &'h NodeId<'h>,
-    segment_index: u32,
-}
-impl<'h> SegmentId<'h> {
-    pub fn new(node_id: &'h NodeId<'h>) -> Self {
-        SegmentId { node_id, segment_index: SegmentId::generate_id() }
-    }
-
-    fn generate_id() -> u32 {
-        static ID_COUNTER: AtomicU32 = AtomicU32::new(1);
-        ID_COUNTER.fetch_add(1, Ordering::Relaxed)
-    }
-}
+pub type SegmentId = BranchCountingTreeId;
 
 /// A segment of a journal node.
 /// The complete list of directives of a node can be grouped into segments, where each segment is the directive runs up to and including 'include' and 'branch' statements.
 /// The configuration of each segment also forms a configuration tree, where each segment can have its own configuration that can override the parent segment's configuration.
-#[derive(Debug)]
 pub struct JournalNodeSegment<'h> {
-    id: SegmentId<'h>,
+    id: SegmentId,
     directives: Mutex<Vec<Directive<'h>>>,
     node: &'h JournalNode<'h>,
     configuration: OnceLock<Configuration<'h>>,
@@ -44,12 +30,17 @@ pub struct JournalNodeSegment<'h> {
 impl<'h> JournalNodeSegment<'h> {
     pub fn new(node: &'h JournalNode<'h>) -> JournalNodeSegment<'h> {
         JournalNodeSegment {
-            id: SegmentId::new(node.id()),
+            // The segment is a branch from the node
+            id: node.id().branch().into(),
             directives: Mutex::new(Vec::new()),
             node,
             next_segment: Mutex::new(None),
             configuration: OnceLock::new(),
         }
+    }
+
+    pub fn id(&self) -> &SegmentId {
+        &self.id
     }
 
     pub fn directives(&self) -> MutexGuard<'_, Vec<Directive<'h>>> {
@@ -110,5 +101,11 @@ impl<'h> PartialOrd for JournalNodeSegment<'h> {
 impl<'h> Ord for JournalNodeSegment<'h> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.id.cmp(&other.id)
+    }
+}
+
+impl Debug for JournalNodeSegment<'_> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "JournalNodeSegment({:?})", self.id)
     }
 }

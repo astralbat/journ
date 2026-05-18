@@ -19,6 +19,9 @@ pub trait JournalObj<'h>: fmt::Display {
 #[macro_export]
 macro_rules! impl_journal_obj_common {
     ($obj_type:ty) => {
+        use crate::journal_obj::JournalObj;
+        use crate::parsing::input::TextBlockInput;
+
         impl<'h> JournalObj<'h> for $obj_type {
             fn block(&self) -> &'h TextBlock<'h> {
                 &self.block.get_or_init(|| {
@@ -33,10 +36,10 @@ macro_rules! impl_journal_obj_common {
 
         impl<'h> $obj_type {
             #[allow(dead_code)]
-            fn block_input(&self) -> TextBlockInput<'h, RefCell<Configuration<'h>>> {
+            fn block_input(&self) -> TextBlockInput<'h, std::cell::RefCell<Configuration<'h>>> {
                 self.block()
                     .as_input(self.config.allocator())
-                    .map_extra(|_| RefCell::new(self.config.clone()))
+                    .map_extra(|_| std::cell::RefCell::new(self.config.clone()))
             }
 
             /// Allocates a new block from the `text` provided.

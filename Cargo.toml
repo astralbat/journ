@@ -41,7 +41,7 @@ opt-level = 0
 debug = true
 # This works to squeeze out better parsing performance, when integrating with nom.
 # Disable while developing for faster builds.
-# lto = "fat"
+lto = "fat"
 
 [features]
 # Disabled, see journ-core/Cargo.toml
