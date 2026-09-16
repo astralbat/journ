@@ -11,16 +11,16 @@
 
 pub mod adjustment;
 //pub mod capital_gains;
+mod adjusted_value;
+pub mod cag_configuration;
+pub mod cag_journal_entry;
 mod capital_gains;
 mod cg_flows;
-pub mod cgt_configuration;
-pub mod cgt_journal_entry;
 pub mod computer;
 pub mod deal;
-mod deal_group;
-mod deal_holding;
 pub mod dealing_event;
 mod expenses;
+mod holding;
 mod mod_cgt;
 pub mod module_init;
 pub mod pool;
@@ -30,7 +30,5 @@ mod report;
 pub mod ruleset;
 mod test_util;
 
-#[macro_use]
-extern crate lazy_static;
 extern crate core;
 extern crate log;

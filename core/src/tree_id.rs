@@ -97,12 +97,12 @@ impl TreeId {
 
     pub fn parent(&self) -> Option<Self> {
         let slice = self.as_slice();
-        if slice.len() > 0 {
+        if !slice.is_empty() {
             let mut try_parent = &slice[0..slice.len() - 1];
-            while try_parent.len() > 0 && try_parent[try_parent.len() - 1] >= 0x80 {
+            while !try_parent.is_empty() && try_parent[try_parent.len() - 1] >= 0x80 {
                 try_parent = &try_parent[..try_parent.len() - 1]
             }
-            Some(Self::new(&try_parent))
+            Some(Self::new(try_parent))
         } else {
             None
         }
@@ -306,8 +306,18 @@ pub struct BranchCountingTreeId {
 }
 
 impl BranchCountingTreeId {
-    pub fn branch(&self) -> TreeId {
+    pub fn new(inner: TreeId, start: usize) -> Self {
+        assert!(start > 0, "branch_count must be > 0");
+
+        BranchCountingTreeId { inner, branch_count: AtomicUsize::new(start) }
+    }
+
+    pub fn next_id(&self) -> TreeId {
         self.inner.branch(self.branch_count.fetch_add(1, atomic::Ordering::SeqCst))
+    }
+
+    pub fn inner(&self) -> &TreeId {
+        &self.inner
     }
 }
 

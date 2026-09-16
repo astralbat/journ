@@ -9,10 +9,13 @@ use crate::err;
 use crate::error::JournResult;
 use crate::report::expr::{ColumnValue, Expr, IdentifierContext};
 
-pub fn cond<'h>(
-    args: &[Expr<'h>],
-    context: &mut dyn IdentifierContext<'h>,
-) -> JournResult<ColumnValue<'h>> {
+pub fn cond<'h, 'a>(
+    args: &[Expr],
+    context: &mut dyn IdentifierContext<'h, 'a>,
+) -> JournResult<ColumnValue<'h>>
+where
+    'h: 'a,
+{
     if args.len() < 2 || args.len() > 3 {
         return Err(err!(
             "Function 'if(condition, value_if_true [,value_if_false])' requires two or three arguments"

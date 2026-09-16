@@ -8,8 +8,7 @@
 use crate::report::table2::cell::{Cell, lease_formatter, return_formatter};
 use crate::report::table2::cell_width::{CellWidth, SpaceDistribution};
 use crate::report::table2::fmt::CellFormatter;
-use crate::report::table2::{CellRef, ColumnWidth};
-use log::Level;
+use crate::report::table2::{CellRef, ColumnWidth, ShrinkableCell};
 use std::fmt;
 
 /// A cell composed of two other cells.
@@ -45,46 +44,45 @@ impl Cell for BinaryCell {
         width: Option<ColumnWidth>,
     ) -> fmt::Result {
         assert!(
-            matches!(width, Some(CellWidth::Binary(_, _, _)) | None),
+            matches!(width, Some(CellWidth::Branch(_, _, _)) | None),
             "BinaryCell can only be written to a CellFormatter with a Binary width"
         );
         let padded_l_width = width.as_ref().and_then(|pad_w| pad_w.left().cloned());
         let padded_r_width = width.and_then(|pad_w| pad_w.right().cloned());
 
-        //let left_formatter = BasicCellFormatter::new()
-        //f.set_width(padded_l_width.clone());
         let mut left_buffer = lease_formatter();
         let left_res = self.left.print(&mut left_buffer, line, padded_l_width.clone());
         write!(f, "{}", left_buffer)?;
 
         // Print padding between left and right cells
         if let Some(padded_l_width) = padded_l_width {
-            if log_enabled!(Level::Debug) {
-                debug_assert!(
-                    left_buffer.count() <= padded_l_width.width(),
-                    "Left cell wrote more than its allocated width ({} > {})",
-                    left_buffer.count(),
-                    padded_l_width.width()
-                );
-            }
-            for _ in 0..(padded_l_width.width() - left_buffer.count()) {
+            debug_assert!(
+                left_buffer.count() <= padded_l_width.sum(),
+                "Left cell wrote more than its allocated width ({} > {})",
+                left_buffer.count(),
+                padded_l_width.sum()
+            );
+            for _ in 0..(padded_l_width.sum() - left_buffer.count()) {
                 write!(f, "{}", self.padding_char())?;
             }
         }
 
         return_formatter(left_buffer);
 
-        // f.set_width(padded_r_width);
         let right_res = self.right.print(f, line, padded_r_width);
         left_res.or(right_res)
     }
 
     fn width(&self) -> CellWidth {
-        CellWidth::Binary(
+        CellWidth::Branch(
             Box::new(self.left.width()),
             Box::new(self.right.width()),
             self.space_distribution,
         )
+    }
+
+    fn height(&self) -> usize {
+        self.left.height().max(self.right.height())
     }
 
     fn hspan(&self) -> usize {
@@ -98,10 +96,86 @@ impl Cell for BinaryCell {
     fn padding_char(&self) -> char {
         self.left.padding_char()
     }
+
+    fn as_shrinkable(&self) -> Option<&dyn ShrinkableCell> {
+        // It should not matter that we bias the left side here.
+        // The column shrinking logic uses as_binary() to distribute
+        // the shrinkage.
+        self.left.as_shrinkable().or(self.right.as_shrinkable())
+    }
+
+    fn as_binary(&self) -> Option<&BinaryCell> {
+        Some(self)
+    }
 }
+
+/*
+impl ShrinkableCell for BinaryCell {
+    fn try_shrink(&self, target_width: &CellWidth) -> bool {
+        debug_assert!(
+            target_width.sum() <= self.width().sum(),
+            "Target width ({}) must be <= cell width ({})",
+            target_width.sum(),
+            self.width().sum()
+        );
+        debug_assert_matches!(target_width.left(), Some(left_w) if left_w.sum() <= self.left.width().sum());
+        debug_assert_matches!(target_width.right(), Some(right_w) if right_w.sum() <= self.right.width().sum());
+
+        match (self.left.as_shrinkable(), self.right.as_shrinkable()) {
+            // Both are shrinkable: shrink both sides according to target parts
+            (Some(left), Some(right)) => {
+                let mut shrunk_any = false;
+                shrunk_any |= left.try_shrink(target_width.left().unwrap());
+                shrunk_any |= right.try_shrink(target_width.right().unwrap());
+                shrunk_any
+            }
+            // Only left is shrinkable: distribute the right side's target width diff on to the left side
+            (Some(left), None) => {
+                let right_diff = self.right.width().sum() as isize
+                    - target_width.right().unwrap().sum() as isize;
+                let dist_amount = right_diff
+                    //.min((left.width().sum() - target_width.left().unwrap().sum()) as isize)
+                    // Can't reduce target below 0
+                    .min(target_width.left().unwrap().sum() as isize);
+                left.try_shrink(&distribute(target_width.left().unwrap(), -dist_amount))
+            }
+            // Only right is shrinkable: distribute the left side's target width diff on to the right side
+            (None, Some(right)) => {
+                let left_diff =
+                    self.left.width().sum() as isize - target_width.left().unwrap().sum() as isize;
+                let dist_amount = left_diff
+                    //.min((right.width().sum() - target_width.right().unwrap().sum()) as isize)
+                    // Can't reduce target below 0
+                    .min(target_width.right().unwrap().sum() as isize);
+                right.try_shrink(&distribute(target_width.right().unwrap(), -dist_amount))
+            }
+            (None, None) => false,
+        }
+    }
+
+    fn is_lossy(&self) -> bool {
+        if let Some(left) = self.left.as_shrinkable()
+            && left.is_lossy()
+        {
+            return true;
+        }
+        if let Some(right) = self.right.as_shrinkable()
+            && right.is_lossy()
+        {
+            return true;
+        }
+        false
+    }
+}*/
 
 impl<'c> From<BinaryCell> for CellRef<'c> {
     fn from(s: BinaryCell) -> Self {
         CellRef::Owned(Box::new(s))
+    }
+}
+
+impl fmt::Debug for BinaryCell {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Binary({:?}, {:?})", &self.left, &self.right)
     }
 }

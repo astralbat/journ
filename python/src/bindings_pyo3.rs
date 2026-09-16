@@ -18,13 +18,13 @@ use journ_core::configuration::AlwaysIncluded;
 use journ_core::datetime::{DateTimePrecision, JDateTime, JDateTimeRange};
 use journ_core::err;
 use journ_core::error::{BlockContextError, JournError};
-use journ_core::journal_context::JournalContext;
+use journ_core::journal_context::JContext;
 use journ_core::module::MODULES;
 use journ_core::parsing::text_block::{PaddingPolicy, TextBlock};
 use journ_core::python::mod_ledger;
 use journ_core::report::balance::AccountBalances;
-use journ_core::tree_id::TreeId;
 use journ_core::unit::{RoundingStrategy, UnitFormat};
+use journ_core::valuer::{SystemValuer, Valuer};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyAnyMethods, PyDateTime, PyList, PyStringMethods};
@@ -123,7 +123,7 @@ pub(crate) static ALLOCATOR: LazyLock<HerdAllocator<'static>> =
 /// Journal isn't Send through the use of Rc.
 #[pyclass(unsendable)]
 struct Journal {
-    context: Arc<JournalContext<'static>>,
+    context: Arc<JContext<'static>>,
     //allocator: HerdAllocator<'static>,
     edit_node_id: Mutex<FileId>,
 }
@@ -237,24 +237,30 @@ impl Journal {
     /// are returned. This can also include entries within nested files (those branched/included).
     ///
     /// The entries are returned in date/location order, with any duplicates later found being ignored.
-    #[pyo3(signature = (start_time, end_time, file_id=None, description=None))]
+    #[pyo3(signature = (start_time, end_time=None, description=None, file_id=None))]
     fn find_entries<'py>(
         &self,
         start_time: &Bound<'py, PyDateTime>,
-        end_time: &Bound<'py, PyDateTime>,
-        file_id: Option<&FileId>,
+        end_time: Option<&Bound<'py, PyDateTime>>,
         description: Option<&str>,
+        file_id: Option<&FileId>,
     ) -> PyResult<Vec<JournalEntry>> {
         self.context.with(|| {
             let journal = self.context.journal();
             let chrono_start =
                 JDateTime::new(start_time.extract::<DateTime<Tz>>()?, DateTimePrecision::Second);
-            let chrono_end =
-                JDateTime::new(end_time.extract::<DateTime<Tz>>()?, DateTimePrecision::Second);
+            let chrono_end = end_time
+                .map(|et| {
+                    Ok::<_, PyErr>(JDateTime::new(
+                        et.extract::<DateTime<Tz>>()?,
+                        DateTimePrecision::Second,
+                    ))
+                })
+                .transpose()?;
 
             let mut entries = vec![];
             for entry in journal.find_entries(
-                chrono_start..chrono_end,
+                JDateTimeRange::new(chrono_start, chrono_end),
                 description,
                 file_id.map(|fid| &fid.0),
             ) {
@@ -268,12 +274,13 @@ impl Journal {
         })
     }
 
+    /*
     fn contains_entry(&self, entry: &JournalEntry) -> bool {
         self.context.with(|| {
             let journal = self.context.journal();
             journal.contains_entry(&*entry.entry_ref())
         })
-    }
+    }*/
 
     /// Gets the quantity balance of the specified `account`, in the specified `unit` between `start`..`end`.
     #[pyo3(signature = (account, unit, start=None, end=None))]
@@ -327,11 +334,12 @@ impl Journal {
         })
     }
 
-    #[pyo3(signature = (py_datetime, description, write_time=true))]
+    #[pyo3(signature = (begin, description, end=None, write_time=true))]
     fn new_entry<'py>(
         &self,
-        py_datetime: &Bound<'py, PyDateTime>,
-        mut description: String,
+        begin: DateTime<Tz>,
+        description: String,
+        end: Option<DateTime<Tz>>,
         write_time: bool,
     ) -> PyLedgerResult<JournalEntry> {
         self.context.with(|| {
@@ -339,19 +347,19 @@ impl Journal {
             let rust_jf = journal.node(&self.edit_node_id.lock().unwrap().0);
             let config = rust_jf.segments().last().unwrap().config().clone();
 
-            // Convert the python datetime object in to a DateAndTime object.
-            let chrono_date: DateTime<Tz> = py_datetime
-                .extract()
-                .map_err(|e| PyLedgerError::new(err!("Invalid datetime: {}", e)))?;
             let dt = JDateTimeRange::new(
                 JDateTime::new(
-                    chrono_date.with_timezone(&config.timezone()),
+                    begin.with_timezone(&config.timezone()),
                     if write_time { DateTimePrecision::Second } else { DateTimePrecision::Day },
                 ),
-                None,
+                end.map(|e| {
+                    JDateTime::new(
+                        e.with_timezone(&config.timezone()),
+                        if write_time { DateTimePrecision::Second } else { DateTimePrecision::Day },
+                    )
+                }),
             );
 
-            description.insert_str(0, "  ");
             let entry = journ_core::journal_entry::JournalEntry::new(
                 rust_jf,
                 config.clone(),
@@ -395,6 +403,36 @@ impl Journal {
                 .root()
                 .write_file_recursive(padding.map(PaddingPolicy::Retain).unwrap_or_default())?;
             Ok(())
+        })
+    }
+
+    /// Performs a valuation lookup from `base_unit` @ `quantity` to `quote_unit`.
+    ///
+    /// If no `date` is provided, the now date is used instead.
+    #[pyo3(signature = (quantity, base_unit, quote_unit, date=None))]
+    fn value_amount<'py>(
+        &self,
+        quantity: Decimal,
+        base_unit: &str,
+        quote_unit: &str,
+        date: Option<DateTime<Tz>>,
+    ) -> PyLedgerResult<Decimal> {
+        self.context.with(|| {
+            let mut config = JContext::get().journal().config().clone();
+            let quote_unit = config.get_or_create_unit(quote_unit);
+            let base_unit = config.get_or_create_unit(base_unit);
+
+            let qty = {
+                let valuation = SystemValuer::on_date(
+                    config.clone(),
+                    date.map(|d| JDateTime::new(d, DateTimePrecision::Second))
+                        .unwrap_or(JDateTime::now()),
+                )
+                .value(quote_unit, base_unit.with_quantity(quantity))
+                .map_err(JournError::from)?;
+                valuation.value().quantity()
+            };
+            Ok(qty)
         })
     }
 }

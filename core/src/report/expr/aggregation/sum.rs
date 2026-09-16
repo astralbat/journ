@@ -13,11 +13,11 @@ use crate::report::expr::{ColumnValue, Expr};
 
 #[derive(Debug, PartialEq)]
 pub struct Sum<'h> {
-    expr: Expr<'h>,
+    expr: Expr,
     total: Option<ColumnValue<'h>>,
 }
 impl<'h> Sum<'h> {
-    pub fn new(mut args: Vec<Expr<'h>>) -> JournResult<Self> {
+    pub fn new(mut args: Vec<Expr>) -> JournResult<Self> {
         if args.len() != 1 {
             return Err(err!("Function 'sum' requires exactly one argument"));
         }
@@ -25,8 +25,11 @@ impl<'h> Sum<'h> {
     }
 }
 
-impl<'h> AggState<'h> for Sum<'h> {
-    fn add(&mut self, context: &mut dyn IdentifierContext<'h>) -> JournResult<()> {
+impl<'h, 'a> AggState<'h, 'a> for Sum<'h>
+where
+    'h: 'a,
+{
+    fn add(&mut self, context: &mut dyn IdentifierContext<'h, 'a>) -> JournResult<()> {
         let b = self.expr.eval(context)?;
 
         match self.total.take() {
@@ -39,7 +42,7 @@ impl<'h> AggState<'h> for Sum<'h> {
         Ok(())
     }
 
-    fn merge(&mut self, other: &dyn AggState<'h>) -> JournResult<()> {
+    fn merge(&mut self, other: &dyn AggState<'h, 'a>) -> JournResult<()> {
         let b = other.finalize();
 
         match self.total.take() {

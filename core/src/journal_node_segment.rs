@@ -31,7 +31,7 @@ impl<'h> JournalNodeSegment<'h> {
     pub fn new(node: &'h JournalNode<'h>) -> JournalNodeSegment<'h> {
         JournalNodeSegment {
             // The segment is a branch from the node
-            id: node.id().branch().into(),
+            id: node.id().next_id().into(),
             directives: Mutex::new(Vec::new()),
             node,
             next_segment: Mutex::new(None),

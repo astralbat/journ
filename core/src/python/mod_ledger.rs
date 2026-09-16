@@ -9,21 +9,23 @@ use crate::amount::Amount;
 use crate::configuration::Configuration;
 use crate::datetime::{DateTimePrecision, JDateTime};
 use crate::error::JournResult;
-use crate::ext::StrExt;
+use crate::journal_context::JContext;
 use crate::price::Price;
 use crate::price_db::PriceDatabase;
 use crate::python::conversion::DateTimeWrapper;
 use crate::python::environment::PythonEnvironment;
 use crate::unit::Unit;
+use crate::valuer::{SystemValuer, Valuer};
 use chrono::TimeZone;
 use chrono_tz::Tz;
 use pyo3::basic::CompareOp;
 use pyo3::exceptions::PyException;
 use pyo3::types::{PyAnyMethods, PyDateTime, PyDict, PyDictMethods, PyModule, PyModuleMethods};
 use pyo3::{
-    Bound, IntoPyObject, Py, PyErr, PyObject, PyResult, Python, create_exception, wrap_pyfunction,
+    Bound, IntoPyObject, PyErr, PyObject, PyResult, Python, create_exception, pyfunction,
+    wrap_pyfunction,
 };
-use pyo3::{pyclass, pyfunction, pymethods, pymodule};
+use pyo3::{pyclass, pymethods, pymodule};
 use rust_decimal::Decimal;
 use std::ffi::CString;
 use std::sync::Arc;
@@ -65,6 +67,7 @@ impl PythonLedgerModule {
         PythonLedgerModule::set_price_database("__default", price_db)
     }
 
+    /*
     fn get_price_database<'a, 'py>(
         mod_ledger: &'a Bound<'py, PyModule>,
         unit_code: &str,
@@ -95,7 +98,7 @@ impl PythonLedgerModule {
                 None => None,
             },
         }
-    }
+    }*/
 }
 
 create_exception!(ledger, PriceLookupError, PyException);
@@ -104,11 +107,37 @@ create_exception!(ledger, PriceLookupError, PyException);
 #[pyo3(name = "ledger")]
 pub fn ledger<'py>(py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()> {
     m.add_class::<PyPrice>()?;
-    m.add_function(wrap_pyfunction!(price_db_lookup, m)?)?;
+    m.add_function(wrap_pyfunction!(value, m)?)?;
+    //m.add_function(wrap_pyfunction!(price_db_lookup, m)?)?;
     m.add("PriceLookupError", py.get_type::<PriceLookupError>())?;
     Ok(())
 }
 
+/// Invoke the system valuer to get a valuation for the specified base and quote units at the specified datetime.
+#[pyfunction]
+fn value<'py>(py: Python<'py>, qu: &str, bu: &str, dt: PyObject) -> PyResult<Option<PyPrice>> {
+    let timestamp = dt.call_method(py, "timestamp", (), None)?.extract::<f64>(py)?.round() as i64;
+    let datetime =
+        JDateTime::new(Tz::UTC.timestamp_opt(timestamp, 0).unwrap(), DateTimePrecision::Second);
+    let base_unit = JContext::get().config_mut().get_or_create_unit(bu);
+    let quote_unit = JContext::get().config_mut().get_or_create_unit(qu);
+    let mut valuer = SystemValuer::on_date(JContext::get().config().clone(), datetime);
+    valuer
+        .value(quote_unit, Amount::new(base_unit, Decimal::ONE))
+        .map(|valuation| {
+            PyPrice::new(
+                bu.to_string(),
+                qu.to_string(),
+                DateTimeWrapper(datetime.datetime()),
+                valuation.value().quantity(),
+                valuation.sources().iter().map(|s| s.to_string()).collect(),
+            )
+        })
+        .map(Some)
+        .map_err(|e| PyErr::new::<PriceLookupError, _>(format!("Price lookup failed: {}", e)))
+}
+
+/*
 #[pyfunction]
 #[pyo3(pass_module)]
 fn price_db_lookup<'py>(
@@ -116,7 +145,7 @@ fn price_db_lookup<'py>(
     bc: &str,
     qc: &str,
     dt: PyObject,
-    within_seconds: usize,
+    within_seconds: i64,
 ) -> PyResult<Option<Py<PyPrice>>> {
     match PythonLedgerModule::get_price_database(mod_ledger, bc) {
         Some(price_db) => {
@@ -141,7 +170,7 @@ fn price_db_lookup<'py>(
         }
         None => Ok(None),
     }
-}
+}*/
 
 #[pyclass]
 #[derive(Clone)]
@@ -310,25 +339,16 @@ impl PyPrice {
         _py: Python,
         config: &mut Configuration<'h>,
     ) -> JournResult<Price<'h>> {
-        let allocator = config.allocator();
+        let allocator = JContext::get().allocator();
         let base_unit = config
             .get_unit(self.base_unit())
-            .unwrap_or_else(|| config.merge_unit(&Unit::new(self.base_unit().clone()), allocator));
+            .unwrap_or_else(|| config.merge_unit(&Unit::new(self.base_unit().clone())));
         let quote_unit = config
             .get_unit(self.quote_unit())
-            .unwrap_or_else(|| config.merge_unit(&Unit::new(self.quote_unit().clone()), allocator));
+            .unwrap_or_else(|| config.merge_unit(&Unit::new(self.quote_unit().clone())));
         let chrono_date: DateTimeWrapper = self.datetime;
         let date = JDateTime::new(chrono_date.0, DateTimePrecision::Second);
 
-        /*
-        let price_dict = PyDict::new(py);
-        price_dict.set_item("p", &self.price).unwrap();
-        let price_str: String = py
-            .eval("str(p)", None, Some(price_dict))
-            .map_err(|_| err!("Unable to call str(<price>)"))?
-            .extract()
-            .unwrap();
-        let price_dec = price_str.to_decimal(&config.number_format())?;*/
         let price_dec = self.price;
 
         let sources = match self.into_sources() {

@@ -8,10 +8,10 @@
 use crate::report::table2::cell::{Cell, lease_formatter, return_formatter};
 use crate::report::table2::cell_width::CellWidth;
 use crate::report::table2::fmt::CellFormatter;
-use crate::report::table2::{CellRef, ColumnWidth};
+use crate::report::table2::{BinaryCell, CellRef, ColumnWidth, ShrinkableCell};
 use std::fmt;
 
-#[derive(Copy, Clone, PartialEq, Eq)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Alignment {
     Left,
     Center,
@@ -33,7 +33,7 @@ impl Cell for AlignedCell<'_> {
         line: usize,
         width: Option<ColumnWidth>,
     ) -> fmt::Result {
-        let total_width = width.as_ref().map_or(0, |w| w.width());
+        let total_width = width.as_ref().map_or(0, |w| w.sum());
 
         let mut tmp_formatter = lease_formatter();
         self.inner.print(&mut tmp_formatter, line, width)?;
@@ -60,10 +60,32 @@ impl Cell for AlignedCell<'_> {
     fn width(&self) -> CellWidth {
         self.inner.width()
     }
+
+    fn height(&self) -> usize {
+        self.inner.height()
+    }
+
+    fn as_binary(&self) -> Option<&BinaryCell> {
+        self.inner.as_binary()
+    }
+
+    fn as_shrinkable(&self) -> Option<&dyn ShrinkableCell> {
+        self.inner.as_shrinkable()
+    }
 }
 
 impl<'c> From<AlignedCell<'c>> for CellRef<'c> {
     fn from(c: AlignedCell<'c>) -> Self {
         CellRef::Owned(Box::new(c))
+    }
+}
+
+impl fmt::Debug for AlignedCell<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.alignment {
+            Alignment::Left => write!(f, "AlignLeft({:?})", self.inner),
+            Alignment::Center => write!(f, "AlignCenter({:?})", self.inner),
+            Alignment::Right => write!(f, "AlignRight({:?})", self.inner),
+        }
     }
 }

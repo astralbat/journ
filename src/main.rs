@@ -31,7 +31,7 @@ use journ_core::alloc::HerdAllocator;
 use journ_core::datetime::{DateFormat, DateTimeFormat, TimeFormat};
 use journ_core::error::JournResult;
 use journ_core::journal::Journal;
-use journ_core::journal_context::JournalContext;
+use journ_core::journal_context::JContext;
 use journ_core::module::{MODULES, Module};
 use journ_core::parsing::text_block::TextBlock;
 use journ_core::python::environment::PythonEnvironment;
@@ -61,13 +61,19 @@ struct MainArguments {
     #[arg(
         short = 'f',
         long = "file",
-        required = true,
         value_name = "JOURNAL_FILE",
+        default_value = "./journal.ldg",
         help = "Sets the journal file to parse"
     )]
     file: String,
     #[arg(long = "real", help = "Display/process only real, non-virtual postings")]
     real_postings: bool,
+    #[cfg(debug_assertions)]
+    #[arg(
+        long = "wait",
+        help = "Wait n seconds before executing. Useful for attaching a debugger."
+    )]
+    debug_wait: Option<u64>,
     #[command(subcommand)]
     command: CommandArguments,
 }
@@ -123,15 +129,16 @@ enum CommandArguments {
 
 impl CommandArguments {
     pub fn exec(self, args: &Arguments) -> JournResult<()> {
+        let context = JContext::get();
         let cmd = match self {
             CommandArguments::Print(print_args) => {
-                Ok(Cmd::set(Box::new(print_args.into_exec_cmd(args)?)))
+                Ok(context.set_cmd(context.allocator().alloc(print_args.into_exec_cmd(args)?)))
             }
             CommandArguments::Bal(bal_args) => {
-                Ok(Cmd::set(Box::new(bal_args.into_exec_cmd(args)?)))
+                Ok(context.set_cmd(context.allocator().alloc(bal_args.into_exec_cmd(args)?)))
             }
             CommandArguments::Reg(reg_args) => {
-                Ok(Cmd::set(Box::new(reg_args.into_exec_cmd(args)?)))
+                Ok(context.set_cmd(context.allocator().alloc(reg_args.into_exec_cmd(args)?)))
             }
             CommandArguments::Module(module_args) => {
                 match MODULES
@@ -141,7 +148,9 @@ impl CommandArguments {
                     .filter_map(Module::command)
                     .find(|c| c.name() == module_args[0])
                 {
-                    Some(command) => Ok(Cmd::set(command.create(args, &module_args)?)),
+                    Some(command) => Ok(context.set_cmd(
+                        &**context.allocator().alloc(command.create(args, &module_args)?),
+                    )),
                     None => Err(err!("Unknown command: '{}'", module_args[0])),
                 }
             }
@@ -187,6 +196,12 @@ fn main() {
     MODULES.lock().unwrap().push(journ_cag::module_init::initialize());
 
     let main_args = MainArguments::parse();
+
+    #[cfg(debug_assertions)]
+    if let Some(wait_secs) = main_args.debug_wait {
+        std::thread::sleep(std::time::Duration::from_secs(wait_secs));
+    }
+
     let args = Arguments {
         datetime_cmd: DateTimeFormatCommand::new(
             main_args.datetime_args.date_format.map(DateFormat::into_inner),
@@ -225,7 +240,7 @@ fn main() {
 }
 
 /// Parse the ledger
-fn parse<'h>(file_path: &Path, herd_allocator: &'h HerdAllocator<'h>) -> JournalContext<'h> {
+fn parse<'h>(file_path: &Path, herd_allocator: &'h HerdAllocator<'h>) -> JContext<'h> {
     let now = SystemTime::now();
     let file_name = herd_allocator.alloc(PathBuf::from(file_path.file_name().unwrap()));
     PythonEnvironment::startup();

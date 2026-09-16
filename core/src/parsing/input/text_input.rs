@@ -59,12 +59,7 @@ impl<'h> TextInput<'h> for LocatedSpan<&'h str> {
     }
 }
 
-impl<'h, 'p, 's, 'e> TextInput<'h> for LocatedSpan<&'h str, &'s JournalParseNode<'h, 's>>
-where
-    'h: 'e,
-    'e: 'e,
-    's: 'p,
-{
+impl<'h, 's> TextInput<'h> for LocatedSpan<&'h str, &'s JournalParseNode<'h, 's>> {
     fn text(&self) -> &'h str {
         self.fragment()
     }
@@ -74,10 +69,10 @@ where
     }
 }
 
-impl<'h, 'p, 's> TextInput<'h>
-    for LocatedSpan<&'h str, &'p RefCell<dyn DerefMutAndDebug<'h, 's, Configuration<'h>>>>
+impl<'h, 'p, 's, 't> TextInput<'t>
+    for LocatedSpan<&'t str, &'p RefCell<dyn DerefMutAndDebug<'h, 's, Configuration<'h>>>>
 {
-    fn text(&self) -> &'h str {
+    fn text(&self) -> &'t str {
         self.fragment()
     }
 
@@ -86,8 +81,8 @@ impl<'h, 'p, 's> TextInput<'h>
     }
 }
 
-impl<'h> TextInput<'h> for LocatedSpan<&'h str, RefCell<Configuration<'h>>> {
-    fn text(&self) -> &'h str {
+impl<'h, 't> TextInput<'t> for LocatedSpan<&'t str, RefCell<Configuration<'h>>> {
+    fn text(&self) -> &'t str {
         self.fragment()
     }
 

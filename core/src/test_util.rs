@@ -45,6 +45,7 @@ pub fn config<'h>(text: &'h str) -> Configuration<'h> {
 /// Only to be used for testing.
 macro_rules! amount {
     ($str:expr) => {{
+        use $crate::parse;
         let (_, amount) = parse!($str, $crate::parsing::amount::amount).unwrap();
         amount
     }};
@@ -89,7 +90,10 @@ macro_rules! entry {
 #[macro_export]
 macro_rules! parse_node {
     ($text:expr, $func:expr) => {{
+        use bumpalo_herd::Herd;
+        use $crate::alloc::HerdAllocator;
         use $crate::ext::StrExt;
+        use $crate::journal_context::JContext;
         use $crate::parsing::testing::node_input;
 
         let text = $text;
@@ -101,7 +105,7 @@ macro_rules! parse_node {
             let herd = Box::leak(Box::new(Herd::new()));
             let allocator = herd.get().alloc(HerdAllocator::new(herd));
 
-            JournalContext::with(JournalContext::new(allocator), || {
+            JContext::with(&JContext::new(allocator), || {
                 let jpn = node_input(&outdented, None, s);
                 $func(jpn.input()).finish().map_err($crate::error::JournError::from).map(
                     move |(rem, out)| ((rem.config().clone(), rem.fragment().to_string()), out),

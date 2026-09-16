@@ -8,7 +8,7 @@
 use crate::alloc::HerdAllocator;
 use crate::configuration::Configuration;
 use crate::error::{BlockContextError, JournErrors, JournResult};
-use crate::journal_context::JournalContext;
+use crate::journal_context::JContext;
 use crate::journal_node::{JournalNode, JournalNodeKind};
 use crate::journal_node_segment::JournalNodeSegment;
 use crate::parsing::input::{BlockInput, LocatedInput, TextBlockInput, TextInput};
@@ -257,11 +257,11 @@ where
         if let Some(filename) = node.nearest_filename() {
             t_builder = t_builder.name(filename.to_str().unwrap().to_string());
         }
-        let current_context = JournalContext::current();
+        let current_context = JContext::get();
         let join_handle = t_builder
             .spawn_scoped(self.scope, move || {
                 thread::scope(|scope| {
-                    JournalContext::with(current_context, || {
+                    JContext::with(current_context, || {
                         let jfp_node = JournalParseNode {
                             segments: RefCell::new(vec![branched_to_segment]),
                             input: text_block_input,
@@ -396,7 +396,7 @@ where
     ) -> &'h JournalNode<'h> {
         let child = JournalNode::new(
             Some(self.node),
-            self.node.id().branch().into(),
+            self.node.id().next_id().into(),
             filename,
             kind,
             self.allocator,

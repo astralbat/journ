@@ -24,6 +24,8 @@
 #![feature(slice_concat_trait)]
 #![feature(pattern)]
 #![feature(bool_to_result)]
+#![feature(new_range_api)]
+#![feature(assert_matches)]
 extern crate chrono_tz;
 #[macro_use]
 extern crate rust_decimal_macros;
@@ -56,6 +58,7 @@ pub mod alloc;
 pub mod amounts;
 pub mod datetime;
 pub mod journal_context;
+pub mod journal_entry_query;
 mod journal_node_segment;
 mod journal_obj;
 pub mod journal_util;

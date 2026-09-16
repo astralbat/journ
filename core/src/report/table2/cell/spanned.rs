@@ -6,8 +6,9 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::report::table2::fmt::CellFormatter;
-use crate::report::table2::{Cell, CellRef, CellWidth, ColumnWidth};
+use crate::report::table2::{BinaryCell, Cell, CellRef, CellWidth, ColumnWidth, ShrinkableCell};
 use std::fmt;
+use std::fmt::Formatter;
 
 pub struct SpannedCell<'c> {
     inner: CellRef<'c>,
@@ -32,13 +33,31 @@ impl Cell for SpannedCell<'_> {
         self.inner.width()
     }
 
+    fn height(&self) -> usize {
+        self.inner.height()
+    }
+
     fn hspan(&self) -> usize {
         self.hspan
+    }
+
+    fn as_binary(&self) -> Option<&BinaryCell> {
+        self.inner.as_binary()
+    }
+
+    fn as_shrinkable(&self) -> Option<&dyn ShrinkableCell> {
+        self.inner.as_shrinkable()
     }
 }
 
 impl<'c> From<SpannedCell<'c>> for CellRef<'c> {
     fn from(s: SpannedCell<'c>) -> Self {
         CellRef::Owned(Box::new(s))
+    }
+}
+
+impl fmt::Debug for SpannedCell<'_> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "Spanned({:?})", self.inner)
     }
 }

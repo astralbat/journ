@@ -6,10 +6,12 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::error::{BlockContextError, JournError, JournResult};
-use crate::report::command::arguments::{Arguments, Cmd, Command};
+use crate::journal_context::JContext;
+use crate::report::command::arguments::{Arguments, Command};
 use crate::report::command::chained_result::ChainingResult;
-use crate::report::expr::RowData;
-use std::any::Any;
+use crate::report::expr::{ColumnValue, RowData, TotalContext};
+use crate::report::table2::{Row, RowKind, StyledCell};
+use crate::report::term_style::{Style, Weight};
 use std::io::Write;
 use std::{env, fmt};
 use yaml_rust2::YamlEmitter;
@@ -17,6 +19,7 @@ use yaml_rust2::YamlEmitter;
 pub mod arguments;
 pub mod chained_result;
 pub mod cmd_line;
+pub mod table_format_args;
 
 pub fn print_jerror(mut e: JournError) {
     e.prune_except_last::<BlockContextError>();
@@ -26,7 +29,12 @@ pub fn print_jerror(mut e: JournError) {
 }
 
 pub trait ExecCommand: Command {
-    fn execute<'h>(&'h self, chained: Option<ChainingResult<'h>>) -> JournResult<()>;
+    fn execute<'h, 'a, 'cell>(
+        &self,
+        chained: Option<ChainingResult<'h, 'a, 'cell>>,
+    ) -> JournResult<()>
+    where
+        'h: 'cell;
 
     fn as_chainable(&self) -> Option<&dyn ChainableCommand> {
         None
@@ -41,20 +49,51 @@ pub trait IntoExecCommand {
 }
 
 pub trait ChainableCommand: ExecCommand {
-    fn next_chain(&'static self) -> Option<&'static dyn ChainableCommand>;
+    fn next_chain(&self) -> Option<&dyn ChainableCommand>;
 
-    fn chain_or_print(&self, chaining_res: ChainingResult) -> JournResult<()> {
+    fn chain_or_print(
+        &self,
+        chaining_res: ChainingResult,
+        previously_chained: bool,
+    ) -> JournResult<()> {
         // Move to next chain
-        if let Some(next) = Cmd::advance_chain() {
+        if let Some(next) = JContext::get().advance_chain() {
             return next.execute(Some(chaining_res));
         }
 
         // Otherwise print output
         match chaining_res {
-            ChainingResult::Table(table) => {
+            ChainingResult::Table { mut table, grand_total } => {
+                if let Some(grand_total) = grand_total
+                    && previously_chained
+                {
+                    let mut total_context = TotalContext::new(grand_total.finalize());
+                    let mut row_data = RowData::default();
+                    for col in grand_total.exprs() {
+                        row_data.push_column_value(
+                            col.eval(&mut total_context)
+                                .unwrap_or_else(|_| ColumnValue::StringRef("")),
+                        );
+                    }
+                    let gt_sep1 = table.create_separator_row(
+                        RowKind::GrandTotalSeparator,
+                        ' ',
+                        grand_total.exprs().len(),
+                    );
+                    let gt_sep2 = table.create_grand_total_separator();
+                    table.push_row(gt_sep1);
+                    table.push_row(gt_sep2);
+                    let row = Row::new(row_data.column_values.into_iter().map(|c| {
+                        StyledCell::new(
+                            c.into_cell_ref(true, true),
+                            Style::default().with_weight(Weight::Bold),
+                        )
+                    }));
+                    table.push_row(row);
+                }
                 // Using print! macro can cause panic when piping. Use write and ignore the result.
                 let stdout = std::io::stdout();
-                let _ = write!(&mut stdout.lock(), "{}", table);
+                let _ = writeln!(&mut stdout.lock(), "{}", table);
             }
             ChainingResult::Yaml(root) => {
                 let mut string = String::new();

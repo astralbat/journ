@@ -11,7 +11,7 @@ macro_rules! deal {
     ($config:expr, $date:expr, $str:expr) => {{
         let je = match_map!(entry_dir!($config, $date), journ_core::directive::Directive::Entry(e) => e).unwrap();
         let md = journ_core::metadata::Metadata::new("    ", "CGT-Deal".into(), "  ".into(), Some($str.into()));
-        $crate::cgt_journal_entry::CapitalGainsEntryMetadata::parse_deal(&md, je, 0).unwrap()
+        $crate::cag_journal_entry::CapitalGainsEntryMetadata::parse_deal(&md, je, 0).unwrap()
     }};
 }
 
@@ -20,6 +20,6 @@ macro_rules! adjustment {
     ($config:expr, $date:expr, $str:expr) => {{
         let je = match_map!(entry_dir!($config, $date), journ_core::directive::Directive::Entry(e) => e).unwrap();
         let md = journ_core::metadata::Metadata::new("    ", "CGT-Adjustment".into(), "  ".into(), Some($str.into()));
-        $crate::cgt_journal_entry::CapitalGainsEntryMetadata::parse_adjustment(&md, &je, 0).unwrap()
+        $crate::cag_journal_entry::CapitalGainsEntryMetadata::parse_adjustment(&md, &je, 0).unwrap()
     }};
 }

@@ -64,6 +64,20 @@ where
 
 macro_rules! refcell_impl3 {
     ($ty:ty) => {
+        impl<'h, 's> ConfigInput<'h> for $ty {
+            fn config(&self) -> impl Deref<Target = Configuration<'h>> {
+                self.extra.borrow()
+            }
+            fn config_mut(&self) -> impl DerefMut<Target = Configuration<'h>> {
+                self.extra.borrow_mut()
+            }
+        }
+    };
+}
+refcell_impl3!(LocatedSpan<&'s str, RefCell<Configuration<'h>>>);
+
+macro_rules! refcell_impl4 {
+    ($ty:ty) => {
         impl<'h> ConfigInput<'h> for $ty {
             fn config(&self) -> impl Deref<Target = Configuration<'h>> {
                 self.extra.borrow()
@@ -74,8 +88,7 @@ macro_rules! refcell_impl3 {
         }
     };
 }
-refcell_impl3!(LocatedSpan<&'h str, RefCell<Configuration<'h>>>);
-refcell_impl3!(TextBlockInput<'h, RefCell<Configuration<'h>>>);
+refcell_impl4!(TextBlockInput<'h, RefCell<Configuration<'h>>>);
 
 /*
 macro_rules! refcell_impl4 {

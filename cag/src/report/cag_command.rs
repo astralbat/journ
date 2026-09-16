@@ -5,53 +5,50 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
-use crate::cgt_configuration::{EventFilter, EventPattern, PoolFilter};
 use crate::computer::CapitalGainsComputer;
 use crate::pool_event::PoolEvent;
 use crate::report::cmd_line::CagArguments;
 use crate::report::expr::context::CagContext;
 use clap::Parser;
-use journ_core::account::Account;
 use journ_core::configuration::{AccountFilter, Filter, UnitFilter};
 use journ_core::error::JournResult;
-use journ_core::journal_context::JournalContext;
+use journ_core::journal_context::JContext;
 use journ_core::module::ModuleCommand;
-use journ_core::report::command::arguments::{Arguments, Cmd, Command, DateTimeFormatCommand};
+use journ_core::report::command::arguments::{Arguments, Command, DateTimeFormatCommand};
 use journ_core::report::command::chained_result::ChainingResult;
 use journ_core::report::command::cmd_line::BeginAndEndCommand;
+use journ_core::report::command::table_format_args::TableFormatCommand;
 use journ_core::report::command::{ChainableCommand, ExecCommand, IntoExecCommand};
 use journ_core::report::expr::parser::parse_plan;
-use journ_core::report::expr::{ColumnValue, Expr, RowData};
-use journ_core::report::table2::{Row, StyledCell, Table};
+use journ_core::report::expr::{ColumnValue, Expr, RowData, ScalarExpr};
+use journ_core::report::table2::{PolicyWrappingCell, Row, RowKind, StyledCell, Table, WrapPolicy};
 use journ_core::report::term_style::{Style, Weight};
 use journ_core::unit::Unit;
 use std::collections::HashMap;
-use std::fmt;
-use std::io::Write;
 use std::ops::Deref;
-use yaml_rust2::{Yaml, YamlEmitter, yaml};
+use yaml_rust2::{Yaml, yaml};
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 pub struct CagCommand {
     pub(super) datetime_fmt_cmd: DateTimeFormatCommand,
     pub(super) begin_and_end_cmd: BeginAndEndCommand,
+    pub(super) table_fmt_cmd: TableFormatCommand,
     pub(super) account_filter: Vec<String>,
-    pub(super) event_filter: Vec<EventPattern>,
+    pub(super) filter: Vec<ScalarExpr>,
     pub(super) unit_filter: Vec<String>,
-    pub(super) pool_filter: Vec<String>,
     pub(super) head: Option<usize>,
     pub(super) tail: Option<usize>,
     pub(super) group_by: Option<String>,
     pub(super) group_deals_by_date: bool,
     pub(super) order_by_spec: Option<String>,
-    pub(super) order_ascending: bool,
+    pub(super) order_descending: bool,
     pub(super) output_yaml: bool,
     pub(super) yaml_map_key: Option<String>,
     pub(super) title: Option<String>,
     pub(super) no_header: bool,
-    pub(super) show_total: bool,
-    pub(super) brief_total: bool,
-    pub(super) column_spec: String,
+    pub(super) no_total: bool,
+    pub(super) short_total: bool,
+    pub(super) column_spec: Option<String>,
     pub(super) where_conditions: Option<String>,
     pub(super) chain: Option<Box<CagCommand>>,
 }
@@ -61,7 +58,7 @@ impl CagCommand {
         &self.begin_and_end_cmd
     }
 
-    pub fn account_filter(&self) -> impl for<'h> Filter<Account<'h>> + '_ {
+    pub fn account_filter(&self) -> AccountFilter {
         AccountFilter::new(self.account_filter.iter())
     }
 
@@ -69,60 +66,78 @@ impl CagCommand {
         UnitFilter::new(self.unit_filter.iter())
     }
 
-    pub fn event_filter(&self) -> EventFilter<'_> {
-        EventFilter(&self.event_filter)
-    }
-
-    pub fn pool_filter(&self) -> PoolFilter {
-        PoolFilter(self.pool_filter.iter().map(|s| s.as_str().into()).collect())
+    pub fn column_spec(&self) -> &str {
+        self.column_spec.as_deref().unwrap_or(
+            "DealDate.Start.Date as Date, Sum(PooledAmount) as Amount, Sum(netProceeds) as \"Net Proceeds\", Sum(Expenses) as \"Expenses\", sum(actualCost) as \"Actual Cost\", sum(match.gain) as Gain/-Loss")
     }
 
     pub fn group_deals_by_date(&self) -> bool {
         self.group_deals_by_date
     }
 
-    pub fn create_table(&self) -> Table<'_> {
-        Table::default()
+    pub fn create_table<'cell>(&self) -> Table<'cell> {
+        Table::from(&self.table_fmt_cmd)
     }
 
-    pub fn append_table<'a>(
+    pub fn append_table<'a, 'h>(
         &'a self,
         mut table: Table<'a>,
         column_expressions: &[Expr],
-        mut rows: Vec<RowData<'a>>,
-    ) -> Table<'a> {
-        let chain_pos = Cmd::chain_position();
+        data_rows: Vec<RowData<'h>>,
+        total_row: Option<RowData<'h>>,
+    ) -> Table<'a>
+    where
+        'h: 'a,
+    {
+        let chain_pos = JContext::get().chain_position();
+        let mut rows = vec![];
 
         if chain_pos > 0 {
-            table.append_chain_separator();
+            rows.push(table.create_chain_separator());
         }
         if let Some(title) = &self.title {
-            table.append_title_row(title, rows.iter().map(|r| r.column_count()).max().unwrap_or(1));
+            let (title, title_sep) = table.create_title_row(
+                title,
+                data_rows.iter().map(|r| r.column_count()).max().unwrap_or(1),
+            );
+            rows.push(title);
+            rows.push(title_sep);
         }
         // Heading Row
         if !self.no_header {
             let heading_style = Style::default().with_weight(Weight::Bold);
             let headings = column_expressions
                 .iter()
-                .map(|col| StyledCell::new(col.to_string(), heading_style))
+                .map(|col| {
+                    StyledCell::new(
+                        PolicyWrappingCell::new(col.to_string(), WrapPolicy::Word),
+                        heading_style,
+                    )
+                })
                 .collect::<Vec<_>>();
-            table.append_heading_row(headings);
+            rows.push(table.create_heading_row(headings));
         }
 
-        let mut total_row = None;
-        if self.show_total {
-            total_row = Some(rows.remove(rows.len() - 1));
-        }
-        for row in rows {
-            table.push_row(Row::new(
+        for row in data_rows {
+            rows.push(Row::new(
                 row.column_values.into_iter().map(|v| v.into_cell_ref(false, true)),
             ));
         }
         if let Some(total) = total_row {
-            table.push_separator_row('-', column_expressions.len());
-            table.push_row(Row::new(
-                total.column_values.into_iter().map(|v| v.into_cell_ref(false, !self.brief_total)),
+            rows.push(table.create_separator_row(
+                RowKind::TotalSeparator,
+                table.total_separator(),
+                column_expressions.len(),
             ));
+            let mut total_row = Row::new(
+                total.column_values.into_iter().map(|v| v.into_cell_ref(false, !self.short_total)),
+            );
+            total_row.set_kind(RowKind::Total);
+            rows.push(total_row);
+        }
+
+        for row in rows {
+            table.push_row(row);
         }
         table
     }
@@ -139,13 +154,19 @@ impl CagCommand {
         Yaml::Hash(gains_map)
     }
 
-    pub fn append_yaml(&self, yaml: Yaml, column_expressions: &[Expr], rows: Vec<RowData>) -> Yaml {
+    pub fn append_yaml<'h>(
+        &self,
+        yaml: Yaml,
+        column_expressions: &[Expr],
+        rows: Vec<RowData<'h>>,
+        total: Option<RowData<'h>>,
+    ) -> Yaml {
         let root_key = Yaml::String("capital_gains".to_string());
 
         let mut rows_list = yaml::Array::new();
         let mut rows_map = yaml::Hash::new();
         let mut is_using_map_keys = false;
-        for row_data in rows {
+        for row_data in rows.into_iter().chain(total) {
             let mut row_map = yaml::Hash::new();
             let mut additional = row_data.additional;
 
@@ -180,7 +201,7 @@ impl CagCommand {
             .map(|title| Yaml::String(title.clone()))
             .unwrap_or(root_key.clone());
 
-        let chain_pos = Cmd::chain_position();
+        let chain_pos = JContext::get().chain_position();
         if chain_pos == 0 {
             // If this is the first command, we just set it at the root key.
             *yaml_hash.get_mut(&key).unwrap() = data_yaml;
@@ -276,6 +297,60 @@ impl CagCommand {
             }
         }
     }
+
+    pub fn merge_from(&self, other: &Self) -> Self {
+        Self {
+            title: self.title.clone().or(other.title.clone()),
+            datetime_fmt_cmd: self.datetime_fmt_cmd.merge_from(&other.datetime_fmt_cmd),
+            begin_and_end_cmd: self.begin_and_end_cmd.merge_from(&other.begin_and_end_cmd),
+            table_fmt_cmd: self.table_fmt_cmd.merge_from(&other.table_fmt_cmd),
+            account_filter: if !self.account_filter.is_empty() {
+                self.account_filter.clone()
+            } else {
+                other.account_filter.clone()
+            },
+            unit_filter: if !self.unit_filter.is_empty() {
+                self.unit_filter.clone()
+            } else {
+                other.unit_filter.clone()
+            },
+            filter: if !self.filter.is_empty() {
+                self.filter.clone()
+            } else {
+                other.filter.clone()
+            },
+            group_by: match &self.group_by {
+                Some(group_by) if !group_by.is_empty() => Some(group_by.clone()),
+                Some(_) => None,
+                None => other.group_by.clone(),
+            },
+            head: self.head.or(other.head),
+            tail: self.tail.or(other.tail),
+            group_deals_by_date: if self.group_deals_by_date {
+                !other.group_deals_by_date
+            } else {
+                other.group_deals_by_date
+            },
+            order_descending: if self.order_descending {
+                !other.order_descending
+            } else {
+                other.order_descending
+            },
+            no_header: if self.no_header { !other.no_header } else { other.no_header },
+            no_total: if self.no_total { !other.no_total } else { other.no_total },
+            short_total: if self.short_total { !other.short_total } else { other.short_total },
+            yaml_map_key: match &self.yaml_map_key {
+                Some(yaml_map_key) if !yaml_map_key.is_empty() => Some(yaml_map_key.clone()),
+                Some(_) => None,
+                None => other.yaml_map_key.clone(),
+            },
+            column_spec: self.column_spec.clone().or(other.column_spec.clone()),
+            where_conditions: self.where_conditions.clone().or(other.where_conditions.clone()),
+            order_by_spec: self.order_by_spec.clone().or(other.order_by_spec.clone()),
+            output_yaml: other.output_yaml,
+            chain: self.chain.clone(),
+        }
+    }
 }
 
 impl Command for CagCommand {
@@ -306,56 +381,70 @@ impl ModuleCommand for CagCommand {
 }
 
 impl ChainableCommand for CagCommand {
-    fn next_chain(&'static self) -> Option<&'static dyn ChainableCommand> {
+    fn next_chain(&self) -> Option<&dyn ChainableCommand> {
         Some(self.chain.as_ref()?.deref())
     }
 }
 
 impl ExecCommand for CagCommand {
-    fn execute<'h>(&'h self, chained: Option<ChainingResult<'h>>) -> JournResult<()> {
-        let mut computer = CapitalGainsComputer::new();
-        let capital_gains = computer.compute_gains(&JournalContext::current().journal())?;
+    fn execute<'h, 'a, 'cell>(
+        &self,
+        chained: Option<ChainingResult<'h, 'a, 'cell>>,
+    ) -> JournResult<()>
+    where
+        'h: 'cell,
+    {
+        let mut computer = CapitalGainsComputer::default();
+        let capital_gains = computer.compute_gains(&JContext::get().journal())?;
 
         let mut additional = HashMap::new();
         if let Some(yaml_map_key) = &self.yaml_map_key {
             additional.insert("yaml_map_key", yaml_map_key.as_str());
         }
         let plan = parse_plan(
-            &self.column_spec,
-            self.where_conditions.as_ref().map(String::as_str),
-            self.show_total,
+            self.column_spec(),
+            self.where_conditions.as_deref(),
+            !self.no_total,
             self.group_by.as_deref(),
             additional,
-            self.order_by_spec.as_ref().map(String::as_str),
-            self.order_ascending,
+            self.order_by_spec.as_deref(),
+            !self.order_descending,
+            None,
+            None,
         )?;
-        let event_filter = self.event_filter();
-        let pool_filter = self.pool_filter();
         let balance_update_fn = |prev: &[RowData<'h>],
                                  row: &mut RowData<'h>,
                                  event: &PoolEvent<'h>| {
-            let bal_diff = event.balance_after() - event.balance_before();
+            let bal_diff = (event.balance_after().as_valued_amount()
+                - event.balance_before().as_valued_amount())
+            .unwrap();
 
             for prev_row in prev.iter().rev() {
                 let bal = prev_row.running_balance("balance").unwrap().as_valued_amount().unwrap();
                 if bal.unit() == bal_diff.amount().unit() {
-                    let new_bal = (bal + bal_diff.valued_amount()).unwrap();
+                    let new_bal = (bal + &bal_diff).unwrap();
                     row.set_running_balance("balance", ColumnValue::ValuedAmount(new_bal));
                     return;
                 }
             }
-            row.set_running_balance(
-                "balance",
-                ColumnValue::ValuedAmount(bal_diff.into_valued_amount()),
-            );
+            row.set_running_balance("balance", ColumnValue::ValuedAmount(bal_diff));
         };
-        let data = plan.execute(
-            capital_gains
-                .events()
-                .iter()
-                .filter(|e| event_filter.is_included(e))
-                .filter(|e| pool_filter.is_included(e)),
-            |e| CagContext::new(e),
+        let (data, total_row) = plan.execute(
+            capital_gains.events().iter().filter_map(move |e| {
+                let mut context = CagContext::new(e);
+                for filter_expr in &self.filter {
+                    match filter_expr.eval(&mut context) {
+                        Ok(val) => match val.as_lenient_bool() {
+                            false => return None,
+                            true => continue,
+                        },
+                        Err(e) => return Some(Err(e)),
+                    }
+                }
+                Some(Ok(e))
+            }),
+            None,
+            CagContext::new,
             Some(balance_update_fn),
         )?;
 
@@ -365,7 +454,7 @@ impl ExecCommand for CagCommand {
             data.into_iter()
                 .enumerate()
                 .filter(|(i, _)| {
-                    return if let Some(head) = self.head
+                    if let Some(head) = self.head
                         && i < &head
                     {
                         true
@@ -375,7 +464,7 @@ impl ExecCommand for CagCommand {
                         true
                     } else {
                         false
-                    };
+                    }
                 })
                 .map(|e| e.1)
                 .collect()
@@ -383,48 +472,35 @@ impl ExecCommand for CagCommand {
             data
         };
 
+        let previously_chained = chained.is_some();
         let chaining_res = if chained
             .as_ref()
-            .is_some_and(|c| matches!(c, ChainingResult::Table(_)))
+            .is_some_and(|c| matches!(c, ChainingResult::Table { .. }))
             || (chained.as_ref().is_none() && !self.output_yaml)
         {
-            let table =
-                chained.and_then(ChainingResult::into_table).unwrap_or_else(|| self.create_table());
-            ChainingResult::Table(self.append_table(table, plan.column_spec().exprs(), data))
+            let (table, grand_total) = chained
+                .and_then(ChainingResult::into_table)
+                .unwrap_or_else(|| (self.create_table(), None));
+            ChainingResult::Table {
+                table: self.append_table(table, plan.column_spec().exprs(), data, total_row),
+                grand_total,
+            }
         } else {
             let yaml =
                 chained.and_then(ChainingResult::into_yaml).unwrap_or_else(|| self.create_yaml());
 
-            ChainingResult::Yaml(self.append_yaml(yaml, plan.column_spec().exprs(), data))
+            ChainingResult::Yaml(self.append_yaml(
+                yaml,
+                plan.column_spec().exprs(),
+                data,
+                total_row,
+            ))
         };
 
-        self.chain_or_print(chaining_res);
-
-        /*
-        // Move to next chain
-        if let Some(next) = Cmd::advance_chain() {
-            return next.execute(Some(chaining_res));
-        }
-
-        // Otherwise print output
-        match chaining_res {
-            ChainingResult::Table(table) => {
-                // Using print! macro can cause panic when piping. Use write and ignore the result.
-                let stdout = std::io::stdout();
-                let _ = write!(&mut stdout.lock(), "{}", table);
-            }
-            ChainingResult::Yaml(root) => {
-                let mut string = String::new();
-                let mut emitter = YamlEmitter::new(&mut string);
-                emitter.dump(&root).map_err(|_| fmt::Error).unwrap();
-                // Using print! macro can cause panic when piping. Use write and ignore the result.
-                let stdout = std::io::stdout();
-                let _ = write!(&mut stdout.lock(), "{}", string);
-            }
-        }*/
+        self.chain_or_print(chaining_res, previously_chained)?;
 
         // Always write the price databases.
-        JournalContext::current()
+        JContext::get()
             .journal()
             .config()
             .price_databases()

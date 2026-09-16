@@ -8,15 +8,18 @@
 use crate::datetime::{DateFormatMode, DateTimeFormat, JDate, JDateTime};
 use crate::err;
 use crate::error::JournResult;
-use crate::report::command::arguments::Cmd;
+use crate::journal_context::JContext;
 use crate::report::expr::column_value::ColumnValue;
 use crate::report::expr::{Expr, IdentifierContext};
 
 /// Parse a date from a string, returning a Date value.
-pub fn datevalue<'h>(
-    args: &[Expr<'h>],
-    context: &mut dyn IdentifierContext<'h>,
-) -> JournResult<ColumnValue<'h>> {
+pub fn datevalue<'h, 'a>(
+    args: &[Expr],
+    context: &mut dyn IdentifierContext<'h, 'a>,
+) -> JournResult<ColumnValue<'h>>
+where
+    'h: 'a,
+{
     if args.is_empty() || args.len() > 4 {
         return Err(err!(
             "Function 'datevalue(text [,datetime_format [,time_zone]])' requires one, two or three arguments"
@@ -49,16 +52,16 @@ pub fn datevalue<'h>(
                     )
                 })
         })
-        .unwrap_or_else(|| Ok(Cmd::get().datetime_fmt_cmd().date_format_or_default()))?;
+        .unwrap_or_else(|| Ok(JContext::get().cmd().datetime_fmt_cmd().date_format_or_default()))?;
     let tz = time_zone_arg
         .map(|v| {
             v.as_str()
                 .ok_or_else(|| err!("Function 'datevalue' fourth argument must be a valid time zone string. E.g. 'UTC', 'America/New_York'"))
                 .and_then(|s| s.parse().map_err(|e| err!("Function 'datevalue' could not parse time zone: {}", e)))
         })
-        .unwrap_or_else(|| Ok(Cmd::get().datetime_fmt_cmd().timezone_or_default()))?;
+        .unwrap_or_else(|| Ok(JContext::get().cmd().datetime_fmt_cmd().timezone_or_default()))?;
 
-    if args.len() < 2 {
+    if args.len() <= 2 {
         JDate::parse(df)(text)
             .map(|(_, d)| d)
             .map_err(|e| {

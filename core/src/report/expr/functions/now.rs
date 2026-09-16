@@ -11,8 +11,8 @@ use crate::error::JournResult;
 use crate::report::expr::{ColumnValue, Expr, IdentifierContext};
 
 pub fn now<'h>(
-    args: &[Expr<'h>],
-    _context: &mut dyn IdentifierContext<'h>,
+    args: &[Expr],
+    _context: &mut dyn IdentifierContext<'h, '_>,
 ) -> JournResult<ColumnValue<'h>> {
     if args.len() != 0 {
         return Err(err!("Function 'now' does not take arguments"));

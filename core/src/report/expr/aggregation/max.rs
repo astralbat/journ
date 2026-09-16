@@ -14,11 +14,11 @@ use std::mem;
 /// If any value should be `Undefined`, then `Max()` will also be `Undefined`.
 #[derive(Debug, PartialEq)]
 pub struct Max<'h> {
-    arg: Expr<'h>,
+    arg: Expr,
     max: Option<ColumnValue<'h>>,
 }
 impl<'h> Max<'h> {
-    pub fn new(args: Vec<Expr<'h>>) -> JournResult<Self> {
+    pub fn new(args: Vec<Expr>) -> JournResult<Self> {
         if args.len() != 1 {
             return Err(err!("Function 'max' requires one argument"));
         }
@@ -26,17 +26,20 @@ impl<'h> Max<'h> {
         Ok(Self { arg: args.into_iter().next().unwrap(), max: None })
     }
 }
-impl<'h> AggState<'h> for Max<'h> {
-    fn add(&mut self, context: &mut dyn IdentifierContext<'h>) -> JournResult<()> {
+impl<'h, 'a> AggState<'h, 'a> for Max<'h>
+where
+    'h: 'a,
+{
+    fn add(&mut self, context: &mut dyn IdentifierContext<'h, 'a>) -> JournResult<()> {
         let val = self.arg.eval(context)?;
 
         if self.max.is_none() {
             self.max = Some(val);
-        } else if let Some(amnt) = val.as_amount()
-            && let Some(self_amnt) = self.max.as_ref().and_then(|m| m.as_amount())
+        } else if let Some((amnt, p_1)) = val.as_amount()
+            && let Some((self_amnt, p_2)) = self.max.as_ref().and_then(|m| m.as_amount())
             && amnt.unit() == self_amnt.unit()
         {
-            self.max = Some(ColumnValue::Amount(amnt.max(self_amnt)));
+            self.max = Some(ColumnValue::Amount(amnt.max(self_amnt), p_1 || p_2));
         } else if let Some(max) = self.max.as_ref()
             && mem::discriminant(max) == mem::discriminant(&val)
         {

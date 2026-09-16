@@ -9,6 +9,7 @@ use crate::amount::{Amount, Quantity};
 use crate::err;
 use crate::error::JournError;
 use crate::error::parsing::promote;
+use crate::ext::StrExt;
 use crate::metadata::Metadata;
 use crate::parsing;
 use crate::parsing::parse;
@@ -81,6 +82,8 @@ impl fmt::Display for RoundingStrategy {
     }
 }
 
+pub const DEFAULT_PRICE_LOOKUP_WITHIN_SECS: usize = 60 * 60; // 1 hour
+
 /// Units describe a `Quantity` which together form an `Amount`. E.g. '$','€' etc.
 ///
 /// # Thread Safety
@@ -96,7 +99,10 @@ pub struct Unit<'h> {
     aliases: Vec<String>,
     format: Option<UnitFormat>,
     conversion_expression: Option<Lambda>,
+    /// The database to use when looking up quotes for this unit. If not set, the default session database will be used.
     prices: Option<Arc<PriceDatabase<'h>>>,
+    /// When looking up a price in a price database, the closest price must be within this many seconds to be considered a hit.
+    pricedb_lookup_within_secs: Option<usize>,
     rounding_strategy: RoundingStrategy,
     /// When valuing an entry in terms of a particular unit, if there are two or more other
     /// currencies used in postings, the entry may only need to value one of them to determine the
@@ -118,6 +124,7 @@ impl<'h> Unit<'h> {
             format: None,
             conversion_expression: None,
             prices: None,
+            pricedb_lookup_within_secs: None,
             rounding_strategy: RoundingStrategy::default(),
             conversion_ranking: None,
             metadata: vec![],
@@ -134,6 +141,7 @@ impl<'h> Unit<'h> {
             format: None,
             conversion_expression: None,
             prices: None,
+            pricedb_lookup_within_secs: None,
             rounding_strategy: RoundingStrategy::HalfUp,
             conversion_ranking: None,
             metadata: vec![],
@@ -144,6 +152,7 @@ impl<'h> Unit<'h> {
         self.code.is_empty()
     }
 
+    /// Gets the primary code, i.e. the first alias.
     pub fn primary_code(&self) -> &str {
         self.aliases().next().unwrap_or("")
     }
@@ -205,6 +214,17 @@ impl<'h> Unit<'h> {
         self.rounding_strategy = rounding_strategy;
     }
 
+    pub fn epsilon(&self) -> Decimal {
+        let unit_dp = self.format().number_format.max_scale().unwrap_or(0) as u32;
+        match self.rounding_strategy {
+            RoundingStrategy::HalfUp | RoundingStrategy::HalfDown | RoundingStrategy::HalfEven => {
+                Decimal::new(5, unit_dp + 1)
+            }
+            RoundingStrategy::AwayFromZero => Decimal::new(1, unit_dp),
+            RoundingStrategy::ToZero => Decimal::new(0, unit_dp),
+        }
+    }
+
     /// Gets whether this unit is a recognised fiat unit
     pub fn is_fiat(&self) -> bool {
         self.code() == "USD" || self.code() == "GBP" || self.code() == "EUR"
@@ -221,12 +241,6 @@ impl<'h> Unit<'h> {
     pub fn has_format(&self) -> bool {
         self.format.is_some()
     }
-
-    /*
-    /// Gets whether the code will appear on the left of the quantity when this unit is formatted.
-    pub fn code_on_left(&self) -> bool {
-        self.format().code_on_left(Some(&self.code))
-    }*/
 
     pub fn number_format(&self) -> &NumberFormat {
         &self.format().number_format
@@ -259,6 +273,14 @@ impl<'h> Unit<'h> {
         self.prices = prices
     }
 
+    pub fn pricedb_lookup_within_secs(&self) -> Option<usize> {
+        self.pricedb_lookup_within_secs
+    }
+
+    pub fn set_pricedb_lookup_within_secs(&mut self, secs: usize) {
+        self.pricedb_lookup_within_secs = Some(secs)
+    }
+
     pub fn metadata(&self) -> &Vec<Metadata<'h>> {
         &self.metadata
     }
@@ -275,36 +297,15 @@ impl<'h> Unit<'h> {
 
 impl<'t> Hash for Unit<'t> {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.primary_code().hash(state)
+        self.primary_code().to_ascii_lowercase().hash(state)
     }
 }
 
 impl<'t> PartialEq for Unit<'t> {
-    /// Two units are always equal if they have the same code, since codes are expected to be unique.
+    /// Two units are always equal if they have the same code (ignoring case), since codes are expected to be unique.
     /// If the units do not share the same code, then perhaps they share the same name.
     fn eq(&self, other: &Self) -> bool {
-        self.primary_code() == other.primary_code()
-        /*
-        if self.code == other.code {
-            return true;
-        }
-
-        // Next, look for an alias in common which is more involved than naively comparing the code to
-        // all the aliases of `other`. This is required because we can't guarantee that the
-        // aliases are complete for a particular unit; more may have been subsequently added.
-        // E.g.
-        // unit €, EE
-        //   ...
-        // unit EUR, EE
-        //   ...
-        // Here, we say that € == EUR, because they have an alias in common: EE.
-        for alias in iter::once(self.code.as_str()).chain(self.aliases.iter().copied()) {
-            if other.aliases.contains(&alias) {
-                return true;
-            }
-        }
-
-        false*/
+        self.primary_code().eq_ignore_ascii_case(other.primary_code())
     }
 }
 
@@ -321,7 +322,7 @@ impl<'h> Ord for Unit<'h> {
         if self == other {
             return cmp::Ordering::Equal;
         }
-        self.code.cmp(&other.code)
+        self.code.cmp_ignore_case_ascii(&other.code)
     }
 }
 
@@ -720,15 +721,6 @@ impl fmt::Display for NumberFormat {
     }
 }
 
-/*
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum NegativePosition {
-    /// E.g. $-10
-    QuantityAdjacent,
-    /// E.g. -$10
-    CodeAdjacent,
-}*/
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CodePosition {
     /// Left of the quantity. E.g. $10
@@ -853,6 +845,15 @@ impl UnitFormat {
             CodeFormat::Literal(s) => Some(&**s),
             CodeFormat::Never => None,
             CodeFormat::Unit => Some(unit_code),
+        }
+    }
+
+    pub fn as_precise(&self) -> Self {
+        UnitFormat {
+            number_format: self.number_format.with_full_precision(),
+            code: self.code.clone(),
+            code_position: self.code_position.clone(),
+            negative_style: self.negative_style,
         }
     }
 

@@ -10,7 +10,6 @@ use crate::configuration::Configuration;
 use crate::datetime::JDateTime;
 use crate::err;
 use crate::journal_entry::JournalEntry;
-use crate::price_db::PriceDatabase;
 use crate::unit::Unit;
 use crate::valuer::{
     EntryValuer, LambdaValuer, LinearSystemValuer, Valuation, ValuationError, ValuationResult,
@@ -18,8 +17,7 @@ use crate::valuer::{
 };
 use itertools::Itertools;
 use std::cell::OnceCell;
-use std::iter;
-use std::sync::Arc;
+use std::{iter, mem};
 
 /// The primary means of valuation.
 ///
@@ -73,6 +71,7 @@ impl<'h> SystemValuerInner<'h, '_> {
         }
     }
 }
+
 impl<'h, 'e> From<&'e JournalEntry<'h>> for SystemValuerInner<'h, 'e> {
     /// Creates the `SystemValuer` from the entry.
     ///
@@ -92,15 +91,15 @@ impl<'h> Valuer<'h> for SystemValuerInner<'h, '_> {
     fn value(&mut self, quote_unit: &'h Unit<'h>, amount: Amount<'h>) -> ValuationResult<'h> {
         // We don't need to value anything
         if amount.unit() == quote_unit {
-            return Ok(Valuation::basis(amount));
+            return Ok(Valuation::unary(amount));
         } else if amount.is_zero() {
-            return Ok(Valuation::from_amount(quote_unit.with_quantity(0), amount));
+            return Ok(Valuation::binary(quote_unit.with_quantity(0), amount));
         }
 
         // Try the entry valuer first.
         match self.entry_valuer.as_mut().map(|ev| ev.value(quote_unit, amount)) {
             Some(Ok(entry_valuation)) => {
-                info!("{} Valued via entry: {} = {:?}", self.datetime, amount, entry_valuation);
+                debug!("{} Valued via entry: {:?}", self.datetime, entry_valuation);
                 return Ok(entry_valuation);
             }
             Some(Err(ValuationError::EvalFailure(e))) => {
@@ -112,10 +111,7 @@ impl<'h> Valuer<'h> for SystemValuerInner<'h, '_> {
         // Next, the linear system valuer.
         match self.linear_system_valuer.value(quote_unit, amount) {
             Ok(linear_valuation) => {
-                info!(
-                    "{} Valued via derivation: {} = {:?}",
-                    self.datetime, amount, linear_valuation
-                );
+                info!("{} Valued via derivation: {:?}", self.datetime, linear_valuation);
                 return Ok(linear_valuation);
             }
             Err(ValuationError::EvalFailure(e)) => {
@@ -124,9 +120,10 @@ impl<'h> Valuer<'h> for SystemValuerInner<'h, '_> {
             _ => {}
         }
 
+        // Next, the lambda valuer. This is the last resort, as it is the most expensive.
         // We can't work out the value from the entry. So we try via other units on the entry
         // that are higher ranked, iff we can value `amount` in terms of the higher ranked amount.
-        let mut via_opt: Option<_> = self
+        let via_opt: Option<_> = self
             .entry_valuer
             .as_ref()
             .map(|ev| {
@@ -151,34 +148,101 @@ impl<'h> Valuer<'h> for SystemValuerInner<'h, '_> {
             })
             .unwrap_or_default();
 
+        let mut lambda_valuer = LambdaValuer::new(self.config.clone(), self.datetime);
+        lambda_valuer.set_linear_system_valuer(mem::take(&mut self.linear_system_valuer));
+        let res = match via_opt {
+            Some(via) if via.unit() != quote_unit && via.unit() != amount.unit() => {
+                lambda_valuer.value_via(quote_unit, amount, via)
+            }
+            _ => lambda_valuer.value(quote_unit, amount),
+        };
+        self.linear_system_valuer = lambda_valuer.into_linear_system_valuer().unwrap();
+        if let Ok(val) = &res {
+            info!("{} Valued via value(): {:?}", self.datetime, val);
+        }
+        res
+
+        /*
+        let mut val_chain = via_opt;
+
+        //while let Some(via) = val_chain.take() {
+        let amount_to_val = val_chain.as_ref().map(Valuation::value).unwrap_or(amount);
+            match LambdaValuer::new(self.config.clone(), self.datetime).value(quote_unit, amount_to_val) {
+                Ok(mut lambda_val) => {
+                    //lambda_val.set_via(via);
+                    //val_chain = Some(lambda_val);
+                    if !lambda_val
+                        .values()
+                        .any(|v| v.unit() == quote_unit || v.unit() == amount_to_val.unit())
+                    {
+                        return Err(ValuationError::Undetermined(err!(
+                            "No valuation path from to {} via {}",
+                            quote_unit,
+                            via.values().map(|v| v.unit()).join(" -> ")
+                        )));
+                    }
+
+                    let lambda_val_amount = lambda_val.via_values().next().unwrap();
+                    if !self.linear_system_valuer.has_value((*lambda_val, lambda_val_amount)) {
+                        self.linear_system_valuer.add_value((*lambda_val, lambda_val_amount));
+                    }
+                    match self.linear_system_valuer.value(quote_unit, amount) {
+                        Ok(mut lsv) => {
+                            lsv.set_via(via);
+                            val_chain = Some(lsv);
+                            break;
+                        }
+                        Err(_) => {
+                            if via.via().any(|v| v.unit() == lambda_val.unit()) {
+                                return Err(ValuationError::Undetermined(err!(
+                                    "Infinite valuation loop: already valued via {}",
+                                    via.unit()
+                                )));
+                            }
+                            //lambda_val.set_via(via);
+                            val_chain = Some(lambda_val);
+                        }
+                    }
+                }
+                // No price available, so try direct
+                Err(ValuationError::Undetermined(_)) => continue,
+                // A more serious error, so break out
+                Err(ValuationError::EvalFailure(e)) => {
+                    return Err(ValuationError::EvalFailure(e));
+                }
+            }
+        //}
+        let valuation = val_chain.unwrap();
+        info!(
+            "{} Valued with valuation function {} via {}",
+            self.datetime,
+            quote_unit,
+            valuation.values().map(|v| v.unit()).join(" -> ")
+        );
+        Ok(valuation)
+
+         */
+
+        /*
         loop {
             match via_opt.take() {
                 Some(via) => {
+                    let qu =
+                        if !via.contains_unit(quote_unit) { quote_unit } else { amount.unit() };
                     info!(
                         "{} Attempting to value {} via {}",
                         self.datetime,
-                        amount.unit(),
-                        via.unit()
+                        qu,
+                        via.values().map(|v| v.unit()).join(" -> ")
                     );
-                    let price_db = via
-                        .unit()
-                        .prices()
-                        .map(Arc::clone)
-                        .unwrap_or_else(|| Arc::new(PriceDatabase::default()));
-                    match via.unit().conversion_expression() {
-                        Some(expr) => {
-                            let mut lambda_valuer = LambdaValuer::new(
-                                self.config.clone(),
-                                &price_db,
-                                self.datetime,
-                                expr,
-                            );
-                            match lambda_valuer.value(quote_unit, *via) {
-                                Ok(mut lambda_val) if lambda_val.unit() == quote_unit => {
+                    match LambdaValuer::new(self.config.clone(), self.datetime).value(qu, *via) {
+                        Ok(mut lambda_val) => {
+                            match Valuer::value(&mut lambda_val, quote_unit, amount) {
+                                Ok(mut lambda_val) => {
                                     lambda_val.set_via(via);
                                     break Ok(lambda_val);
                                 }
-                                Ok(mut lambda_val) => {
+                                Err(_) => {
                                     if !self.linear_system_valuer.has_value((*via, *lambda_val)) {
                                         self.linear_system_valuer.add_value((*via, *lambda_val));
                                     }
@@ -189,9 +253,9 @@ impl<'h> Valuer<'h> for SystemValuerInner<'h, '_> {
                                             break Ok(lsv);
                                         }
                                         Err(_) => {
-                                            if lambda_val.via().any(|v| v.unit() == via.unit()) {
+                                            if via.via().any(|v| v.unit() == lambda_val.unit()) {
                                                 return Err(ValuationError::Undetermined(err!(
-                                                    "Already valued via {}",
+                                                    "Infinite valuation loop: already valued via {}",
                                                     via.unit()
                                                 )));
                                             }
@@ -200,163 +264,35 @@ impl<'h> Valuer<'h> for SystemValuerInner<'h, '_> {
                                         }
                                     }
                                 }
-                                Err(e) => break Err(e),
                             }
                         }
-                        // No price expression, so try direct
-                        None => continue,
+                        // No price available, so try direct
+                        Err(ValuationError::Undetermined(_)) => continue,
+                        // A more serious error, so break out
+                        Err(ValuationError::EvalFailure(e)) => {
+                            break Err(ValuationError::EvalFailure(e));
+                        }
                     }
                 }
+                // via is None
                 None => {
-                    let price_db = amount
-                        .unit()
-                        .prices()
-                        .map(Arc::clone)
-                        .unwrap_or_else(|| Arc::new(PriceDatabase::default()));
-                    match amount.unit().conversion_expression() {
-                        Some(expr) => {
-                            let mut lambda_valuer = LambdaValuer::new(
-                                self.config.clone(),
-                                &price_db,
-                                self.datetime,
-                                expr,
-                            );
-                            match lambda_valuer.value(quote_unit, amount) {
-                                Ok(lambda_val) if lambda_val.unit() == quote_unit => {
+                    match LambdaValuer::new(self.config.clone(), self.datetime)
+                        .value(quote_unit, amount)
+                    {
+                        Ok(mut lambda_val) => {
+                            match Valuer::value(&mut lambda_val, quote_unit, amount) {
+                                Ok(lambda_val) => {
                                     break Ok(lambda_val);
                                 }
-                                Ok(lambda_val) => {
+                                Err(e) => {
                                     via_opt = Some(lambda_val);
                                 }
-                                Err(e) => break Err(e),
                             }
                         }
-                        None => {
-                            break Err(ValuationError::Undetermined(err!(
-                                "No price expression found for unit: {}",
-                                amount.unit()
-                            )));
-                        }
+                        Err(e) => break Err(e),
                     }
                 }
             }
-        }
-
-        /*
-            // Finally, enter a loop where we try first, in terms of alternative base units first if we have any.
-        let base_unit = amount.unit();
-        alternative_base_amounts.push_back(Valuation::basis(amount));
-        let mut intermediate_valuation = None;
-        let value = loop {
-            match alternative_base_amounts.pop_front() {
-                Some(amount_to_value) => {
-                    if amount_to_value.unit() != base_unit {
-                        info!(
-                            "{} Attempting to value {} via {}",
-                            self.datetime,
-                            base_unit,
-                            amount_to_value.unit()
-                        );
-                        self.tried_base_units.insert(amount_to_value.unit());
-                    }
-
-                    let price_db = base_unit
-                        .prices()
-                        .map(Arc::clone)
-                        .unwrap_or_else(|| Arc::new(PriceDatabase::default()));
-                    match amount_to_value.unit().conversion_expression() {
-                        Some(expr) => {
-                            let mut lambda_valuer = LambdaValuer::new(
-                                self.config.clone(),
-                                &price_db,
-                                self.datetime,
-                                expr,
-                            );
-                            match lambda_valuer.value(quote_unit, *amount_to_value).map(|mut v| {
-                                intermediate_valuation.take().map(|iv| v.set_via(iv));
-                                v
-                            }) {
-                                Ok(lambda_val)
-                                    if amount_to_value.unit() == base_unit
-                                        && lambda_val.unit() == quote_unit =>
-                                {
-                                    info!(
-                                        "{} Valued via lookup: {} = {:?}",
-                                        self.datetime, amount, *lambda_val
-                                    );
-                                    break Ok(lambda_val);
-                                }
-                                // Received a valuation not in our base/quote units. Add this to the system and try to solve it.
-                                // We do this even if the valuation is in our quote unit due to the linear system
-                                // providing greater consistency for the entry (valuations should be balanced).
-                                Ok(lambda_val) => {
-                                    info!(
-                                        "{} Valued via lookup: {} = {:?}",
-                                        self.datetime, amount_to_value, *lambda_val
-                                    );
-                                    if !self
-                                        .linear_system_valuer
-                                        .has_value((*amount_to_value, *lambda_val))
-                                    {
-                                        self.linear_system_valuer
-                                            .add_value((*amount_to_value, *lambda_val));
-                                    }
-
-                                    match self.linear_system_valuer.value(quote_unit, amount) {
-                                        Ok(mut linear_system_val) => {
-                                            linear_system_val.set_via(amount_to_value)
-                                            if linear_system_val.unit() != lambda_val.unit() {
-                                                linear_system_val.set_via(lambda_val);
-                                            } else {
-                                                linear_system_val.set_via(amount_to_value);
-                                            }
-                                            info!(
-                                                "{} Valued via derivation: {} = {:?}",
-                                                self.datetime, amount, *linear_system_val
-                                            );
-                                            break Ok(linear_system_val);
-                                        }
-                                        _ => {
-                                            // When the python function returns a value in a different unit, it also indicates a request
-                                            // for indirection. We'll try to value that unit in the quote unit.
-                                            // We need to note the units we've previously tried so we don't get stuck in a loop.
-                                            if lambda_val.unit() != quote_unit
-                                                && !self
-                                                    .tried_base_units
-                                                    .contains(&lambda_val.unit())
-                                            {
-                                                alternative_base_amounts
-                                                    .push_front(lambda_val.value());
-                                            }
-                                            intermediate_valuation = Some(lambda_val);
-                                        }
-                                    }
-                                }
-                                Err(ValuationError::Undetermined(reason))
-                                    if amount_to_value.unit() == base_unit =>
-                                {
-                                    break Err(ValuationError::Undetermined(reason));
-                                }
-                                Err(ValuationError::EvalFailure(e)) => {
-                                    break Err(ValuationError::EvalFailure(e));
-                                }
-                                _ => {}
-                            }
-                        }
-                        None if amount_to_value.unit() == base_unit => {
-                            break Err(ValuationError::Undetermined(err!(
-                                "No price expression found for unit: {}",
-                                base_unit
-                            )));
-                        }
-                        None => continue,
-                    }
-                }
-                None => {
-                    break Err(ValuationError::Undetermined(err!("Unable to value: {}", amount)));
-                }
-            }
-        }?;
-        Ok(value)*/
+        }*/
     }
 }

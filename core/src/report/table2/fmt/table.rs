@@ -10,7 +10,7 @@ use crate::report::table2::column::{ColumnsVec, TableColumn};
 use crate::report::table2::fmt::cell_formatter::{CellFormatter, lines_and_cols};
 use crate::report::table2::fmt::row_formatter::RowFormatter;
 use crate::report::table2::row::Row;
-use crate::report::table2::{Cell, ColumnWidth};
+use crate::report::table2::{Cell, ColumnWidth, RowKind, distribute};
 use crate::report::term_style::{Colour, Style};
 use std::fmt;
 use std::fmt::Write;
@@ -29,6 +29,8 @@ pub struct TableCellFormatter<'w, 'format> {
     border: TableBorder<'w>,
     current_row: Option<&'format Row<'format>>,
     first_cell_in_line: bool,
+    /// The first stripe is always "even", and then it alternates
+    stripe_odd: bool,
     odd_bg: Option<Style>,
     even_bg: Option<Style>,
 }
@@ -46,6 +48,7 @@ impl<'w, 'format> TableCellFormatter<'w, 'format> {
             even_bg: None,
             current_row: None,
             first_cell_in_line: true,
+            stripe_odd: false,
         }
     }
 
@@ -132,12 +135,12 @@ impl<'w, 'format> CellFormatter for TableCellFormatter<'w, 'format> {
     fn format_cell(&mut self, cell: &dyn Cell, line: usize, mut width: ColumnWidth) -> fmt::Result {
         // Set the width.
         let sep_len = self.cell_separator.chars().count();
-        width = width.distribute((sep_len * (cell.hspan() - 1)) as isize);
+        width = distribute(&width, (sep_len * (cell.hspan() - 1)) as isize);
 
         // Not the first column, so add a separator
         if !self.first_cell_in_line {
             let sep = self.cell_separator;
-            if self.current_row.as_ref().unwrap().is_header() {
+            if self.current_row.as_ref().unwrap().kind() == RowKind::Heading {
                 let width = sep.chars().count();
                 write!(self, "{:width$}", "")
             } else {
@@ -153,7 +156,7 @@ impl<'w, 'format> CellFormatter for TableCellFormatter<'w, 'format> {
         let print_res = cell.print(self, line, Some(width.clone()));
 
         // Pad to the column width
-        for _ in self.cursor_col..(start_col + width.width()) {
+        for _ in self.cursor_col..(start_col + width.sum()) {
             write!(self, "{}", cell.padding_char())?;
         }
         print_res
@@ -171,23 +174,26 @@ impl<'format> RowFormatter<'format> for TableCellFormatter<'_, 'format> {
         Ok(())
     }
 
-    fn format_row_end(&mut self, _row: &Row, _row_num: usize, _line: usize) -> fmt::Result {
+    fn format_row_end(&mut self, row: &Row, _row_num: usize, _line: usize) -> fmt::Result {
         self.current_row = None;
+        if row.is_striped() {
+            self.stripe_odd = !self.stripe_odd;
+        }
         Ok(())
     }
 
-    fn format_line_start(&mut self, row: &Row, row_num: usize, _line: usize) -> fmt::Result {
-        if row_num > 0 {
+    fn format_line_start(&mut self, row: &Row, _row_num: usize, line: usize) -> fmt::Result {
+        if line > 0 {
             writeln!(self.writer)?;
         }
         self.first_cell_in_line = true;
 
-        if *styled::IS_STYLED {
-            if row_num.is_multiple_of(2)
+        if *styled::IS_STYLED && row.is_striped() {
+            if !self.stripe_odd
                 && let Some(even_bg) = self.even_bg
             {
                 even_bg.start(self)?;
-            } else if !row_num.is_multiple_of(2)
+            } else if self.stripe_odd
                 && let Some(odd_bg) = self.odd_bg
             {
                 odd_bg.start(self)?;
@@ -195,7 +201,7 @@ impl<'format> RowFormatter<'format> for TableCellFormatter<'_, 'format> {
         }
 
         if let Some(left_border) = self.border.left {
-            if row.is_header() {
+            if row.kind() == RowKind::Heading {
                 let width = left_border.chars().count();
                 write!(self, "{:width$}", "")
             } else {
@@ -206,14 +212,14 @@ impl<'format> RowFormatter<'format> for TableCellFormatter<'_, 'format> {
         }
     }
 
-    fn format_line_end(&mut self, row: &Row, row_num: usize, _line: usize) -> fmt::Result {
+    fn format_line_end(&mut self, row: &Row, _row_num: usize, _line: usize) -> fmt::Result {
         // Reset bg at the end of every line. Some terminals do inconsistent rendering otherwise.
-        if *styled::IS_STYLED {
-            if row_num.is_multiple_of(2)
+        if *styled::IS_STYLED && row.is_striped() {
+            if !self.stripe_odd
                 && let Some(even_bg) = self.even_bg
             {
                 even_bg.end(self)?;
-            } else if !row_num.is_multiple_of(2)
+            } else if self.stripe_odd
                 && let Some(odd_bg) = self.odd_bg
             {
                 odd_bg.end(self)?;
@@ -221,7 +227,7 @@ impl<'format> RowFormatter<'format> for TableCellFormatter<'_, 'format> {
         }
 
         if let Some(right_border) = self.border.right {
-            if row.is_header() {
+            if row.kind() == RowKind::Heading {
                 let width = right_border.chars().count();
                 write!(self, "{:width$}", "", width = width)?;
             } else {
@@ -234,12 +240,16 @@ impl<'format> RowFormatter<'format> for TableCellFormatter<'_, 'format> {
         //writeln!(self.writer)
     }
 
+    fn cell_separator(&self) -> &str {
+        self.cell_separator
+    }
+
     fn prepare_columns(&mut self, columns: &mut Vec<TableColumn>) {
         if let Some(max_width) = self.max_width {
             let adj_max_width =
                 max_width.saturating_sub(self.cell_separator.chars().count() * (columns.len() - 1));
 
-            columns.as_mut_slice().fit_to_max_width(adj_max_width);
+            columns.as_mut_slice().fit_to_max_width(adj_max_width, self.cell_separator);
 
             if columns.as_mut_slice().width() < adj_max_width {
                 columns.as_mut_slice().expand_to_width(adj_max_width);

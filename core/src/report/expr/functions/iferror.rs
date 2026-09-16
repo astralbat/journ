@@ -9,10 +9,13 @@ use crate::err;
 use crate::error::JournResult;
 use crate::report::expr::{ColumnValue, Expr, IdentifierContext};
 
-pub fn iferror<'h>(
-    args: &[Expr<'h>],
-    context: &mut dyn IdentifierContext<'h>,
-) -> JournResult<ColumnValue<'h>> {
+pub fn iferror<'h, 'a>(
+    args: &[Expr],
+    context: &mut dyn IdentifierContext<'h, 'a>,
+) -> JournResult<ColumnValue<'h>>
+where
+    'h: 'a,
+{
     if args.len() != 2 {
         return Err(err!("Function 'iferror' requires exactly two arguments"));
     }

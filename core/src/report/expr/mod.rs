@@ -17,7 +17,8 @@ mod plan;
 
 pub use column_value::ColumnValue;
 pub use context::{
-    EvalContext, IdentifierContext, LateContext, PostingContext, TotalContext, ValuerContext,
+    EvalContext, IdentifierContext, LateContext, LinkedFlowContext, PostingContext, TotalContext,
+    ValuerContext,
 };
 pub use expr::*;
 pub use group::*;

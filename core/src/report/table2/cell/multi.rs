@@ -7,8 +7,10 @@
  */
 use crate::report::table2::cell_width::CellWidth;
 use crate::report::table2::fmt::CellFormatter;
-use crate::report::table2::{Cell, CellRef, ColumnWidth};
+use crate::report::table2::{Cell, CellRef, ColumnWidth, SpaceDistribution, distributed_max};
 use smallvec::SmallVec;
+use std::fmt;
+use std::fmt::Formatter;
 
 /// A cell of other cells arranged vertically. Each cell is printed on its own
 /// line (or lines if the inner is itself multi-line).
@@ -42,15 +44,28 @@ impl<'c> Cell for MultiLineCell<'c> {
     }
 
     fn width(&self) -> CellWidth {
-        let mut max = CellWidth::Unary(0);
+        let mut max = CellWidth::Leaf(0);
         for cell in self.cells.iter() {
-            max = max.distributed_max(&cell.width());
+            max = distributed_max(&max, &cell.width());
         }
         max
     }
 
     fn height(&self) -> usize {
         self.cells.iter().map(|c| c.height()).sum()
+    }
+}
+
+impl fmt::Debug for MultiLineCell<'_> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "MultiLineCell(")?;
+        for (i, cell) in self.cells.iter().enumerate() {
+            write!(f, "{:?},", cell)?;
+            if i < self.cells.len() - 1 {
+                write!(f, ", ")?;
+            }
+        }
+        write!(f, ")")
     }
 }
 
@@ -72,21 +87,41 @@ impl<'c> Cell for MultiCell<'c> {
         &self,
         f: &mut dyn CellFormatter,
         line: usize,
-        width: Option<ColumnWidth>,
+        _width: Option<ColumnWidth>,
     ) -> std::fmt::Result {
-        let mut width_to_go = width;
+        // We just print the actual width, leaving it the renderer to right-pad.
+        let mut width_to_go = Some(self.width());
         for cell in self.cells.iter() {
-            width_to_go = width_to_go.as_ref().map(|w| w - &cell.width());
-            cell.print(f, line, width_to_go.clone())?;
+            let width = width_to_go.as_mut().and_then(|w| w.pop_right());
+            cell.print(f, line, width)?;
         }
         Ok(())
     }
 
     fn width(&self) -> CellWidth {
-        let mut max = CellWidth::Unary(0);
-        for cell in self.cells.iter() {
-            max = max.distributed_max(&cell.width());
+        let mut total = CellWidth::Leaf(0);
+        // Arrange tree with the first cell on the right, ready for popping in sequence
+        // during print.
+        for cell in self.cells.iter().rev() {
+            total.push_right(cell.width(), SpaceDistribution::default());
         }
-        max
+        total
+    }
+
+    fn height(&self) -> usize {
+        self.cells.iter().map(|c| c.height()).max().unwrap_or(0)
+    }
+}
+
+impl fmt::Debug for MultiCell<'_> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "Multi(")?;
+        for (i, cell) in self.cells.iter().enumerate() {
+            write!(f, "{:?}", cell)?;
+            if i < self.cells.len() - 1 {
+                write!(f, ", ")?;
+            }
+        }
+        write!(f, ")")
     }
 }

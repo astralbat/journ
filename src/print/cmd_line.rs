@@ -7,7 +7,7 @@
  */
 use crate::print::print_command::PrintCommand;
 use journ_core::error::JournResult;
-use journ_core::journal_context::JournalContext;
+use journ_core::journal_context::JContext;
 use journ_core::report::command::IntoExecCommand;
 use journ_core::report::command::arguments::{Arguments, DateTimeFormatCommand};
 use journ_core::report::command::cmd_line::BeginAndEndArguments;
@@ -31,10 +31,8 @@ impl IntoExecCommand for PrintArguments {
     type Command = PrintCommand;
 
     fn into_exec_cmd(self, args: &Arguments) -> JournResult<Self::Command> {
-        let datetime_fmt_cmd = DateTimeFormatCommand::from_args_or_config(
-            args,
-            JournalContext::current().journal().config(),
-        );
+        let datetime_fmt_cmd =
+            DateTimeFormatCommand::from_args_or_config(args, JContext::get().journal().config());
         let cmd = PrintCommand {
             begin_and_end_cmd: self.begin_and_end.into_cmd(&datetime_fmt_cmd),
             datetime_fmt_cmd,

@@ -7,7 +7,6 @@
  */
 use crate::adjustment::Adjustment;
 use crate::deal::Deal;
-use crate::deal_group::DealGroup;
 use journ_core::datetime::JDateTimeRange;
 use journ_core::unit::Unit;
 use std::cmp::Ordering;
@@ -15,14 +14,14 @@ use std::cmp::Ordering;
 #[derive(Debug, PartialEq, Eq)]
 pub enum DealingEvent<'h> {
     Deal(Deal<'h>),
-    Group(DealGroup<'h>),
+    //Group(DealGroup<'h>),
     PoolAdjustment(Adjustment<'h>),
 }
 impl<'h> DealingEvent<'h> {
     pub fn unit(&self) -> &'h Unit<'h> {
         match self {
             DealingEvent::Deal(deal) => deal.unit(),
-            DealingEvent::Group(group) => group.unit(),
+            //DealingEvent::Group(group) => group.unit(),
             DealingEvent::PoolAdjustment(reorg) => reorg.unit(),
         }
     }
@@ -30,7 +29,7 @@ impl<'h> DealingEvent<'h> {
     pub fn datetime(&self) -> JDateTimeRange {
         match self {
             DealingEvent::Deal(deal) => deal.datetime(),
-            DealingEvent::Group(group) => group.datetime(),
+            //DealingEvent::Group(group) => group.datetime(),
             DealingEvent::PoolAdjustment(reorg) => reorg.datetime(),
         }
     }

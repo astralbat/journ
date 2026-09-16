@@ -25,7 +25,12 @@ impl Cell for str {
     fn width(&self) -> CellWidth {
         self.lines()
             .max_by(|a, b| a.chars().count().cmp(&b.chars().count()))
-            .map_or_default(|l| CellWidth::Unary(l.chars().count()))
+            .map_or_default(|l| CellWidth::Leaf(l.chars().count()))
+    }
+
+    fn height(&self) -> usize {
+        // The str::lines() function ignores a final newline.
+        if self.ends_with("\n") { self.lines().count() + 1 } else { self.lines().count() }
     }
 }
 
@@ -42,7 +47,11 @@ impl Cell for &str {
     fn width(&self) -> CellWidth {
         self.lines()
             .max_by(|a, b| a.chars().count().cmp(&b.chars().count()))
-            .map_or_default(|l| CellWidth::Unary(l.chars().count()))
+            .map_or_default(|l| CellWidth::Leaf(l.chars().count()))
+    }
+
+    fn height(&self) -> usize {
+        self.lines().count()
     }
 }
 
@@ -59,6 +68,10 @@ impl Cell for String {
     fn width(&self) -> CellWidth {
         self.as_str().width()
     }
+
+    fn height(&self) -> usize {
+        self.as_str().height()
+    }
 }
 
 impl<Mode: SmartStringMode> Cell for SmartString<Mode> {
@@ -73,5 +86,9 @@ impl<Mode: SmartStringMode> Cell for SmartString<Mode> {
 
     fn width(&self) -> CellWidth {
         self.as_str().width()
+    }
+
+    fn height(&self) -> usize {
+        self.as_str().height()
     }
 }

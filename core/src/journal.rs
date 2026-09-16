@@ -11,18 +11,21 @@ use crate::datetime::JDateTime;
 use crate::directive::DirectiveKind;
 use crate::err;
 use crate::error::{BlockContext, BlockContextError, JournError, JournErrors, JournResult};
-use crate::journal_context::JournalContext;
+use crate::journal_context::JContext;
 use crate::journal_entry::{EntryDateId, JournalEntry};
+use crate::journal_entry_query::PostingQuery;
 use crate::journal_node::{JournalNode, JournalNodeKind};
 use crate::parsing::parser::JournalParseNode;
 use crate::parsing::text_block::TextBlock;
+use crate::posting::Posting;
 use crate::python::mod_ledger::PythonLedgerModule;
 use crate::report::balance::AccountBalances;
 use crate::tree_id::TreeId;
 use normalize_path::NormalizePath;
-use std::collections::BTreeMap;
-use std::ops::RangeBounds;
+use std::collections::{BTreeMap, VecDeque};
+use std::iter::Peekable;
 use std::path::Path;
+use std::range::RangeBounds;
 use std::thread;
 
 pub struct Journal<'h> {
@@ -36,8 +39,8 @@ impl<'h> Journal<'h> {
         filename: Option<&'h Path>,
         mut text_block: TextBlock<'h>,
         allocator: &'h HerdAllocator<'h>,
-    ) -> JournResult<JournalContext<'h>> {
-        let context = JournalContext::new(allocator);
+    ) -> JournResult<JContext<'h>> {
+        let context = JContext::new(allocator);
         let journal = context.with(|| {
             let node_id = TreeId::new_root().into();
             let config = Configuration::new();
@@ -149,10 +152,17 @@ impl<'h> Journal<'h> {
         self.root.children_recursive()
     }
 
+    pub fn postings<'a>(
+        &'a self,
+        query: PostingQuery,
+    ) -> impl Iterator<Item = JournResult<(&'h JournalEntry<'h>, &'h Posting<'h>)>> + 'a {
+        query.into_iter(&self.entries)
+    }
+
     pub fn entry_range<'a, R>(
         &'a self,
         range: R,
-    ) -> impl DoubleEndedIterator<Item = &'h JournalEntry<'h>> + Clone + 'a
+    ) -> impl Iterator<Item = &'h JournalEntry<'h>> + Clone + 'a
     where
         R: RangeBounds<JDateTime>,
     {
@@ -163,36 +173,140 @@ impl<'h> Journal<'h> {
         &'a self,
         range: R,
         filter: F,
-    ) -> impl DoubleEndedIterator<Item = &'h JournalEntry<'h>> + Clone + 'a
+    ) -> impl Iterator<Item = &'h JournalEntry<'h>> + Clone + 'a
     where
         R: RangeBounds<JDateTime>,
         F: Fn(&'h JournalEntry<'h>) -> bool + Clone + 'a,
     {
-        let range = EntryDateId::date_range(range);
+        // A buffering iterator that returns super_duplicates over sub_duplicates.
 
-        let mut curr_timestamp: i64 = 0;
-        let mut entries_same_timestamp: Vec<&JournalEntry<'h>> = vec![];
+        // Below is an illustration of overlapping entry date ranges in sorted order.
+        // It is only when we get to entry `e` that we can clear the list as none
+        // of those before it overlap it.
+        // [---- a ---- ]
+        // [-------- b ---------]
+        //    [ -- c -- ]
+        //              [-- d --]
+        //                      [ ---- e ---- ]
+        #[derive(Clone)]
+        struct DuplicateDetectIterator<
+            'h,
+            'a,
+            I: Iterator<Item = (&'a EntryDateId, &'h JournalEntry<'h>)> + Clone + 'a,
+        > {
+            inner: Peekable<I>,
+            entries_overlapping_timestamp: VecDeque<&'h JournalEntry<'h>>,
+            mode: Mode,
+        }
 
-        let duplicate_filter = move |e: &(&EntryDateId, &&'h JournalEntry<'h>)| {
-            if e.0.timestamp() != curr_timestamp {
-                curr_timestamp = e.0.timestamp();
-                entries_same_timestamp.clear();
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        enum Mode {
+            Clearing,
+            Accumulating,
+            Dedup,
+        }
+
+        impl<'h, 'a, I> Iterator for DuplicateDetectIterator<'h, 'a, I>
+        where
+            I: Iterator<Item = (&'a EntryDateId, &'h JournalEntry<'h>)> + Clone + 'a,
+        {
+            type Item = &'h JournalEntry<'h>;
+
+            fn next(&mut self) -> Option<Self::Item> {
+                loop {
+                    match self.mode {
+                        Mode::Accumulating => {
+                            if self.entries_overlapping_timestamp.is_empty() {
+                                self.entries_overlapping_timestamp.push_back(self.inner.next()?.1);
+                            }
+                            if let Some(e) = self.inner.peek() {
+                                let retain_any =
+                                    self.entries_overlapping_timestamp.iter().any(|eot| {
+                                        e.1.datetime_range().start() < eot.datetime_range().end()
+                                    });
+                                if retain_any {
+                                    self.entries_overlapping_timestamp
+                                        .push_back(self.inner.next().unwrap().1);
+                                    continue;
+                                }
+                            }
+                            self.mode = Mode::Dedup;
+                            continue;
+                        }
+                        Mode::Dedup => {
+                            let mut i = 0;
+                            'i: while i < self.entries_overlapping_timestamp.len() - 1 {
+                                let mut j = i + 1;
+                                'j: while j < self.entries_overlapping_timestamp.len() {
+                                    if self.entries_overlapping_timestamp[i].is_super_duplicate_of(
+                                        self.entries_overlapping_timestamp[j],
+                                    ) {
+                                        self.entries_overlapping_timestamp.remove(j);
+                                        continue 'j;
+                                    } else if self.entries_overlapping_timestamp[j]
+                                        .is_super_duplicate_of(
+                                            self.entries_overlapping_timestamp[i],
+                                        )
+                                    {
+                                        self.entries_overlapping_timestamp.remove(i);
+                                        continue 'i;
+                                    }
+                                    j += 1;
+                                }
+                                i += 1;
+                            }
+                            self.mode = Mode::Clearing;
+                            continue;
+                        }
+                        Mode::Clearing => {
+                            if !self.entries_overlapping_timestamp.is_empty() {
+                                break self.entries_overlapping_timestamp.pop_front();
+                            } else {
+                                self.mode = Mode::Accumulating;
+                                continue;
+                            }
+                        }
+                    }
+                }
             }
-            for ent in entries_same_timestamp.iter() {
-                if ent.is_duplicate_of(e.1) {
+        }
+
+        /*
+        let duplicate_filter = move |e: &(&EntryDateId, &&'h JournalEntry<'h>)| {
+            let retain_any = entries_overlapping_timestamp
+                .iter()
+                .any(|eot| e.1.datetime_range().start() < eot.datetime_range().end());
+            if !retain_any {
+                entries_overlapping_timestamp.clear();
+            }
+            for ent in entries_overlapping_timestamp.iter() {
+                if ent.is_super_duplicate_of(e.1) {
                     return false;
                 }
             }
-            entries_same_timestamp.push(*e.1);
+            entries_overlapping_timestamp.push(*e.1);
             true
-        };
+        };*/
 
+        let range = EntryDateId::date_range(range);
+        DuplicateDetectIterator {
+            inner: self
+                .entries
+                .range(range)
+                .map(|e| (e.0, *e.1))
+                .filter(move |e| filter(e.1))
+                .peekable(),
+            entries_overlapping_timestamp: VecDeque::new(),
+            mode: Mode::Accumulating,
+        }
+
+        /*
         // The duplicate_filter must be after the provided filter.
         self.entries
             .range(range)
-            .filter(move |e| filter(*e.1))
+            .filter(move |e| filter(e.1))
             .filter(duplicate_filter)
-            .map(|e| *e.1)
+            .map(|e| *e.1)*/
     }
 
     /// Finds all entries in `datetime_range`, and having a description equal to `description`,
@@ -209,7 +323,7 @@ impl<'h> Journal<'h> {
     {
         let filter = move |e: &JournalEntry<'h>| {
             description.map(|d| d == e.description()).unwrap_or(true)
-                && base_node_id.map(|bid| e.id().starts_with(&bid)).unwrap_or(true)
+                && base_node_id.map(|bid| e.id().starts_with(bid)).unwrap_or(true)
         };
         self.entry_range_filtered(datetime_range, filter)
     }
@@ -221,19 +335,20 @@ impl<'h> Journal<'h> {
     pub fn append_entry(
         &mut self,
         mut entry: JournalEntry<'h>,
-        index: &TreeId,
+        node_id: &TreeId,
     ) -> JournResult<&'h JournalEntry<'h>> {
         // Check before checking if we have the entry already. The check
         // fills in elided amounts/postings which will alter equality.
         entry.check()?;
 
-        let entry = self.node(index).append_entry(entry);
+        let entry = self.node(node_id).append_entry(entry);
         //if !Self::_contains_entry(&self.entries, &entry) {
         self.add_entries(&[entry])?;
         //}
         Ok(entry)
     }
 
+    /*
     pub fn contains_entry(&self, entry: &JournalEntry<'h>) -> bool {
         Journal::_contains_entry(&self.entries, entry)
     }
@@ -249,7 +364,7 @@ impl<'h> Journal<'h> {
             }
         }
         false
-    }
+    }*/
 
     pub fn insert_entry(
         &mut self,
@@ -261,22 +376,31 @@ impl<'h> Journal<'h> {
         entry.check()?;
 
         let entry = self.node(index).insert_entry(entry);
-        if !Self::_contains_entry(&self.entries, &entry) {
-            self.add_entries(&[entry])?;
-        }
+        //if !Self::_contains_entry(&self.entries, entry) {
+        self.add_entries(&[entry])?;
+        //}
         Ok(entry)
+    }
+
+    /// Replaces the existing entry specified by `entry.id()` with the provided `entry` if found.
+    pub fn replace_entry(
+        &mut self,
+        entry: JournalEntry<'h>,
+    ) -> JournResult<Option<&'h JournalEntry<'h>>> {
+        self.replace_entries(vec![entry]).map(|v| v.into_iter().next())
+    }
+
+    pub fn remove_entry(&mut self, entry: &JournalEntry<'h>) -> bool {
+        self.entries.remove(&EntryDateId::from(entry));
+        self.node(&entry.id().parent().unwrap()).remove_entry(entry).is_some()
     }
 
     /// Replaces entries in the journal. The entries are all checked before being replaced but should
     /// the balance assertions fail, recovery is not possible and the journal will be in an inconsistent
     /// state. This situation may be manageable if such an error aborts the program.
-    ///
-    /// # Panics
-    /// If the entry does not exist
     pub fn replace_entries(
         &mut self,
         mut entries: Vec<JournalEntry<'h>>,
-        allocator: &'h HerdAllocator<'h>,
     ) -> JournResult<Vec<&'h JournalEntry<'h>>> {
         for entry in entries.iter_mut() {
             entry.check().map_err(|e| {
@@ -288,11 +412,13 @@ impl<'h> Journal<'h> {
         // insertions.
         let mut new_entry_parts = vec![];
         for entry in entries {
-            let (old_entry, new_entry) =
-                self.node(&entry.id().parent().unwrap()).replace_entry(entry, allocator);
-            // Make sure the old one is removed in case the date id has changed.
-            self.entries.remove(&EntryDateId::from(old_entry));
-            new_entry_parts.push(new_entry);
+            if let Some((old_entry, new_entry)) =
+                self.node(&entry.id().parent().unwrap()).replace_entry(entry)
+            {
+                // Make sure the old one is removed in case the date id has changed.
+                self.entries.remove(&EntryDateId::from(old_entry));
+                new_entry_parts.push(new_entry);
+            }
         }
 
         self.add_entries(&new_entry_parts)?;
@@ -302,7 +428,7 @@ impl<'h> Journal<'h> {
     /// Adds entries to the `entries` map and checks the balance assertions. If the balance assertions
     /// check fails, all entries are removed to restore the state as it was before the call.
     fn add_entries(&mut self, entries: &[&'h JournalEntry<'h>]) -> JournResult<()> {
-        for entry in entries.into_iter().copied() {
+        for entry in entries.iter().copied() {
             self.entries.insert(EntryDateId::from(entry), entry);
         }
 
@@ -311,7 +437,7 @@ impl<'h> Journal<'h> {
         let r = self.check_balance_assertions();
 
         if let Err(e) = r {
-            for entry in entries.into_iter().copied() {
+            for entry in entries.iter().copied() {
                 self.entries.remove(&EntryDateId::from(entry));
             }
             Err(e)

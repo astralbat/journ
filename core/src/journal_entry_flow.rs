@@ -6,10 +6,15 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::account::{Account, AccountType};
-use crate::amount::Amount;
+use crate::amount::{Amount, Quantity};
+use crate::err;
+use crate::error::JournResult;
 use crate::unit::Unit;
-use crate::valued_amount::ValuedAmount;
-use smallvec::SmallVec;
+use crate::valued_amount::{PostingValuation, ValuedAmount};
+use crate::valuer::{ValuationError, Valuer};
+use rust_decimal::prelude::Zero;
+use smallvec::{SmallVec, smallvec};
+use std::cmp::Ordering;
 use std::fmt;
 use std::fmt::Formatter;
 use std::ops::{Add, AddAssign};
@@ -33,6 +38,18 @@ pub trait Flows<'h>: IntoIterator<Item = Flow<'h>> {
         F: FnMut(&mut Flow<'h>) -> bool;
 
     fn truncate(&mut self, n: usize);
+
+    fn insert(&mut self, index: usize, flow: Flow<'h>);
+
+    /// Returns true if all flows are zero, which is naturally the case when there are no flows
+    fn is_zero(&self) -> bool {
+        for flow in self.as_slice().iter() {
+            if !flow.amount().is_zero() {
+                return false;
+            }
+        }
+        true
+    }
 
     /// Sums all flows
     ///
@@ -58,6 +75,138 @@ pub trait Flows<'h>: IntoIterator<Item = Flow<'h>> {
     /// If the flows are not homogenous
     fn credits(&self) -> SmallVec<[Flow<'h>; 4]> {
         self.as_slice().iter().filter(|f| f.is_credit()).cloned().collect()
+    }
+
+    /// Links debits and credits together, returning a vector of linked flows.
+    fn linked<V: Valuer<'h>>(&self, valuer: &mut V) -> JournResult<SmallVec<[LinkedFlow<'h>; 4]>> {
+        let mut res: SmallVec<[LinkedFlow<'h>; 4]> = smallvec![];
+        let push_res =
+            |res: &mut SmallVec<[LinkedFlow<'h>; 4]>, mut debit: Flow<'h>, mut credit: Flow<'h>| {
+                // A non-explicit zero flow that would round to 0 is not something we want.
+                if !debit.is_zero()
+                    && debit.amount().rounded().is_zero()
+                    && !credit.is_zero()
+                    && credit.amount().rounded().is_zero()
+                {
+                    return;
+                }
+                // Ensure valuations are set for when flows are split up later.
+                if credit.unit() != debit.unit() {
+                    debit
+                        .valued_amount_mut()
+                        .set_valuation(PostingValuation::new_total(-credit.amount(), true));
+                    credit
+                        .valued_amount_mut()
+                        .set_valuation(PostingValuation::new_total(-debit.amount(), true));
+                }
+                debit.round();
+                credit.round();
+                res.push(LinkedFlow::new(debit, credit));
+            };
+
+        let (mut debits, mut credits) = (self.debits(), self.credits());
+        // When credits is empty, it could mean because a 0 amount has been interpreted as a debit when
+        // it needs to be a credit.
+        if credits.is_empty()
+            && let Some(pos) = debits.iter().position(|d| d.is_zero())
+        {
+            credits.push(debits.remove(pos));
+        }
+
+        let mut same_unit_mode = true;
+        let mut debits_rem: FlowVec<'h> = smallvec![];
+        'restart_debits: loop {
+            while let Some(debit) = debits.pop() {
+                // If there's only 1 credit left, we just need to link with that
+                if debits.is_empty() && credits.len() == 1 && !same_unit_mode {
+                    push_res(&mut res, debit, credits.remove(0));
+                    break;
+                }
+
+                // Find the best credit to link with. Bias towards positions at the end,
+                // as we do with debits.
+                let mut credit = {
+                    let mut best_credit_pos = None;
+                    for (i, credit) in credits.iter().enumerate().rev() {
+                        if -credit.amount() == debit.amount() {
+                            best_credit_pos = Some(i);
+                            break;
+                        }
+                        if credit.unit() == debit.unit() && best_credit_pos.is_none() {
+                            best_credit_pos = Some(i);
+                        }
+                    }
+                    match best_credit_pos {
+                        Some(pos) => credits.remove(pos),
+                        // If we're only working in the same unit, we go to the next
+                        // debit.
+                        None if same_unit_mode => {
+                            debits_rem.push(debit);
+                            continue;
+                        }
+                        None => credits.pop().unwrap(),
+                    }
+                };
+
+                // This can happen with bad valuations. Only thing we can
+                // do is consume the credits and continue.
+                if debit.amount().is_zero() && debits.is_empty() {
+                    push_res(&mut res, debit, credit);
+                    continue;
+                }
+
+                // Value the credit in the debit's unit and compare the valuations.
+                // Don't round because:
+                // - Sometimes we can end up rounding to 0, which then wrongly ends
+                //   up taking the valuation.is_zero() branch below.
+                // - Valuations are less accurate when set with rounded values
+                match credit.net_amount.set_value_in_or_value_with(debit.unit(), valuer, false) {
+                    // Beware 0 valuations.
+                    Ok(credit_value) if (*credit_value).is_zero() => {
+                        push_res(&mut res, debit, credit.clone().with_zero());
+                        if !credit.amount().is_zero() {
+                            credits.push(credit);
+                        }
+                    }
+                    Ok(credit_value) => match (*credit_value).abs().cmp(&debit.amount()) {
+                        Ordering::Greater => {
+                            let (taken, credit_rem) = credit.split(-debit.amount());
+                            push_res(&mut res, debit, taken);
+                            if !credit_rem.amount().is_zero() {
+                                credits.push(credit_rem);
+                            }
+                        }
+                        Ordering::Less => {
+                            let (taken, debit_rem) = debit.split(-*credit_value);
+                            push_res(&mut res, taken, credit);
+                            if !debit_rem.amount().is_zero() {
+                                debits.push(debit_rem);
+                            }
+                        }
+                        Ordering::Equal => {
+                            push_res(&mut res, debit, credit);
+                        }
+                    },
+                    Err(e) => return Err(err!(e)),
+                }
+
+                // We need to ensure that there is at least 1 debit/credit if there are more credits/debits.
+                if !same_unit_mode && debits.is_empty() && !credits.is_empty() {
+                    debits.push(res.last().unwrap().flow().clone().with_zero());
+                } else if !same_unit_mode && credits.is_empty() && !debits.is_empty() {
+                    credits.push(res.last().unwrap().linked().clone().with_zero());
+                }
+            }
+            if same_unit_mode {
+                same_unit_mode = false;
+                debits = debits_rem;
+                debits_rem = smallvec![]; // To please compiler
+                continue 'restart_debits;
+            } else {
+                break;
+            }
+        }
+        Ok(res)
     }
 
     /// Takes as much of the specified `amount` as possible from the flows, splitting the returned value
@@ -92,6 +241,61 @@ pub trait Flows<'h>: IntoIterator<Item = Flow<'h>> {
         (taken, remainder)
     }
 
+    /// Tries to extract the amount from the flows, matching flows of the same unit.
+    /// If amount is too large for any one flow, `None` is returned.
+    fn try_take_amount(&mut self, amount: Amount<'h>) -> Option<Flow<'h>> {
+        for (i, flow) in self.as_slice().iter().enumerate() {
+            if flow.unit() == amount.unit()
+                && ((flow.is_debit() && amount >= 0 && flow.amount() >= amount)
+                    || (flow.is_credit() && amount <= 0 && flow.amount() <= amount))
+            {
+                let flow = self.remove(i);
+                let (taken, rem) = flow.split(amount);
+                if !rem.amount().is_zero() {
+                    self.insert(i, rem)
+                }
+                return Some(taken);
+            }
+        }
+        None
+    }
+
+    /// Tries to extract an equivalent value from the flows, splitting them up if necessary.
+    fn try_take_value<V: Valuer<'h>>(
+        &mut self,
+        value: Amount<'h>,
+        valuer: &mut V,
+    ) -> Result<Option<Flow<'h>>, ValuationError>
+    where
+        Self: Sized,
+    {
+        let mut errs = vec![];
+        for i in (0..self.len()).rev() {
+            let mut flow = self.remove(i);
+            match flow.net_amount.set_value_in_or_value_with(value.unit(), valuer, true) {
+                Ok(v)
+                    if (flow >= Quantity::zero() && value >= 0 && *v >= value)
+                        || (flow <= Quantity::zero() && value <= 0 && *v <= value) =>
+                {
+                    let (taken, rem) = flow.split(value);
+                    if !rem.is_zero() {
+                        self.insert(i, rem);
+                    }
+                    return Ok(Some(taken));
+                }
+                Ok(_) => {
+                    self.insert(i, flow);
+                    continue;
+                }
+                Err(e) => {
+                    self.insert(i, flow);
+                    errs.push(e);
+                }
+            }
+        }
+        if errs.is_empty() { Ok(None) } else { Err(errs.pop().unwrap()) }
+    }
+
     fn assets<'a>(&'a self) -> impl Iterator<Item = &'a Flow<'h>>
     where
         'h: 'a,
@@ -124,6 +328,19 @@ pub trait Flows<'h>: IntoIterator<Item = Flow<'h>> {
             }
         }
         units.into_iter()
+    }
+
+    /// Creates a series of sub flows for each unit within, where each sub flow
+    /// is homogenous.
+    fn by_unit(&self, unit: &Unit<'h>) -> impl Flows<'h> {
+        let mut unit_group = smallvec![];
+
+        for flow in self.as_slice().iter() {
+            if flow.unit() == unit {
+                unit_group.push(flow.clone());
+            }
+        }
+        unit_group
     }
 
     /// Gets Asset flows, searching for any equity flows in the same unit and adding the amounts.
@@ -231,6 +448,10 @@ impl<'h> Flows<'h> for Vec<Flow<'h>> {
     fn truncate(&mut self, n: usize) {
         self.truncate(n);
     }
+
+    fn insert(&mut self, index: usize, flow: Flow<'h>) {
+        self.insert(index, flow);
+    }
 }
 
 impl<'h> Flows<'h> for SmallVec<[Flow<'h>; 4]> {
@@ -263,6 +484,10 @@ impl<'h> Flows<'h> for SmallVec<[Flow<'h>; 4]> {
     fn truncate(&mut self, n: usize) {
         self.truncate(n);
     }
+
+    fn insert(&mut self, index: usize, flow: Flow<'h>) {
+        self.insert(index, flow);
+    }
 }
 
 /// A flow is similar to a posting, and indeed, a posting is a kind of flow. However, flows can be
@@ -279,8 +504,8 @@ impl<'h> Flow<'h> {
         Self { account_root: account, net_amount }
     }
 
-    pub fn account_root(&self) -> Option<&Account<'h>> {
-        self.account_root.as_deref()
+    pub fn account_root(&self) -> Option<&Arc<Account<'h>>> {
+        self.account_root.as_ref()
     }
 
     pub fn account_type(&self) -> Option<AccountType> {
@@ -295,6 +520,10 @@ impl<'h> Flow<'h> {
         &self.net_amount
     }
 
+    pub fn valued_amount_mut(&mut self) -> &mut ValuedAmount<'h> {
+        &mut self.net_amount
+    }
+
     pub fn into_valued_amount(self) -> ValuedAmount<'h> {
         self.net_amount
     }
@@ -303,8 +532,25 @@ impl<'h> Flow<'h> {
         self.net_amount.amount()
     }
 
+    pub fn with_zero(mut self) -> Self {
+        self.net_amount = ValuedAmount::zero(
+            self.net_amount.amount().unit(),
+            self.net_amount.allocator().unwrap(),
+        );
+        self
+    }
+
+    pub fn with_amount(mut self, amount: ValuedAmount<'h>) -> Self {
+        self.net_amount = amount;
+        self
+    }
+
     pub fn negate(&mut self) {
         self.net_amount.negate();
+    }
+
+    pub fn round(&mut self) {
+        self.net_amount.round();
     }
 
     /// Tries to get the amount in the specified unit. This is either going to be the amount
@@ -313,12 +559,20 @@ impl<'h> Flow<'h> {
         self.net_amount.value_in(in_curr)
     }
 
+    /// Gets whether the flow is a debit, that is, its net_amount >= 0.
     pub fn is_debit(&self) -> bool {
-        self.net_amount.amount() > 0
+        self.net_amount.amount() >= 0
     }
 
+    /// Gets whether the flow is a credit, having a negative amount.
     pub fn is_credit(&self) -> bool {
         self.net_amount.amount() < 0
+    }
+
+    /// The flow is zero when all amounts are zero. A flow with a zero
+    /// primary amount, but a non-zero valuation is _not_ zero.
+    pub fn is_zero(&self) -> bool {
+        self.net_amount.amounts().all(|amount| amount.is_zero())
     }
 
     /// Splits the flow in two at the given threshold `amount`.
@@ -327,12 +581,16 @@ impl<'h> Flow<'h> {
     /// If the amount is considered out of bounds of the flow.
     pub fn split(&self, amount: Amount<'h>) -> (Self, Self) {
         assert!(
-            (self.is_debit() && amount >= 0 && amount <= self.amount())
-                || (self.is_credit() && amount <= 0 && amount >= self.amount()),
+            (self >= &Quantity::zero()
+                && amount >= 0
+                && self.amount_in(amount.unit()).is_some_and(|a| amount <= a))
+                || (self <= &Quantity::zero()
+                    && amount <= 0
+                    && self.amount_in(amount.unit()).is_some_and(|a| amount >= a)),
             "Split amount is out of bounds"
         );
 
-        let (left_amount, right_amount) = self.net_amount.clone().split(amount.quantity());
+        let (left_amount, right_amount) = self.net_amount.clone().split(amount);
 
         (
             Flow::new(self.account_root.clone(), left_amount),
@@ -375,16 +633,28 @@ impl<'h> PartialEq for Flow<'h> {
     }
 }
 
+impl<'h> PartialEq<Quantity> for Flow<'h> {
+    fn eq(&self, other: &Quantity) -> bool {
+        self.amount().quantity() == *other
+    }
+}
+
 impl<'h> Eq for Flow<'h> {}
 
 impl<'h> PartialOrd for Flow<'h> {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
+impl<'h> PartialOrd<Quantity> for Flow<'h> {
+    fn partial_cmp(&self, other: &Quantity) -> Option<Ordering> {
+        self.net_amount.amount().partial_cmp(other)
+    }
+}
+
 impl<'h> Ord for Flow<'h> {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+    fn cmp(&self, other: &Self) -> Ordering {
         self.net_amount.cmp(&other.net_amount)
     }
 }
@@ -392,5 +662,44 @@ impl<'h> Ord for Flow<'h> {
 impl fmt::Display for Flow<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "{:?} {}", self.account_root, self.net_amount)
+    }
+}
+
+pub struct LinkedFlow<'h> {
+    flow: Flow<'h>,
+    linked: Flow<'h>,
+}
+
+impl<'h> LinkedFlow<'h> {
+    pub fn new(flow: Flow<'h>, linked: Flow<'h>) -> Self {
+        assert!(
+            (flow.amount().is_positive() && linked.amount().is_negative())
+                || (flow.amount().is_negative() && linked.amount().is_positive()),
+            "A flow must be between a debit and credit: {} and {}",
+            flow.amount(),
+            linked.amount()
+        );
+
+        Self { flow, linked }
+    }
+
+    pub fn flow(&self) -> &Flow<'h> {
+        &self.flow
+    }
+
+    pub fn flow_mut(&mut self) -> &mut Flow<'h> {
+        &mut self.flow
+    }
+
+    pub fn linked(&self) -> &Flow<'h> {
+        &self.linked
+    }
+
+    pub fn linked_mut(&mut self) -> &mut Flow<'h> {
+        &mut self.linked
+    }
+
+    pub fn invert(self) -> Self {
+        Self { flow: self.linked, linked: self.flow }
     }
 }

@@ -8,32 +8,34 @@
 use crate::err;
 use crate::error::{JournError, JournResult};
 use crate::report::expr::aggregation::AggState;
+use crate::report::expr::column_spec::ColumnSpec;
 use crate::report::expr::context::IdentifierContext;
 use crate::report::expr::parser::AggKind;
-use crate::report::expr::{ColumnValue, Expr};
+use crate::report::expr::{ColumnValue, Expr, ScalarExpr};
 use std::hash::Hash;
+use std::ops::Deref;
 
 #[derive(Debug, Clone)]
 pub struct GroupKey<'h> {
-    values: Vec<(Expr<'h>, ColumnValue<'h>)>,
+    values: Vec<(ScalarExpr, ColumnValue<'h>)>,
 }
 impl<'h> GroupKey<'h> {
-    pub fn new(values: Vec<(Expr<'h>, ColumnValue<'h>)>) -> Self {
+    pub fn new(values: Vec<(ScalarExpr, ColumnValue<'h>)>) -> Self {
         GroupKey { values }
     }
 
-    pub fn values(&self) -> &[(Expr<'h>, ColumnValue<'h>)] {
+    pub fn values(&self) -> &[(ScalarExpr, ColumnValue<'h>)] {
         &self.values
     }
 
     /// Gets the value for the given expression, also matching by alias if necessary.
-    pub fn get(&self, expr: &Expr<'h>) -> Option<&ColumnValue<'h>> {
+    pub fn get(&self, expr: &Expr) -> Option<&ColumnValue<'h>> {
         self.values.iter().find_map(|(e, v)| if e.eq_expr_or_alias(expr) { Some(v) } else { None })
     }
 
-    pub fn aliases(&self) -> impl Iterator<Item = (&'h str, &ColumnValue<'h>)> {
+    pub fn aliases(&self) -> impl Iterator<Item = (&str, &ColumnValue<'h>)> {
         self.values.iter().filter_map(|(e, v)| {
-            if let Expr::Aliased(_, alias) = e { Some((*alias, v)) } else { None }
+            if let Expr::Aliased(_, alias) = e.deref() { Some((alias.as_str(), v)) } else { None }
         })
     }
 }
@@ -46,19 +48,24 @@ impl Eq for GroupKey<'_> {}
 
 impl PartialOrd for GroupKey<'_> {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        for (i, (_expr, value)) in self.values.iter().enumerate() {
-            match value.partial_cmp(&other.values[i].1) {
-                Some(std::cmp::Ordering::Equal) => continue,
-                non_eq => return non_eq,
-            }
-        }
-        Some(std::cmp::Ordering::Equal)
+        Some(self.cmp(other))
     }
 }
 
 impl Ord for GroupKey<'_> {
+    /// Compare each value in the group.
+    /// Here, an undefined value < defined value.
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.partial_cmp(other).unwrap()
+        for (i, (_expr, value)) in self.values.iter().enumerate() {
+            match value.partial_cmp(&other.values[i].1) {
+                Some(std::cmp::Ordering::Equal) => continue,
+                None if value.is_undefined() && other.values[i].1.is_undefined() => continue,
+                None if value.is_undefined() => return std::cmp::Ordering::Less,
+                None if other.values[i].1.is_undefined() => return std::cmp::Ordering::Greater,
+                non_eq => return non_eq.unwrap(),
+            }
+        }
+        std::cmp::Ordering::Equal
     }
 }
 
@@ -70,27 +77,32 @@ impl Hash for GroupKey<'_> {
     }
 }
 
-pub struct GroupState<'h> {
-    aggs: Vec<Box<dyn AggState<'h> + 'h>>,
+pub struct GroupState<'h, 'a> {
+    exprs: Vec<Expr>,
+    aggs: Vec<Box<dyn AggState<'h, 'a> + 'h>>,
 }
 
-impl<'h> GroupState<'h> {
-    pub fn new(aggs: Vec<Box<dyn AggState<'h> + 'h>>) -> Self {
-        GroupState { aggs }
+impl<'h, 'a> GroupState<'h, 'a> {
+    pub fn new(exprs: Vec<Expr>, aggs: Vec<Box<dyn AggState<'h, 'a> + 'h>>) -> Self {
+        GroupState { exprs, aggs }
     }
 
-    pub fn aggs(&self) -> &[Box<dyn AggState<'h> + 'h>] {
+    pub fn aggs(&self) -> &[Box<dyn AggState<'h, 'a> + 'h>] {
         &self.aggs
     }
 
-    pub fn add(&mut self, context: &mut dyn IdentifierContext<'h>) -> JournResult<()> {
+    pub fn exprs(&self) -> &[Expr] {
+        &self.exprs
+    }
+
+    pub fn add(&mut self, context: &mut dyn IdentifierContext<'h, 'a>) -> JournResult<()> {
         for agg in &mut self.aggs {
             agg.add(context)?;
         }
         Ok(())
     }
 
-    pub fn merge(&mut self, other: &GroupState<'h>) -> JournResult<()> {
+    pub fn merge(&mut self, other: &GroupState<'h, 'a>) -> JournResult<()> {
         if self.aggs.len() != other.aggs.len() {
             return Err(err!("Cannot merge GroupState with different number of aggregations"));
         }
@@ -106,10 +118,10 @@ impl<'h> GroupState<'h> {
     }
 }
 
-impl<'h> TryFrom<&[AggKind<'h>]> for GroupState<'h> {
+impl<'h, 'a> TryFrom<ColumnSpec> for GroupState<'h, 'a> {
     type Error = JournError;
-    fn try_from(spec_aggs: &[AggKind<'h>]) -> JournResult<Self> {
-        let aggs = spec_aggs.iter().map(AggKind::make).collect::<Result<_, _>>()?;
-        Ok(GroupState { aggs })
+    fn try_from(spec: ColumnSpec) -> JournResult<Self> {
+        let aggs = spec.agg_functions().iter().map(AggKind::make).collect::<Result<_, _>>()?;
+        Ok(GroupState { exprs: spec.into_exprs(), aggs })
     }
 }

@@ -8,9 +8,11 @@
 use crate::report::command::arguments::Cmd;
 use crate::report::table2::cell::{lease_formatter, return_formatter};
 use crate::report::table2::fmt::{BasicCellFormatter, CellFormatter};
-use crate::report::table2::{Cell, CellRef, CellWidth, ColumnWidth, ShrinkableCell};
+use crate::report::table2::{BinaryCell, Cell, CellRef, CellWidth, ColumnWidth, ShrinkableCell};
 use crate::report::term_style;
 use crate::report::term_style::Style;
+use std::fmt;
+use std::fmt::Formatter;
 use std::sync::LazyLock;
 
 pub static IS_STYLED: LazyLock<bool> = LazyLock::new(|| {
@@ -48,7 +50,7 @@ impl Cell for StyledCell<'_> {
             write!(f, "{}", start_and_inner_fmt)?;
             // It's a good idea to pad here (otherwise the formatter will do it) to keep a consistent style
             if let Some(width) = width {
-                for _ in start_and_inner_fmt.count() + end_fmt.count()..width.width() {
+                for _ in start_and_inner_fmt.count() + end_fmt.count()..width.sum() {
                     write!(f, "{}", self.padding_char())?;
                 }
             }
@@ -68,7 +70,7 @@ impl Cell for StyledCell<'_> {
             let mut fmt = BasicCellFormatter::new(&mut buf);
             self.style.start(&mut fmt).unwrap();
             self.style.end(&mut fmt).unwrap();
-            CellWidth::Unary(buf.chars().count() + self.inner.width().width())
+            CellWidth::Leaf(buf.chars().count() + self.inner.width().sum())
         } else {
             self.inner.width()
         }
@@ -81,10 +83,20 @@ impl Cell for StyledCell<'_> {
     fn as_shrinkable(&self) -> Option<&dyn ShrinkableCell> {
         self.inner.as_shrinkable()
     }
+
+    fn as_binary(&self) -> Option<&BinaryCell> {
+        self.inner.as_binary()
+    }
 }
 
 impl<'c> From<StyledCell<'c>> for CellRef<'c> {
     fn from(s: StyledCell<'c>) -> Self {
         CellRef::Owned(Box::new(s))
+    }
+}
+
+impl fmt::Debug for StyledCell<'_> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "Styled({:?}, {:?})", self.inner, self.style)
     }
 }

@@ -5,29 +5,49 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
+use crate::adjusted_value::AdjustedValue;
 use crate::adjustment::Adjustment;
-use crate::cgt_configuration::MatchMethod;
-use crate::deal::{Deal, DealId};
-use crate::deal_group::{DealGroup, DealGroupCriteria};
-use crate::deal_holding::DealHolding;
+use crate::cag_configuration::MatchMethod;
+use crate::deal::Deal;
+use crate::holding::{DealHolding, DealHoldingSummary, SingleDealHolding};
 use crate::pool_event::{MatchDetails, PoolEvent, PoolEventKind};
 use chrono::DateTime;
 use chrono_tz::Tz;
 use journ_core::alloc::HerdAllocator;
-use journ_core::amount::Amount;
 use journ_core::configuration::Configuration;
 use journ_core::datetime::JDateTimeRange;
 use journ_core::err;
 use journ_core::error::JournResult;
 use journ_core::unit::Unit;
-use journ_core::valued_amount::ValuedAmount;
 use log::{debug, info, warn};
-use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use std::collections::BTreeMap;
-use std::fmt;
-use std::ops::{Add, AddAssign, Mul, Sub};
-use yaml_rust2::Yaml;
+use std::ops::Neg;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) struct HoldingKey<'h> {
+    pub(super) unit: &'h Unit<'h>,
+    pub(super) positive: bool,
+}
+impl<'h> HoldingKey<'h> {
+    fn new(unit: &'h Unit<'h>, positive: bool) -> Self {
+        HoldingKey { unit, positive }
+    }
+}
+
+impl<'h> From<&DealHolding<'h>> for HoldingKey<'h> {
+    fn from(holding: &DealHolding<'h>) -> Self {
+        HoldingKey::new(holding.unit(), holding.amount().is_positive())
+    }
+}
+
+impl Neg for HoldingKey<'_> {
+    type Output = Self;
+
+    fn neg(self) -> Self::Output {
+        HoldingKey::new(self.unit, !self.positive)
+    }
+}
 
 /// A pool is the top-level structure responsible for holding and matching `Deals`.
 /// It only makes sense that a pool deals with a single unit (and its aliases) as quantities
@@ -53,7 +73,7 @@ pub struct Pool<'h> {
     /// The unit gains and losses are measured in.
     unit_of_account: &'h Unit<'h>,
     /// A holding for each unit.
-    holdings: BTreeMap<&'h Unit<'h>, DealHolding<'h>>,
+    holdings: BTreeMap<HoldingKey<'h>, DealHolding<'h>>,
     /// The match methods to use when the holding's balance is >= 0 and < 0 respectively.
     methods: (MatchMethod, MatchMethod),
     allocator: &'h HerdAllocator<'h>,
@@ -80,7 +100,7 @@ impl<'h> Pool<'h> {
         self.id
     }
 
-    pub fn holdings(&self) -> &BTreeMap<&'h Unit<'h>, DealHolding<'h>> {
+    pub(super) fn holdings(&self) -> &BTreeMap<HoldingKey<'h>, DealHolding<'h>> {
         &self.holdings
     }
 
@@ -98,17 +118,22 @@ impl<'h> Pool<'h> {
         self.unit_of_account
     }
 
-    /// Gets the current `MatchMethod` according to whether the pool's balance is negative or positive.
-    pub fn current_method(&self, unit: &'h Unit<'h>) -> MatchMethod {
-        self.holdings.get(unit).map_or(self.methods.0, |h| {
-            if h.total().amount().is_negative() { self.methods.1 } else { self.methods.0 }
-        })
-    }
-
     /// Gets whether the pool is completely empty for the given `unit`;
     /// there are no deals in its holding.
-    pub fn is_empty(&self, unit: &'h Unit<'h>) -> bool {
-        !self.holdings.contains_key(unit)
+    pub fn key(&self, unit: &'h Unit<'h>, check_pos_first: bool) -> Option<HoldingKey<'h>> {
+        if self.holdings.contains_key(&HoldingKey::new(unit, check_pos_first)) {
+            Some(HoldingKey::new(unit, true))
+        } else if self.holdings.contains_key(&HoldingKey::new(unit, !check_pos_first)) {
+            Some(HoldingKey::new(unit, false))
+        } else {
+            None
+        }
+    }
+
+    /// Gets the match methods for the pool. The first is used for matching against positive holdings,
+    /// the second is used for matching against negative holdings.
+    pub fn methods(&self) -> (MatchMethod, MatchMethod) {
+        self.methods
     }
 
     pub fn set_methods(&mut self, methods: (MatchMethod, MatchMethod)) {
@@ -139,65 +164,86 @@ impl<'h> Pool<'h> {
         Ok(())
     }
 
-    pub fn extract(&mut self, group_id: &DealId, deal_unit: &'h Unit<'h>) -> Option<DealGroup<'h>> {
-        let holding = self.holdings.remove(deal_unit)?;
+    /// Gets the holding extracted by its id along with the balance of the pool before and after the extraction. If the holding is not found, returns None.
+    pub fn extract(
+        &mut self,
+        holding_id: usize,
+        deal_unit: &'h Unit<'h>,
+    ) -> Option<(AdjustedValue<'h>, DealHolding<'h>, AdjustedValue<'h>)> {
+        // Need to check positive and negative sides as the holding may have flipped during adjustment.
+        let holding_key = HoldingKey::new(deal_unit, true);
+        for key in [holding_key, -holding_key] {
+            match self.holdings.remove(&key) {
+                Some(holding) => {
+                    let balance = holding.adjusted_value();
 
-        match holding.extract(group_id) {
-            Ok((extracted, remainder)) => {
-                if let Some(remainder) = remainder {
-                    self.holdings.insert(deal_unit, remainder);
-                } else {
-                    self.holdings.remove(deal_unit);
+                    match holding.extract(holding_id) {
+                        Ok((extracted, remainder)) => {
+                            if let Some(remainder) = remainder {
+                                self.holdings.insert(key, remainder);
+                            } else {
+                                self.holdings.remove(&key);
+                            }
+                            return Some((
+                                balance,
+                                extracted,
+                                self.holdings.get(&key).map(|h| h.adjusted_value()).unwrap_or_else(
+                                    || AdjustedValue::zero(deal_unit, self.unit_of_account),
+                                ),
+                            ));
+                        }
+                        Err(holding) => {
+                            self.holdings.insert(key, holding);
+                            continue;
+                        }
+                    }
                 }
-                Some(extracted)
-            }
-            Err(holding) => {
-                self.holdings.insert(deal_unit, holding);
-                None
+                None => continue,
             }
         }
+        None
     }
 
     pub fn push(
         &mut self,
-        mut group: DealGroup<'h>,
+        mut holding: DealHolding<'h>,
         event_datetime: JDateTimeRange,
         from_pool: Option<&'h str>,
-    ) -> JournResult<PoolEvent<'h>> {
+    ) -> JournResult<(PoolEvent<'h>, usize)> {
         // Ensure that incoming deals can be valued in the pool's unit of account
-        group.ensure_valued(self.unit_of_account)?;
+        holding.ensure_valued(self.unit_of_account)?;
 
-        let deal_unit = group.unit();
-        let bal_before =
-            self.holdings.get(deal_unit).map(|h| h.total().clone()).unwrap_or_else(|| {
-                PoolBalance::zero(deal_unit, self.unit_of_account, self.allocator)
-            });
-
-        self.push_internal(group.clone());
+        let holding_key: HoldingKey = (&holding).into();
+        let bal_before = self
+            .holdings
+            .get(&holding_key)
+            .map(|h| h.adjusted_value())
+            .unwrap_or_else(|| AdjustedValue::zero(holding.unit(), self.unit_of_account));
+        let holding_snapshot = DealHoldingSummary::from(&holding);
+        let extract_id = self.push_internal(holding);
+        let bal_after = self.holdings.get(&holding_key).unwrap().adjusted_value();
 
         let event = PoolEvent::new(
             self.name,
             event_datetime,
             match from_pool {
-                Some(pool) => PoolEventKind::MovedTo(DealHolding::Group(group), pool),
-                None => PoolEventKind::PooledDeal(DealHolding::Group(group)),
+                Some(pool) => PoolEventKind::MovedTo(holding_snapshot, pool),
+                None => PoolEventKind::PooledDeal(holding_snapshot),
             },
             bal_before,
-            self.holdings.get(deal_unit).map(|dh| dh.total().clone()).unwrap_or_else(|| {
-                PoolBalance::zero(deal_unit, self.unit_of_account, self.allocator)
-            }),
+            bal_after,
         );
         debug!("{}", event);
-        Ok(event)
+        Ok((event, extract_id))
     }
 
     /// Tries to match the `originator` against the pool, returning the match event and any unmatched remainder.
-    /// If the deal cannot be matched, the `originator` is returned.
+    /// If the `originator` cannot be matched, it is returned unchanged.
     pub fn try_match(
         &mut self,
-        mut originator: DealGroup<'h>,
+        mut originator: DealHolding<'h>,
         event_datetime: JDateTimeRange,
-    ) -> JournResult<Result<(Vec<PoolEvent<'h>>, Option<DealGroup<'h>>), DealGroup<'h>>> {
+    ) -> JournResult<Result<(Vec<PoolEvent<'h>>, Option<DealHolding<'h>>), DealHolding<'h>>> {
         // Ensure the unit of account is set so that adj_deal.amount() is successful.
         originator.ensure_valued(self.unit_of_account)?;
 
@@ -227,27 +273,24 @@ impl<'h> Pool<'h> {
         }
     }
 
-    /// Matches a single dealgroup.
+    /// Matches the `originator` against the existing holding, returning a single event and change.
     fn try_match_single(
         &mut self,
-        originator: DealGroup<'h>,
+        originator: DealHolding<'h>,
         event_datetime: JDateTimeRange,
-    ) -> Result<(Option<PoolEvent<'h>>, Option<DealGroup<'h>>), DealGroup<'h>> {
+    ) -> Result<(Option<PoolEvent<'h>>, Option<DealHolding<'h>>), DealHolding<'h>> {
         let unit = originator.unit();
-        match self.holdings.remove(unit) {
+        let target_key = HoldingKey::new(unit, !originator.amount().is_positive());
+        match self.holdings.remove(&target_key) {
             Some(target) => {
-                let bal_before = target.total().clone();
+                let bal_before = target.adjusted_value();
                 let match_method =
                     if bal_before.amount().is_negative() { self.methods.1 } else { self.methods.0 };
-                match target
-                    .split_max(originator.total().amount().quantity() * dec!(-1), match_method)
-                {
+                match target.split_max(originator.amount().quantity() * dec!(-1), match_method) {
                     Ok((target_matched, target_remaining)) => {
                         let (originator_matched, originator_part_remaining) = originator
-                            .split_max(target_matched.total().amount().quantity() * dec!(-1))
+                            .split_max(target_matched.amount().quantity() * dec!(-1), match_method)
                             .unwrap();
-                        let originator_matched = DealHolding::Group(originator_matched);
-
                         let event = PoolEvent::new(
                             self.name,
                             event_datetime,
@@ -257,18 +300,19 @@ impl<'h> Pool<'h> {
                                 originator_matched,
                             )),
                             bal_before,
-                            target_remaining.as_ref().map(|dh| dh.total().clone()).unwrap_or_else(
-                                || PoolBalance::zero(unit, self.unit_of_account, self.allocator),
-                            ),
+                            target_remaining
+                                .as_ref()
+                                .map(|dh| dh.adjusted_value())
+                                .unwrap_or_else(|| AdjustedValue::zero(unit, self.unit_of_account)),
                         );
                         info!("{}", event);
                         if let Some(tr) = target_remaining {
-                            self.holdings.insert(unit, tr);
+                            self.holdings.insert(target_key, tr);
                         }
                         Ok((Some(event), originator_part_remaining))
                     }
                     Err(target) => {
-                        self.holdings.insert(unit, *target);
+                        self.holdings.insert(target_key, *target);
                         Err(originator)
                     }
                 }
@@ -277,35 +321,50 @@ impl<'h> Pool<'h> {
         }
     }
 
-    fn push_internal(&mut self, group: DealGroup<'h>) {
-        let deal_unit = group.unit();
+    fn push_internal(&mut self, holding: DealHolding<'h>) -> usize {
+        let holding_key = HoldingKey::new(holding.unit(), holding.amount().is_positive());
+        let holding_id = holding.id();
+        let method = if holding_key.positive { self.methods.0 } else { self.methods.1 };
 
-        let new_holding = match self.holdings.remove(deal_unit) {
-            Some(mut holding) => {
-                holding.push_group(group);
-                holding
-            }
-            None => DealHolding::Group(group),
+        let new_holding = match self.holdings.remove(&holding_key) {
+            Some(existing) => existing.push(holding, method),
+            None => holding,
         };
-        self.holdings.insert(deal_unit, new_holding);
+
+        let id = if method == MatchMethod::Average { new_holding.id() } else { holding_id };
+        self.holdings.insert(holding_key, new_holding);
+        id
     }
 
     /// Pushes an adjustment on to the pool. This will only fail if the adjustment is a scalar
-    /// adjustment and it is being pushed on to an empty holding.
+    /// adjustment, and it is being pushed on to an empty holding.
     pub(crate) fn push_adjustment(
         &mut self,
         mut adj: Adjustment<'h>,
     ) -> JournResult<PoolEvent<'h>> {
         let unit = adj.unit();
+
+        // Search for the positive or negative holding depending on the adjustment being made. This is to ensure that later,
+        // if the adjustment causes the holding to flip from positive to negative or vice versa, we can move it to the other side of the map
+        // without overwriting the other side's holding.
+        let ideal_holding_key =
+            HoldingKey::new(unit, adj.amount_adjustments()[0].amount().is_positive());
+        // Actually adjust the holding that exists.
+        let actual_holding_key = if self.holdings.contains_key(&ideal_holding_key) {
+            ideal_holding_key
+        } else {
+            HoldingKey::new(unit, !ideal_holding_key.positive)
+        };
+
         let bal_before = self
             .holdings
-            .get(unit)
-            .map(|h| h.total().clone())
-            .unwrap_or_else(|| PoolBalance::zero(unit, self.unit_of_account, self.allocator));
+            .get(&actual_holding_key)
+            .map(|h| h.adjusted_value())
+            .unwrap_or_else(|| AdjustedValue::zero(unit, self.unit_of_account));
 
-        adj.convert_set_to_add(bal_before.valued_amount());
+        adj.convert_set_to_add(&bal_before);
 
-        match self.holdings.get_mut(unit) {
+        let adj_holding_key = match self.holdings.get_mut(&actual_holding_key) {
             Some(holding) => {
                 // Check that the adjustment is after, in time to the sequence
                 if adj.datetime().start() < holding.datetime().end() {
@@ -317,7 +376,18 @@ impl<'h> Pool<'h> {
                     );
                 }
 
-                holding.add_adjustment(adj.clone())
+                holding.add_adjustment(adj.clone())?;
+                if holding.amount().is_positive() != bal_before.amount().is_positive() {
+                    // The adjustment has caused the holding to flip from positive to negative or vice versa.
+                    // We need to move the holding to the other side of the map.
+                    let new_holding_key = -actual_holding_key;
+                    let holding = self.holdings.remove(&actual_holding_key).unwrap();
+                    let replaced_holding = self.holdings.insert(new_holding_key, holding);
+                    debug_assert_eq!(replaced_holding, None, "holding overwritten");
+                    new_holding_key
+                } else {
+                    actual_holding_key
+                }
             }
             None => {
                 // If we are pushing an adjustment on to an empty holding, this only makes
@@ -327,23 +397,26 @@ impl<'h> Pool<'h> {
                     return Err(err!("Cannot push scalar adjustment on to empty holding"))?;
                 }
                 self.holdings.insert(
-                    unit,
-                    DealHolding::Group(DealGroup::new(
-                        DealGroupCriteria::Single,
-                        Deal::zero(unit, adj.entry(), self.unit_of_account),
-                    )),
+                    ideal_holding_key,
+                    DealHolding::Single(SingleDealHolding::new(Deal::zero(
+                        adj.id().clone(),
+                        unit,
+                        adj.entry(),
+                        self.unit_of_account,
+                    ))),
                 );
-                self.holdings.get_mut(unit).unwrap().add_adjustment(adj.clone())
+                self.holdings.get_mut(&ideal_holding_key).unwrap().add_adjustment(adj.clone())?;
+                ideal_holding_key
             }
-        }?;
+        };
 
         let bal_after = self
             .holdings
-            .get(unit)
-            .map(|dh| dh.total().clone())
-            .unwrap_or_else(|| PoolBalance::zero(unit, self.unit_of_account, self.allocator));
+            .get(&adj_holding_key)
+            .map(|dh| dh.adjusted_value())
+            .unwrap_or_else(|| AdjustedValue::zero(unit, self.unit_of_account));
         debug!(
-            "{} Adjusted {:?} on pool {}, bal now = {:?}",
+            "{:?} Adjusted {:?} on pool {}, bal now = {:?}",
             adj.datetime(),
             adj,
             self.name,
@@ -358,121 +431,13 @@ impl<'h> Pool<'h> {
         ))
     }
 
-    pub fn balance(&self, unit: &'h Unit<'h>) -> PoolBalance<'h> {
+    /*
+    pub fn balance(&self, unit: &'h Unit<'h>) -> AdjustedValue<'h> {
         match self.holdings.get(unit) {
-            Some(holding) => holding.total().clone(),
-            None => PoolBalance::zero(unit, self.unit_of_account, self.allocator),
+            Some(holding) => holding.adjusted_value(),
+            None => AdjustedValue::zero(unit, self.unit_of_account),
         }
-    }
-
-    pub fn balances(&self) -> impl Iterator<Item = (&'h Unit<'h>, PoolBalance<'h>)> + '_ {
-        self.holdings.iter().map(|(unit, holding)| (*unit, holding.total().clone()))
-    }
-}
-
-/// A snapshot of a pool in time, summarising the total amount held in the pool and its cost which
-/// is not necessarily the same as its value as the cost can include deal expenses.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct PoolBalance<'h> {
-    inner: ValuedAmount<'h>,
-    uoa: &'h Unit<'h>,
-}
-
-impl<'h> PoolBalance<'h> {
-    pub fn new(va: ValuedAmount<'h>, uoa: &'h Unit<'h>) -> Self {
-        assert!(!va.is_nil());
-
-        PoolBalance { inner: va, uoa }
-    }
-
-    pub fn zero(
-        unit: &'h Unit<'h>,
-        uoa: &'h Unit<'h>,
-        herd_allocator: &'h HerdAllocator<'h>,
-    ) -> Self {
-        PoolBalance { inner: ValuedAmount::new_in(unit.with_quantity(0), herd_allocator), uoa }
-    }
-
-    pub fn is_zero(&self) -> bool {
-        self.inner.is_zero()
-    }
-
-    /// The pool's amount.
-    pub fn amount(&self) -> Amount<'h> {
-        self.inner.amount()
-    }
-
-    pub fn unit_of_account(&self) -> &'h Unit<'h> {
-        self.uoa
-    }
-
-    /// Gets the pool balance's cost in the unit of account
-    pub fn cost(&self) -> Amount<'h> {
-        self.inner.value_in(self.uoa).unwrap()
-    }
-
-    pub fn valued_amount(&self) -> &ValuedAmount<'h> {
-        &self.inner
-    }
-
-    pub fn into_valued_amount(self) -> ValuedAmount<'h> {
-        self.inner
-    }
-
-    /// Gets valuations only, excluding the main amount
-    pub fn valuations(&self) -> impl Iterator<Item = Amount<'h>> + '_ {
-        self.inner.valuations().map(|v| v.value())
-    }
-}
-
-impl fmt::Display for PoolBalance<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.inner)
-    }
-}
-
-impl fmt::Debug for PoolBalance<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?}", self.inner)
-    }
-}
-
-impl From<&PoolBalance<'_>> for Yaml {
-    fn from(value: &PoolBalance<'_>) -> Self {
-        Yaml::from(&value.inner)
-    }
-}
-
-impl<'h> Add<&PoolBalance<'h>> for &PoolBalance<'h> {
-    type Output = PoolBalance<'h>;
-
-    fn add(self, rhs: &PoolBalance<'h>) -> Self::Output {
-        PoolBalance { inner: (&self.inner + &rhs.inner).unwrap(), uoa: self.uoa }
-    }
-}
-
-impl<'h> Sub<&PoolBalance<'h>> for &PoolBalance<'h> {
-    type Output = PoolBalance<'h>;
-
-    fn sub(self, rhs: &PoolBalance<'h>) -> Self::Output {
-        PoolBalance { inner: (&self.inner - &rhs.inner).unwrap(), uoa: self.uoa }
-    }
-}
-
-impl AddAssign<&Self> for PoolBalance<'_> {
-    fn add_assign(&mut self, rhs: &Self) {
-        assert_eq!(rhs.amount().unit(), self.amount().unit());
-
-        self.inner = (&self.inner + &rhs.inner).unwrap();
-    }
-}
-
-impl<'h> Mul<Decimal> for &PoolBalance<'h> {
-    type Output = PoolBalance<'h>;
-
-    fn mul(self, rhs: Decimal) -> Self::Output {
-        PoolBalance { inner: &self.inner * rhs, uoa: self.uoa }
-    }
+    }*/
 }
 
 #[cfg(test)]

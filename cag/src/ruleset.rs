@@ -5,7 +5,7 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
-use crate::cgt_configuration::DEFAULT_POOL;
+use crate::cag_configuration::DEFAULT_POOL;
 use journ_core::error::parsing::{IParseError, tag_err};
 use journ_core::parsing::IParseResult;
 use journ_core::parsing::input::{BlockInput, LocatedInput, TextInput};

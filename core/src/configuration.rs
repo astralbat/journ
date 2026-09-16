@@ -11,7 +11,7 @@ use crate::datetime::{
     DEFAULT_DATE_FORMAT, DEFAULT_DATETIME_FORMAT, DEFAULT_NUMBER_FORMAT, DEFAULT_TIME_FORMAT,
     DateTimeFormat,
 };
-use crate::journal_context::JournalContext;
+use crate::journal_context::JContext;
 use crate::journal_node::JournalNode;
 use crate::module::MODULES;
 use crate::module::{ModuleConfiguration, ModuleConfigurationEq};
@@ -22,6 +22,7 @@ use crate::unit::{NumberFormat, RoundingStrategy, Unit};
 use chrono_tz::Tz;
 use im::HashMap;
 use regex::{Regex, RegexBuilder};
+use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::fmt;
 use std::fmt::{Debug, Formatter};
@@ -45,7 +46,7 @@ impl ConfigurationVersion {
     /// Branch the version so that the id now points to the first child. E.g. 1.2 -> 1.2.1.
     /// The version is unchanged until the next time [Self::increment()] is called.
     pub fn branch(&self) -> ConfigurationVersion {
-        ConfigurationVersion { id: self.id.branch().into(), version: self.version.clone() }
+        ConfigurationVersion { id: self.id.next_id().into(), version: self.version.clone() }
     }
 
     pub fn increment(&self) -> ConfigurationVersion {
@@ -85,7 +86,7 @@ struct BaseConfiguration<'h> {
 
 impl<'h> BaseConfiguration<'h> {
     fn new(parent: Option<Arc<BaseConfiguration<'h>>>) -> Self {
-        let allocator = JournalContext::current().allocator();
+        let allocator = JContext::get().allocator();
         let mut bc = Self {
             parent,
             number_format: DEFAULT_NUMBER_FORMAT.deref(),
@@ -127,6 +128,10 @@ impl<'h> BaseConfiguration<'h> {
             // start of the call.
             Arc::get_mut(self).unwrap()
         }
+    }
+
+    pub fn default_unit(&self) -> &'h Unit<'h> {
+        self.default_unit
     }
 
     pub fn get_unit(&self, code: &str) -> Option<&'h Unit<'h>> {
@@ -387,7 +392,7 @@ impl<'h> Configuration<'h> {
     }
 
     pub fn default_unit(&self) -> &'h Unit<'h> {
-        self.base_config.default_unit
+        self.base_config.default_unit()
     }
 
     pub fn merge_default_unit(
@@ -404,16 +409,23 @@ impl<'h> Configuration<'h> {
         self.base_config.get_unit(code)
     }
 
+    pub fn get_or_create_unit(&mut self, code: &str) -> &'h Unit<'h> {
+        match self.base_config.get_unit(code) {
+            Some(unit) => unit,
+            None => {
+                let unit = Unit::new(code);
+                self.merge_unit(&unit)
+            }
+        }
+    }
+
     /// Inserts the unit if it doesn't already exist. If it exists, then a new unit is created
     /// that is merged with the existing one with the new currencies parameters overriding the existing
     /// where they have been specified.
     /// Returns the unit inserted or merged.
-    pub fn merge_unit(
-        &mut self,
-        unit: &Unit<'h>,
-        allocator: &'h HerdAllocator<'h>,
-    ) -> &'h Unit<'h> {
+    pub fn merge_unit(&mut self, unit: &Unit<'h>) -> &'h Unit<'h> {
         let mut_base = self.get_mut();
+        let allocator = JContext::get().allocator();
 
         // See if we already have a unit with the same code as any of the unit's aliases and merge with that.
         let mut merged_unit = None;
@@ -453,6 +465,11 @@ impl<'h> Configuration<'h> {
             primary.conversion_expression().cloned().or(secondary.conversion_expression().cloned()),
         );
         builder.set_prices(primary.prices().cloned().or(secondary.prices().cloned()));
+        if let Some(secs) =
+            primary.pricedb_lookup_within_secs().or(secondary.pricedb_lookup_within_secs())
+        {
+            builder.set_pricedb_lookup_within_secs(secs)
+        }
 
         // Combine aliases, but not with the default unit
         let mut combined_aliases = Vec::with_capacity(primary.aliases().count());
@@ -619,7 +636,7 @@ impl<'h> Configuration<'h> {
     }
 
     pub fn allocator(&self) -> &'h HerdAllocator<'h> {
-        JournalContext::current().allocator()
+        JContext::get().allocator()
     }
 
     /// Allocates an object.
@@ -651,8 +668,10 @@ impl<'s, 'h> DerefMutAndDebug<'h, 's, Configuration<'h>> for &'s mut Configurati
 
 //impl<'s, 'h> DerefMutAndDebug<'h, 's, Configuration<'h>> for MutexGuard<'s, Configuration<'h>> {}
 
-fn as_expressions<S: AsRef<str>, I: Iterator<Item = S>>(items: I) -> Vec<Expression> {
-    items.map(|i| Expression::from(i.as_ref())).collect()
+fn as_expressions<S: AsRef<str>, I: Iterator<Item = S>>(
+    items: I,
+) -> impl Iterator<Item = Expression> {
+    items.map(|i| Expression::from(i.as_ref()))
 }
 
 /// Case-insensitive pattern matching with ".." used to match any number of characters like ".*".
@@ -695,11 +714,11 @@ pub struct UnitFilter {
 }
 impl UnitFilter {
     pub fn new<S: AsRef<str>, I: Iterator<Item = S>>(units: I) -> Self {
-        Self { expressions: as_expressions(units) }
+        Self { expressions: as_expressions(units).collect() }
     }
 }
 impl<'h> Filter<Unit<'h>> for UnitFilter {
-    fn is_included(&self, u: &Unit) -> bool {
+    fn is_included(&self, u: &Unit<'h>) -> bool {
         // When the filter is empty, all units are included.
         if self.expressions.is_empty() {
             return true;
@@ -729,12 +748,12 @@ impl<'h> Filter<Unit<'h>> for UnitFilter {
 /// to represent a wildcard match for any number of characters in the account name.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct AccountFilter {
-    expressions: Vec<Expression>,
+    expressions: SmallVec<[Expression; 2]>,
 }
 impl AccountFilter {
-    /// Creates a new account filter from the given slice of strings.
+    /// Creates a new account filter from the given string expressions.
     pub fn new<S: AsRef<str>, I: Iterator<Item = S>>(accounts: I) -> Self {
-        Self { expressions: as_expressions(accounts) }
+        Self { expressions: as_expressions(accounts).collect() }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -758,19 +777,58 @@ impl<'h> Filter<Account<'h>> for AccountFilter {
     }
 }
 
-/// The standard description filter is a substring filter.
-#[derive(Clone)]
-pub struct DescriptionFilter<'a, S: AsRef<str>>(pub &'a [S]);
-
-impl<S: AsRef<str> + Clone> Filter<str> for DescriptionFilter<'_, S> {
-    fn is_included(&self, description: &str) -> bool {
+impl<'h> Filter<Account<'h>> for &AccountFilter {
+    fn is_included(&self, item: &Account<'h>) -> bool {
         // When the filter is empty, all accounts are included.
-        if self.0.is_empty() {
+        if self.expressions.is_empty() {
             return true;
         }
 
-        for desc_part in self.0 {
-            if description.contains(desc_part.as_ref()) {
+        for account_expr in &self.expressions {
+            if account_expr.is_match(item.name()) {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/*
+impl<'h, T: Deref<Target = Account<'h>>> Filter<T> for AccountFilter {
+    fn is_included(&self, item: &T) -> bool {
+        if self.expressions.is_empty() {
+            return true;
+        }
+
+        for account_expr in &self.expressions {
+            if account_expr.is_match(item.name()) {
+                return true;
+            }
+        }
+        false
+    }
+}*/
+
+/// The standard description filter is a substring filter.
+#[derive(Clone)]
+pub struct DescriptionFilter {
+    expressions: SmallVec<[Expression; 2]>,
+}
+impl DescriptionFilter {
+    pub fn new<S: AsRef<str>, I: Iterator<Item = S>>(descriptions: I) -> Self {
+        Self { expressions: as_expressions(descriptions).collect() }
+    }
+}
+
+impl Filter<str> for DescriptionFilter {
+    fn is_included(&self, description: &str) -> bool {
+        // When the filter is empty, all accounts are included.
+        if self.expressions.is_empty() {
+            return true;
+        }
+
+        for desc_expr in &self.expressions {
+            if desc_expr.is_match(description) {
                 return true;
             }
         }
@@ -779,18 +837,26 @@ impl<S: AsRef<str> + Clone> Filter<str> for DescriptionFilter<'_, S> {
 }
 
 #[derive(Clone)]
-pub struct FileFilter<'a, S: AsRef<str>>(pub &'a [S]);
+pub struct FileFilter {
+    expressions: SmallVec<[Expression; 2]>,
+}
 
-impl<'h, S: AsRef<str> + Clone> Filter<JournalNode<'h>> for FileFilter<'_, S> {
+impl FileFilter {
+    pub fn new<S: AsRef<str>, I: Iterator<Item = S>>(files: I) -> Self {
+        Self { expressions: as_expressions(files).collect() }
+    }
+}
+
+impl<'h> Filter<JournalNode<'h>> for FileFilter {
     fn is_included(&self, node: &JournalNode<'h>) -> bool {
         // When the filter is empty, all accounts are included.
-        if self.0.is_empty() {
+        if self.expressions.is_empty() {
             return true;
         }
 
         if let Some(file_name) = node.nearest_filename() {
-            for file_part in self.0 {
-                if file_name.ends_with(file_part.as_ref()) {
+            for file_expr in &self.expressions {
+                if file_expr.is_match(file_name.to_str().unwrap()) {
                     return true;
                 }
             }

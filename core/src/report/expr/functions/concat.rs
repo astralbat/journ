@@ -10,10 +10,13 @@ use crate::report::expr::column_value::ColumnValue;
 use crate::report::expr::{Expr, IdentifierContext};
 use smartstring::alias::String as SS;
 
-pub fn concat<'h>(
-    args: &[Expr<'h>],
-    context: &mut dyn IdentifierContext<'h>,
-) -> JournResult<ColumnValue<'h>> {
+pub fn concat<'h, 'a>(
+    args: &[Expr],
+    context: &mut dyn IdentifierContext<'h, 'a>,
+) -> JournResult<ColumnValue<'h>>
+where
+    'h: 'a,
+{
     let mut result = SS::new();
 
     for i in 0..args.len() {

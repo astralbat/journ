@@ -1,67 +1,36 @@
 /*
- * Copyright (c) 2022-2024. Mark Barrett
+ * Copyright (c) 2022-2026. Mark Barrett
  * This file is part of Journ.
  * Journ is free software: you can redistribute it and/or modify it under the terms of the GNU Affero General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
+use crate::adjusted_value::AdjustedValue;
 use crate::adjustment::Adjustment;
-use crate::cgt_configuration::CagConfiguration;
-use crate::deal_holding::DealHolding;
+use crate::cag_configuration::CagConfiguration;
+use crate::holding::Split;
 use crate::module_init::MODULE_NAME;
-use crate::pool::PoolBalance;
-use journ_core::alloc::HerdAllocator;
-use journ_core::datetime::JDateTimeRange;
+use chrono::DateTime;
+use chrono_tz::Tz;
+use journ_core::amount::{Amount, Quantity};
+use journ_core::configuration::Configuration;
+use journ_core::datetime::{DateTimePrecision, JDateTime, JDateTimeRange};
 use journ_core::error::JournResult;
-use journ_core::journal_entry::{EntryId, JournalEntry};
+use journ_core::journal_context::JContext;
+use journ_core::journal_entry::JournalEntry;
 use journ_core::journal_entry_flow::Flow;
-use journ_core::metadata::Metadata;
+use journ_core::tree_id::{BranchCountingTreeId, TreeId};
 use journ_core::unit::Unit;
 use journ_core::valued_amount::ValuedAmount;
-use journ_core::valuer::{SystemValuer, ValuationError};
-use smallvec::SmallVec;
+use journ_core::valuer::{SystemValuer, ValuationError, ValueError, ValueResult, Valuer};
 use std::fmt;
 use std::fmt::Formatter;
-use std::ops::Add;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::rc::Rc;
 
 pub const PROP_EXPENSES: &str = "Expenses";
 pub const PROP_TAXABLE_GAIN: &str = "Taxable Gain";
 
-/// The deal identifier uniquely identifies a deal within an entry.
-/// Upon splitting, the two parts will both still have the same deal id. Therefore the deal_id is not always unique.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct DealId {
-    entry_id: EntryId,
-    // The `extra` is the same as position when that is `Some`. When `None`, it is a unique sequence number.
-    // This allows `DealId` to always be unique, and this field coming above `position` ensures
-    // that existing ids with a position always come first.
-    extra: u32,
-    position: Option<u32>,
-}
-
-impl DealId {
-    pub(crate) fn new(entry_id: &EntryId, position: u32) -> Self {
-        Self { entry_id: entry_id.clone(), position: Some(position), extra: position }
-    }
-    fn allocate(entry_id: &EntryId) -> Self {
-        // Set to a sufficiently high starting value so that allocated deals are naturally sequenced
-        // after parsed deals that will expected to be allocated manually.
-        static DEAL_COUNTER: AtomicU32 = AtomicU32::new(2 ^ 16);
-        let new_id = DEAL_COUNTER.fetch_add(1, Ordering::Relaxed);
-        Self { entry_id: entry_id.clone(), position: None, extra: new_id }
-    }
-
-    pub fn entry_id(&self) -> &EntryId {
-        &self.entry_id
-    }
-
-    /// The position of the deal within the entry where the first deal is 0. This will be `None`
-    /// when the deal was not read from an entry.
-    pub fn position(&self) -> Option<u32> {
-        self.position
-    }
-}
+pub type DealId = TreeId;
 
 #[derive(Clone)]
 pub enum DealOrigin<'h> {
@@ -77,61 +46,38 @@ impl<'h> DealOrigin<'h> {
     }
 }
 
-#[derive(Clone)]
+//#[derive(Clone)]
 pub struct Deal<'h> {
     /// The deal id. Sorting deals by their id will allow them to written to a `JournalEntry` in the
     /// correct order.
-    id: DealId,
+    id: BranchCountingTreeId,
     /// The entry from which the deal or belongs to.
     entry: &'h JournalEntry<'h>,
-    metadata: SmallVec<[Metadata<'h>; 4]>,
-    datetime: JDateTimeRange,
-    /// Positive for acquisitions, negative for disposals. May be zero but never nil.
-    /// The values represent the cost of the deal before allowable expenses for acquisitions; or it may reflect gross proceeds for disposals.
-    /// A ValuedAmount type is expected to have at least one valuation in the unit of account set at the time, and valuations in other currencies
-    /// may be useful if the unit of account changes and the containing `DealHolding` needs to be revalued.
-    valued_amount: ValuedAmount<'h>,
-    /// Set allowable expenses that may be added to the cost of a purchase or deducted from the gross proceeds.
-    /// The expenses will be positive to indicate they should be added to to the `valued_amount`, or negative to indicate they
-    /// should be deducted from the `valued_amount`.
-    allowable_expenses: ValuedAmount<'h>,
-    /// Any adjustments applied to the deal in the order they were applied.
-    adjustments: Vec<Adjustment<'h>>,
     /// Sets the gain explicitly, rather than allowing the gain to be calculated. There are usually exceptional reasons
     /// within a tax code that may allow this.
-    taxable_gain: Option<ValuedAmount<'h>>,
-    /// Indicates whether the Deal was specified manually using a 'CAG-Deal' key. These deals
-    /// will override the normal deal detection on the entry.
-    required: bool,
+    taxable_gain: Option<Amount<'h>>,
     /// When split operations are performed on deals, this is set to the original deal before the split.
     /// This is useful to allow for report whether a deal has been split up, and the amount it was split from.
-    split_parent: Option<Box<DealHolding<'h>, &'h HerdAllocator<'h>>>,
-    /// The balance of the valued_amount plus allowable_expenses
-    balance: PoolBalance<'h>,
-    /// The unit of account
-    unit_of_account: &'h Unit<'h>,
+    split_parent: Option<Rc<Deal<'h>>>,
+    /// The amount transacted along with its total cost and expenses.
+    adjusted_value: AdjustedValue<'h>,
 }
 
 impl<'h> Deal<'h> {
     /// Creates a new deal.
-    /// Returns `Err` when the unit of account cannot be detected.
+    ///
+    /// # Returns
+    /// `Ok(Deal)` unless the `valued_amount` or `expenses` cannot be valued in the specified `uoa`, in which case a `ValueError::ValuationNeeded` is returned.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        position: Option<u32>,
+        id: DealId,
         entry: &'h JournalEntry<'h>,
-        metadata: SmallVec<[Metadata<'h>; 4]>,
         mut valued_amount: ValuedAmount<'h>,
+        expenses: ValuedAmount<'h>,
         taxable_gain: Option<ValuedAmount<'h>>,
-        required: bool,
         uoa: &'h Unit<'h>,
-    ) -> JournResult<Self> {
+    ) -> ValueResult<'h, Self> {
         assert!(!valued_amount.is_nil());
-
-        let id = position
-            .map(|id| DealId::new(entry.id(), id))
-            .unwrap_or_else(|| DealId::allocate(entry.id()));
-
-        let datetime = entry.datetime_range();
 
         let round_deals = entry
             .config()
@@ -143,223 +89,305 @@ impl<'h> Deal<'h> {
             valued_amount.round_total_valuations();
         }
 
-        let balance = Self::calc_balance(&valued_amount, &ValuedAmount::nil(), &[], uoa);
+        let amount = valued_amount.amount();
+        let valuation =
+            valued_amount.value_in(uoa).ok_or_else(|| ValueError::ValuationNeeded(uoa, amount))?;
+        let expenses_valuation = expenses
+            .value_in(uoa)
+            .ok_or_else(|| ValueError::ValuationNeeded(uoa, expenses.amount()))?;
+
+        let adjusted_value = AdjustedValue::new(
+            amount,
+            (valuation + expenses_valuation).abs(),
+            expenses_valuation.abs(),
+        );
+
+        let taxable_gain = taxable_gain
+            .map(|tg| tg.value_in(uoa).ok_or_else(|| ValueError::ValuationNeeded(uoa, tg.amount())))
+            .transpose()?;
 
         Ok(Self {
-            id,
-            datetime,
+            id: BranchCountingTreeId::from(id),
             entry,
-            metadata,
-            valued_amount,
-            allowable_expenses: ValuedAmount::nil(),
             taxable_gain,
-            required,
             split_parent: None,
-            balance,
-            adjustments: vec![],
-            unit_of_account: uoa,
+            adjusted_value,
         })
     }
 
-    pub fn zero(unit: &'h Unit<'h>, entry: &'h JournalEntry<'h>, uoa: &'h Unit<'h>) -> Self {
-        let allocator = entry.config().allocator();
+    pub fn zero(
+        id: DealId,
+        unit: &'h Unit<'h>,
+        entry: &'h JournalEntry<'h>,
+        uoa: &'h Unit<'h>,
+    ) -> Self {
+        let allocator = JContext::get().allocator();
         Self::new(
-            None,
+            id,
             entry,
-            SmallVec::new(),
             ValuedAmount::new_in(unit.with_quantity(0), allocator),
+            ValuedAmount::nil(),
             None,
-            false,
             uoa,
         )
         .unwrap()
     }
 
-    pub fn add_expenses(&mut self, allowable_expenses: ValuedAmount<'h>) {
-        assert!(
-            allowable_expenses.is_nil()
-                || allowable_expenses.units().all(|u| u != self.valued_amount.unit()),
-            "Expenses must not have the same unit as the valued amount"
-        );
+    pub fn id(&self) -> &BranchCountingTreeId {
+        &self.id
+    }
 
-        self.allowable_expenses = allowable_expenses;
+    pub fn datetime(&self) -> JDateTimeRange {
+        self.entry().datetime_range()
+    }
 
+    pub fn unit(&self) -> &'h Unit<'h> {
+        self.adjusted_value.amount().unit()
+    }
+
+    pub fn unit_of_account(&self) -> &'h Unit<'h> {
+        self.adjusted_value.unit_of_account()
+    }
+
+    pub fn is_acquisition(&self) -> bool {
+        self.adjusted_value.amount() > 0
+    }
+
+    pub fn is_disposal(&self) -> bool {
+        self.adjusted_value.amount() < 0
+    }
+
+    /// Ensure that all the deal's components can be valued in the specified `unit`.
+    /// If not, attempt to perform a valuation on the entry which will first try to derive the valuation,
+    /// and fallback to using the price lookup functionality.
+    pub fn ensure_valued(&mut self, unit_of_account: &'h Unit<'h>) -> Result<(), ValuationError> {
+        let mut system_valuer = SystemValuer::from(self.entry());
         let round_deals = self
             .entry()
             .config()
             .module_config::<CagConfiguration>(MODULE_NAME)
             .unwrap()
             .round_deal_values();
-        if round_deals {
-            self.allowable_expenses.make_all_valuations_total();
-            self.allowable_expenses.round();
-        }
-
-        self.balance = Self::calc_balance(
-            &self.valued_amount,
-            &self.allowable_expenses,
-            &[],
-            self.unit_of_account,
-        );
+        self.value_with(&mut system_valuer, unit_of_account, round_deals)
     }
 
-    pub fn id(&self) -> &DealId {
-        &self.id
-    }
-
-    pub fn datetime(&self) -> JDateTimeRange {
-        self.datetime
-    }
-
-    pub fn unit(&self) -> &'h Unit<'h> {
-        self.valued_amount.amount().unit()
-    }
-
-    pub fn unit_of_account(&self) -> &'h Unit<'h> {
-        self.unit_of_account
-    }
-
-    pub fn allocator(&self) -> &'h HerdAllocator<'h> {
-        self.valued_amount.allocator().expect("Deal's valued amount cannot be nil")
-    }
-
-    pub fn is_acquisition(&self) -> bool {
-        self.valued_amount.amount() > 0
-    }
-
-    pub fn is_disposal(&self) -> bool {
-        self.valued_amount.amount() < 0
-    }
-
-    /// Gets whether this deal can match another based on one being an acquisition and the other, a disposal.
-    pub fn is_match_compatible(&self, other: &Deal<'h>) -> bool {
-        if self.unit() != other.unit() {
-            return false;
-        }
-        if self.total().is_zero() || other.total().is_zero() {
-            return true;
-        }
-        self.is_acquisition() != other.is_acquisition()
-    }
-
-    /// Ensure that all of the deal's components can be valued in the specified `unit`.
-    /// If not, attempt to perform a valuation on the entry which will first try to derive the valuation,
-    /// and fallback to using the price lookup functionality.
-    pub fn ensure_valued(
+    pub fn set_value_on_date(
         &mut self,
-        unit_of_account: &'h Unit<'h>,
-        rounded: bool,
+        uoa: &'h Unit<'h>,
+        config: &Configuration<'h>,
+        date: DateTime<Tz>,
     ) -> Result<(), ValuationError> {
-        let mut system_valuer = SystemValuer::from(self.entry());
+        let mut valuer =
+            SystemValuer::on_date(config.clone(), JDateTime::new(date, DateTimePrecision::Second));
+        let round_vals =
+            config.module_config::<CagConfiguration>(MODULE_NAME).unwrap().round_deal_values();
+        self.value_with(&mut valuer, uoa, round_vals)
+    }
 
-        self.valued_amount.value_in_or_value_with(unit_of_account, &mut system_valuer, rounded)?;
-        self.allowable_expenses.value_in_or_value_with(
-            unit_of_account,
-            &mut system_valuer,
-            rounded,
-        )?;
-        self.taxable_gain
-            .as_mut()
-            .map(|tg| {
-                tg.value_in_or_value_with(unit_of_account, &mut system_valuer, rounded).map(Some)
-            })
-            .unwrap_or(Ok(None))?;
-        self.balance = Self::calc_balance(
-            &self.valued_amount,
-            &self.allowable_expenses,
-            &self.adjustments,
-            self.unit_of_account,
-        );
+    pub fn value_with<V: Valuer<'h>>(
+        &mut self,
+        valuer: &mut V,
+        quote_unit: &'h Unit<'h>,
+        round_vals: bool,
+    ) -> Result<(), ValuationError> {
+        let mut new_val = valuer.value(quote_unit, self.adjusted_value.value())?.value();
+        let mut new_expenses = valuer.value(quote_unit, self.adjusted_value.expenses())?.value();
+        if round_vals {
+            new_val = new_val.rounded();
+            new_expenses = new_expenses.rounded();
+        }
+
+        self.adjusted_value =
+            AdjustedValue::new(self.adjusted_value.amount(), new_val, new_expenses);
+        self.taxable_gain = self
+            .taxable_gain
+            .map(|tg| valuer.value(quote_unit, tg).map(|v| v.value()))
+            .transpose()?;
+
         Ok(())
     }
 
-    pub fn valued_amount(&self) -> &ValuedAmount<'h> {
-        &self.valued_amount
+    pub fn adjusted_value(&self) -> AdjustedValue<'h> {
+        self.adjusted_value
     }
 
-    /// The total after adjustments, without considering expenses.
-    pub fn total_before_expenses(&self) -> ValuedAmount<'h> {
-        let mut va = self.valued_amount.clone();
-        for adj in &self.adjustments {
-            adj.apply(&mut va).unwrap();
-        }
-        va
+    pub fn amount(&self) -> Amount<'h> {
+        self.adjusted_value.amount()
     }
 
     /// The total after adjustments and expenses.
-    pub fn total(&self) -> &PoolBalance<'h> {
-        &self.balance
+    pub fn value(&self) -> Amount<'h> {
+        self.adjusted_value.value()
     }
 
-    /// Gets the `PoolBalance` as if a pool only contained this deal.
-    ///
-    /// # Examples
-    /// * A deal of 5 BTC @@ $1000 ++ 0.1 BTC @@ $20 should have a balance of 5.1 BTC @@ $1020 (total cost).
-    /// * A deal of -5 BTC @@ $1000 ++ 0.1 BTC @@ $20 should have a balance of 4.9 BTC @@ $880 (net proceeds).
-    fn calc_balance(
-        valued_amount: &ValuedAmount<'h>,
-        expenses: &ValuedAmount<'h>,
-        adjustments: &[Adjustment<'h>],
-        uoa: &'h Unit<'h>,
-    ) -> PoolBalance<'h> {
-        let mut adj_va = valued_amount.clone();
-        adj_va.add_from(expenses);
-        for adj in adjustments {
-            adj.apply(&mut adj_va).unwrap();
-        }
+    pub fn consideration(&self) -> Amount<'h> {
+        self.adjusted_value.consideration()
+    }
 
-        PoolBalance::new(adj_va, uoa)
+    pub fn expenses(&self) -> Amount<'h> {
+        self.adjusted_value.expenses()
+    }
+
+    pub fn add_adjustment(&mut self, adjustment: Adjustment<'h>) -> JournResult<()> {
+        adjustment.apply(&mut self.adjusted_value)
     }
 
     pub fn entry(&self) -> &'h JournalEntry<'h> {
         self.entry
     }
 
-    pub fn metadata(&self) -> &[Metadata<'h>] {
-        &self.metadata
-    }
-
-    pub fn expenses(&self) -> &ValuedAmount<'h> {
-        &self.allowable_expenses
-    }
-
-    pub fn taxable_gain(&self) -> Option<&ValuedAmount<'h>> {
-        self.taxable_gain.as_ref()
-    }
-
-    pub fn is_required(&self) -> bool {
-        self.required
+    pub fn taxable_gain(&self) -> Option<Amount<'h>> {
+        self.taxable_gain
     }
 
     /// Gets the parent deal that this deal was split from using [Deal::split_max()], if any.
-    pub fn split_parent(&self) -> Option<&DealHolding<'h>> {
-        self.split_parent.as_deref()
+    pub fn split_parent(&self) -> Option<&Rc<Deal<'h>>> {
+        self.split_parent.as_ref()
     }
 
     /// Gets whether the deal has been split up from a bigger deal.
     pub fn is_remainder(&self) -> bool {
         match self.split_parent() {
-            Some(parent) => {
-                self.total_before_expenses().amount().quantity()
-                    < parent.total_before_expenses().amount().quantity()
-            }
+            Some(parent) => self.adjusted_value.amount().quantity() < parent.amount().quantity(),
             None => false,
         }
+    }
+
+    /// Split on the amount. Other components are split proportionally and rounded.
+    pub fn split(self, amount: Quantity) -> (Deal<'h>, Option<Deal<'h>>) {
+        let percent = amount / self.adjusted_value.amount().quantity();
+        let (tg_left, tg_right) = match self.taxable_gain {
+            Some(tg) => {
+                let (left, right) = tg.split_percent(percent, Some(tg.max_scale()));
+                (Some(left), Some(right))
+            }
+            None => (None, None),
+        };
+
+        let (left, right) = self.adjusted_value.split(amount);
+
+        self.split_with((left, right), (tg_left, tg_right))
+    }
+
+    /// Splits all the deal's components using subtraction only.
+    pub fn split_all(
+        self,
+        adjusted_value: AdjustedValue<'h>,
+        taxable_gain: Option<Amount<'h>>,
+    ) -> (Deal<'h>, Option<Deal<'h>>) {
+        assert_eq!(
+            adjusted_value.amount().unit(),
+            self.adjusted_value.amount().unit(),
+            "Cannot split a deal with an adjusted value in a different unit than the original deal's adjusted value"
+        );
+        assert_eq!(
+            adjusted_value.amount().is_positive(),
+            self.adjusted_value.amount().is_positive(),
+            "Cannot split a deal with an adjusted value in a different direction than the original deal's adjusted value"
+        );
+        assert!(
+            adjusted_value.amount().abs() <= self.adjusted_value.amount().abs(),
+            "Cannot split a deal with an adjusted value greater than the original deal's adjusted value"
+        );
+
+        let (tg_left, tg_right) = match self.taxable_gain {
+            Some(self_tg) => match taxable_gain {
+                Some(tg) => {
+                    assert!(
+                        tg <= self_tg,
+                        "Cannot split a deal with a taxable gain greater than the original deal's taxable gain"
+                    );
+                    let (left, right) = self_tg.split(tg.quantity());
+                    (Some(left), Some(right))
+                }
+                None => (None, Some(self_tg)),
+            },
+            None => (None, taxable_gain),
+        };
+
+        let left = adjusted_value;
+        let right = self.adjusted_value - adjusted_value;
+
+        self.split_with(
+            (left, if !right.amount().is_zero() { Some(right) } else { None }),
+            (tg_left, tg_right),
+        )
+    }
+
+    pub fn split_with_split(self, split: &mut Split<'h>) -> (Deal<'h>, Option<Deal<'h>>) {
+        let split_res = split.split_off(&[
+            self.adjusted_value.amount(),
+            self.adjusted_value.value(),
+            self.adjusted_value.expenses(),
+            self.taxable_gain.unwrap_or(Amount::nil()),
+        ]);
+
+        let left = AdjustedValue::new(split_res.of()[0], split_res.of()[1], split_res.of()[2]);
+
+        let right = if split_res.from()[0].is_zero() {
+            None
+        } else {
+            Some(AdjustedValue::new(split_res.from()[0], split_res.from()[1], split_res.from()[2]))
+        };
+        let tg_left = if split_res.of()[3].is_zero() { None } else { Some(split_res.of()[3]) };
+        let tg_right = if split_res.from()[3].is_zero() { None } else { Some(split_res.from()[3]) };
+        self.split_with((left, right), (tg_left, tg_right))
+    }
+
+    /*
+    /// Splits on the percentage of the amount. Other components are split proportionally.
+    ///
+    /// All values are rounded.
+    pub fn split_percent(self, percent: Decimal) -> (Deal<'h>, Option<Deal<'h>>) {
+        let (tg_left, tg_right) = match self.taxable_gain {
+            Some(tg) => {
+                let (left, right) = tg.split_percent(percent, Some(tg.max_scale()));
+                (Some(left), Some(right))
+            }
+            None => (None, None),
+        };
+
+        let (left, right) =
+            self.adjusted_value.split(self.adjusted_value.amount().quantity() * percent);
+
+        self.split_with((left, right), (tg_left, tg_right))
+    }*/
+
+    fn split_with(
+        self,
+        (left, right): (AdjustedValue<'h>, Option<AdjustedValue<'h>>),
+        (tg_left, tg_right): (Option<Amount<'h>>, Option<Amount<'h>>),
+    ) -> (Deal<'h>, Option<Deal<'h>>) {
+        // Create an Rc of self so that we can set the split_parent of the new deals to it.
+        let self_rc = Rc::new(self);
+
+        // Get the original root deal so that we can continue to generate ids on its branch.
+        let mut orig_deal = &self_rc;
+        while let Some(parent) = orig_deal.split_parent.as_ref() {
+            orig_deal = parent;
+        }
+
+        let left_deal = Deal {
+            id: BranchCountingTreeId::from(orig_deal.id().next_id()),
+            entry: self_rc.entry,
+            taxable_gain: tg_left,
+            split_parent: Some(Rc::clone(&self_rc)),
+            adjusted_value: left,
+        };
+        let right_deal = right.map(|r| Deal {
+            id: BranchCountingTreeId::from(orig_deal.id().next_id()),
+            entry: self_rc.entry,
+            taxable_gain: tg_right,
+            split_parent: Some(Rc::clone(&self_rc)),
+            adjusted_value: r,
+        });
+        (left_deal, right_deal)
     }
 }
 
 impl fmt::Display for Deal<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.valued_amount,)?;
-        if !self.allowable_expenses.amount().is_zero() {
-            if self.allowable_expenses.amount().is_negative() {
-                let mut neg_expenses = self.allowable_expenses.clone();
-                neg_expenses.negate();
-                write!(f, " -- {}", neg_expenses)?
-            } else {
-                write!(f, " ++ {}", self.allowable_expenses)?
-            }
-        }
+        write!(f, "{}", self.adjusted_value)?;
         if let Some(tg) = &self.taxable_gain {
             write!(f, " == {}", tg)?
         }
@@ -393,26 +421,44 @@ impl Ord for Deal<'_> {
     }
 }
 
+/*
 /// Tries to add a deal to another deal. If the deals cannot be added, `None` is returned.
-impl<'h> Add<&Deal<'h>> for Deal<'h> {
-    type Output = Option<Deal<'h>>;
-    fn add(mut self, rhs: &Deal<'h>) -> Self::Output {
-        if self.unit() != rhs.unit() {
-            return None;
-        }
-        if self.taxable_gain.is_some() || rhs.taxable_gain.is_some() {
-            return None;
-        }
+impl<'h> Add<&Deal<'h>> for &Deal<'h> {
+    type Output = Deal<'h>;
+    fn add(self, rhs: &Deal<'h>) -> Self::Output {
+        assert_eq!(self.unit(), rhs.unit(), "Cannot add deals with different units: {} and {}", self.unit(), rhs.unit());
+        assert_eq!(self.value().unit(), rhs.value().unit(), "Cannot add deals with different value units: {} and {}", self.value().unit(), rhs.value().unit());
 
-        self.adjustments.append(&mut rhs.adjustments.clone());
-        self.valued_amount = (&self.valued_amount + &rhs.valued_amount).unwrap();
-        self.allowable_expenses = (&self.allowable_expenses + &rhs.allowable_expenses)?;
-        self.balance = Self::calc_balance(
-            &self.valued_amount,
-            &self.allowable_expenses,
-            &self.adjustments,
-            self.unit_of_account,
-        );
-        Some(self)
+        let tg = match (self.taxable_gain, rhs.taxable_gain) {
+            (Some(tg1), Some(tg2)) => {
+                Some(tg1 + tg2)
+            }
+            (Some(tg), None) | (None, Some(tg)) => {
+                Some(tg)
+            }
+            (None, None) => None
+        };
+        let adj_value = self.adjusted_value + rhs.adjusted_value;
+
+        Deal {
+            id: BranchCountingTreeId::from(self.id().next_id()),
+            entry: self.entry,
+            taxable_gain: tg,
+            split_parent: None,
+            adjusted_value: adj_value,
+        }
     }
-}
+}*/
+
+/*
+impl Clone for Deal<'_> {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id.clone(),
+            entry: self.entry,
+            taxable_gain: self.taxable_gain.clone(),
+            split_parent: self.split_parent.clone(),
+            adjusted_value: self.adjusted_value.clone(),
+        }
+    }
+}*/

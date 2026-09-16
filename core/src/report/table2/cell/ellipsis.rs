@@ -8,6 +8,8 @@
 use crate::report::table2::cell::ModifiableCell;
 use crate::report::table2::fmt::CellFormatter;
 use crate::report::table2::{Cell, CellRef, CellWidth, ColumnWidth, ShrinkableCell};
+use std::fmt;
+use std::fmt::Formatter;
 
 pub struct EllipsisCell<'c> {
     modifiable_cell: ModifiableCell<'c>,
@@ -25,7 +27,7 @@ impl Cell for EllipsisCell<'_> {
         f: &mut dyn CellFormatter,
         line: usize,
         width: Option<ColumnWidth>,
-    ) -> std::fmt::Result {
+    ) -> fmt::Result {
         self.modifiable_cell.print(f, line, width)
     }
 
@@ -55,24 +57,48 @@ impl Cell for EllipsisCell<'_> {
 }
 
 impl ShrinkableCell for EllipsisCell<'_> {
-    fn try_shrink(&self, max_width: usize) -> bool {
+    fn try_shrink(&self, target_width: &CellWidth) -> usize {
+        let mut success_len = 0;
         for mut line in self.modifiable_cell.longest_lines_mut() {
-            // Don't shrink unless we have to (reluctant)
-            if line.chars().count() < max_width {
-                return false;
-            }
+            debug_assert!(
+                line.width().sum() >= target_width.sum(),
+                "{} < {}",
+                line.width().sum(),
+                target_width.sum()
+            );
 
-            let trim_len = if line.ends_with("...") { 4 } else { 1 };
-            let i = line.char_indices().rev().nth(trim_len).map(|(i, _)| i).unwrap_or(0);
-            if i <= 3 {
-                return false;
+            let width_diff = line.width().sum() - target_width.sum();
+            if width_diff > 0 {
+                let trim_len = width_diff + 2;
+                let i = line.char_indices().rev().nth(trim_len - 1).map(|(i, _)| i).unwrap_or(0);
+                let trunc_len = line.len() - (line.len() - i);
+                // Keep at least two chars
+                if trunc_len < 2 {
+                    return 0;
+                }
+                line.truncate(trunc_len);
+                while line.ends_with(' ') {
+                    line.pop();
+                }
+                line.push_str("..");
+                success_len = trim_len;
             }
-            line.truncate(i);
-            while line.ends_with(' ') {
-                line.pop();
-            }
-            line.push_str("...");
         }
+        success_len
+    }
+
+    fn is_lossy(&self) -> bool {
         true
+    }
+
+    fn min_width(&self) -> usize {
+        // Two chars plus "..". Must agree with trunc_len above.
+        4
+    }
+}
+
+impl fmt::Debug for EllipsisCell<'_> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "Ellipsis({:?})", self.modifiable_cell)
     }
 }

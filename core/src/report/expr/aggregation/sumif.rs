@@ -14,10 +14,10 @@ use crate::report::expr::{ColumnValue, Expr};
 #[derive(Debug, PartialEq)]
 pub struct SumIf<'h> {
     inner: Sum<'h>,
-    cond: Expr<'h>,
+    cond: Expr,
 }
 impl<'h> SumIf<'h> {
-    pub fn new(mut args: Vec<Expr<'h>>) -> JournResult<Self> {
+    pub fn new(mut args: Vec<Expr>) -> JournResult<Self> {
         if args.len() != 2 {
             return Err(err!("Function 'SumIf' requires exactly two arguments"));
         }
@@ -27,8 +27,11 @@ impl<'h> SumIf<'h> {
     }
 }
 
-impl<'h> AggState<'h> for SumIf<'h> {
-    fn add(&mut self, context: &mut dyn IdentifierContext<'h>) -> JournResult<()> {
+impl<'h, 'a> AggState<'h, 'a> for SumIf<'h>
+where
+    'h: 'a,
+{
+    fn add(&mut self, context: &mut dyn IdentifierContext<'h, 'a>) -> JournResult<()> {
         let cond_eval = self.cond.eval(context)?;
         let cond_result =
             cond_eval.as_bool().or(cond_eval.as_undefined().map(|_| false)).ok_or_else(|| {
@@ -40,7 +43,7 @@ impl<'h> AggState<'h> for SumIf<'h> {
         Ok(())
     }
 
-    fn merge(&mut self, other: &dyn AggState<'h>) -> JournResult<()> {
+    fn merge(&mut self, other: &dyn AggState<'h, 'a>) -> JournResult<()> {
         self.inner.merge(other)
     }
 

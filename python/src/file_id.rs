@@ -10,3 +10,14 @@ use journ_core::tree_id::TreeId;
 #[pyclass]
 #[derive(Clone)]
 pub struct FileId(pub TreeId);
+
+#[pymethods]
+impl FileId {
+    fn __str__(&self) -> String {
+        self.0.to_string()
+    }
+
+    fn __eq__(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}

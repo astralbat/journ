@@ -8,7 +8,7 @@
 use crate::datetime::{DateFormatMode, DateTimeFormat};
 use crate::err;
 use crate::error::JournResult;
-use crate::report::command::arguments::Cmd;
+use crate::journal_context::JContext;
 use crate::report::expr::{ColumnValue, Expr, IdentifierContext};
 use crate::unit::UnitFormat;
 use chrono_tz::Tz;
@@ -17,10 +17,13 @@ use std::fmt::Write;
 use std::mem;
 use std::str::FromStr;
 
-pub fn text<'h>(
-    args: &[Expr<'h>],
-    context: &mut dyn IdentifierContext<'h>,
-) -> JournResult<ColumnValue<'h>> {
+pub fn text<'h, 'a>(
+    args: &[Expr],
+    context: &mut dyn IdentifierContext<'h, 'a>,
+) -> JournResult<ColumnValue<'h>>
+where
+    'h: 'a,
+{
     text_of_values(
         &mut args.iter().map(|a| a.eval(context)).collect::<Result<Vec<ColumnValue>, _>>()?,
     )
@@ -37,8 +40,9 @@ fn text_of_values<'h>(values: &mut [ColumnValue<'h>]) -> JournResult<ColumnValue
     }
 
     match value {
-        ColumnValue::Amount(amount) => match values.len() {
-            1 => Ok(ColumnValue::String(amount.format())),
+        ColumnValue::Amount(amount, precise) => match values.len() {
+            1 if !precise => Ok(ColumnValue::String(amount.format())),
+            1 if precise => Ok(ColumnValue::String(amount.format_precise())),
             2 => {
                 let format_value = &values[1];
                 let format = format_value.as_str().ok_or_else(|| {
@@ -56,7 +60,7 @@ fn text_of_values<'h>(values: &mut [ColumnValue<'h>]) -> JournResult<ColumnValue
         },
         ColumnValue::Date(date) => match values.len() {
             1 => {
-                let df = Cmd::get().datetime_fmt_cmd().datetime_format_or_default();
+                let df = JContext::get().cmd().datetime_fmt_cmd().datetime_format_or_default();
                 let mut ss = SS::new();
                 write!(ss, "{}", date.format(df)).unwrap();
                 Ok(ColumnValue::String(ss))
@@ -71,7 +75,7 @@ fn text_of_values<'h>(values: &mut [ColumnValue<'h>]) -> JournResult<ColumnValue
         },
         ColumnValue::Datetime(datetime) => match values.len() {
             1 => {
-                let df = Cmd::get().datetime_fmt_cmd().datetime_format_or_default();
+                let df = JContext::get().cmd().datetime_fmt_cmd().datetime_format_or_default();
                 let mut ss = SS::new();
                 write!(ss, "{}", datetime.format(df)).unwrap();
                 Ok(ColumnValue::String(ss))

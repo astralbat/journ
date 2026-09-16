@@ -77,7 +77,7 @@ pub enum Weight {
     Faint,
 }
 
-#[derive(Default, Copy, Clone, PartialEq, Eq)]
+#[derive(Default, Copy, Clone, PartialEq, Eq, Debug)]
 pub struct Style {
     fg: Option<Colour>,
     bg: Option<Colour>,

@@ -7,6 +7,7 @@
  */
 use crate::amount::Amount;
 use crate::err;
+use crate::error::JournResult;
 use crate::journal_entry::JournalEntry;
 use crate::unit::Unit;
 use crate::valuer::{Valuation, ValuationError, ValuationResult, Valuer};
@@ -16,8 +17,12 @@ use smallvec::{SmallVec, smallvec};
 use std::ops::Range;
 
 /// Valuer that derives valuations from a set of valued amounts in a specific quote unit.
+#[derive(Clone)]
 pub struct LinearSystemValuer<'h> {
     data: Vec<Decimal>,
+    /// For each unit, its accumulated rounding error. This is used when checking the accuracy
+    /// of the solution is within the rounding tolerance.
+    epsilon: SmallVec<[Decimal; 16]>,
     units: SmallVec<[&'h Unit<'h>; 4]>,
     row_count: usize,
     zero_sum_row: Option<usize>,
@@ -37,6 +42,7 @@ impl<'h> LinearSystemValuer<'h> {
         //data.extend((0..units.len()).map(|_| 0.0));
         let mut vav = LinearSystemValuer {
             data,
+            epsilon: SmallVec::<[Decimal; 16]>::new(),
             units: smallvec!(),
             row_count: 0,
             zero_sum_row: None,
@@ -55,10 +61,12 @@ impl<'h> LinearSystemValuer<'h> {
             None => {
                 let units_len = self.units.len();
                 self.units.push(unit);
+                self.epsilon.push(Decimal::zero());
 
                 let mut i = units_len;
                 while i <= self.data.len() {
                     self.data.insert(i, Decimal::zero());
+                    //self.epsilon.insert(i, Decimal::zero());
                     i += units_len + 1;
                     if units_len == 0 {
                         break;
@@ -93,6 +101,10 @@ impl<'h> LinearSystemValuer<'h> {
     /// Adds an amount/value mapping to the system. If the mapping already exists
     /// it is added to.
     pub fn add_value(&mut self, value: (Amount<'h>, Amount<'h>)) {
+        // Don't add zeros
+        if value.0.is_zero() && value.1.is_zero() {
+            return;
+        }
         let amount_col = self.ensure_has_unit(value.0.unit());
         let val_col = self.ensure_has_unit(value.1.unit());
 
@@ -102,6 +114,11 @@ impl<'h> LinearSystemValuer<'h> {
                 if self.data[row * self.units.len() + amount_col] + value.0.quantity() != dec!(0) {
                     self.data[row * self.units.len() + amount_col] += value.0.quantity();
                     self.data[row * self.units.len() + val_col] += value.1.quantity() * dec!(-1);
+                    /*
+                    self.epsilon[row * self.units.len() + amount_col] +=
+                        value.0.epsilon().max(value.0.unit().epsilon());
+                    self.epsilon[row * self.units.len() + val_col] +=
+                        value.1.epsilon().max(value.1.unit().epsilon());*/
                 }
             }
             None => {
@@ -113,23 +130,37 @@ impl<'h> LinearSystemValuer<'h> {
                 self.data[last_row..last_row + self.units.len()]
                     .iter_mut()
                     .for_each(|c| *c = Decimal::zero());
+                /*
+                self.epsilon[last_row..last_row + self.units.len()]
+                    .iter_mut()
+                    .for_each(|c| *c = Decimal::zero());*/
+
                 // Make the value negative so that the equation is Amount + Value = 0.
                 self.data[last_row + amount_col] = value.0.quantity();
                 self.data[last_row + val_col] = value.1.quantity() * dec!(-1);
+                /*
+                self.epsilon[last_row + amount_col] =
+                    value.0.epsilon().max(value.0.unit().epsilon());
+                self.epsilon[last_row + val_col] = value.1.epsilon().max(value.1.unit().epsilon());
+
+                 */
                 // Keep the last row available for the Valuer impl.
                 self.data.extend((0..self.units.len()).map(|_| Decimal::zero()));
+                //self.epsilon.extend((0..self.units.len()).map(|_| Decimal::zero()));
                 self.row_count += 1;
             }
         }
+        self.epsilon[amount_col] += value.0.epsilon().max(value.0.unit().epsilon());
+        self.epsilon[val_col] += value.1.epsilon().max(value.1.unit().epsilon());
     }
 
     /// Adds a zero sum constraint to the valuer. This extra information can be useful in solving the linear system.
     /// the `amounts` should either sum to zero or the total considered value of them are zero if they are in more
     /// than one kind of unit.
-    pub fn add_zero_sum(&mut self, amounts: impl Iterator<Item = Amount<'h>>) {
+    pub fn add_zero_sum(&mut self, amounts: impl Iterator<Item = Amount<'h>> + Clone) {
         // Pre-total the amounts in Decimal to make more accurate
-        let mut total_amounts = vec![];
-        for amount in amounts {
+        let mut total_amounts = SmallVec::<[Amount<'h>; 4]>::new();
+        for amount in amounts.clone() {
             total_amounts += amount
         }
         // All amounts are zero - there is no useful zero sum information to add
@@ -138,29 +169,53 @@ impl<'h> LinearSystemValuer<'h> {
             return;
         }
 
-        let cols: Vec<usize> = total_amounts
-            .iter()
-            .filter(|a| !a.is_zero())
-            .map(|a| self.ensure_has_unit(a.unit()))
-            .collect();
-        // Only create a union between pairs of units. If there are more don't create a union.
+        // Only create a union if there are two sets remaining. If there are more don't create a union.
         // This keeps our DSU fairly strict to keep out false positives.
-        if cols.len() == 2 {
-            self.connectivity.union(cols[0], cols[1]);
+        if self.connectivity.count() == 2 {
+            for i in 0..self.connectivity.len() - 1 {
+                for j in i + 1..self.connectivity.len() {
+                    if self.connectivity.find(i) != self.connectivity.find(j) {
+                        self.connectivity.union(i, j);
+                    }
+                }
+            }
         }
 
-        for (amount_col, amount) in
-            cols.into_iter().zip(total_amounts.into_iter().filter(|a| !a.is_zero()))
+        // When there are only two non-zero amounts, we can connect them in the DSU.
+        let mut iter = total_amounts.iter().filter(|a| !a.is_zero());
+        let col_a = iter.next().map(|a| self.ensure_has_unit(a.unit()));
+        let col_b = iter.next().map(|a| self.ensure_has_unit(a.unit()));
+        if let Some(a) = col_a
+            && let Some(b) = col_b
+            && iter.next().is_none()
+        {
+            self.connectivity.union(a, b);
+        }
+
+        // We still iterate via `amounts` rather than `total_amounts` because we want to increase epsilon values
+        // for each amount. Rounding errors are additive.
+        for (unit_col, amount) in total_amounts
+            .iter()
+            .filter(|a| !a.is_zero())
+            .flat_map(|a| {
+                let col = self.ensure_has_unit(a.unit());
+                amounts.clone().filter_map(move |amt| {
+                    if amt.unit() == a.unit() { Some((col, amt)) } else { None }
+                })
+            })
+            .collect::<SmallVec<[(usize, Amount<'h>); 4]>>()
         {
             for (j, i) in self.row_indices(self.row_count).enumerate() {
-                if j == amount_col {
-                    self.data[i] = amount.quantity();
+                if j == unit_col {
+                    self.data[i] += amount.quantity();
+                    self.epsilon[unit_col] += amount.epsilon().max(amount.unit().epsilon());
                 }
             }
         }
 
         // Keep the last row available for the Valuer impl.
         self.data.extend((0..self.units.len()).map(|_| Decimal::zero()));
+        //self.epsilon.extend((0..self.units.len()).map(|_| Decimal::zero()));
         self.zero_sum_row = Some(self.row_count);
         self.row_count += 1;
     }
@@ -169,7 +224,7 @@ impl<'h> LinearSystemValuer<'h> {
         self.units.iter().position(|u| *u == unit).unwrap()
     }
 
-    fn row_indices(&mut self, i: usize) -> Range<usize> {
+    fn row_indices(&self, i: usize) -> Range<usize> {
         i * self.units.len()..(i + 1) * self.units.len()
     }
 }
@@ -191,138 +246,155 @@ impl<'h> From<&JournalEntry<'h>> for LinearSystemValuer<'h> {
     }
 }
 
+impl Default for LinearSystemValuer<'_> {
+    fn default() -> Self {
+        LinearSystemValuer {
+            data: Vec::with_capacity(8),
+            units: smallvec![],
+            epsilon: smallvec![],
+            row_count: 0,
+            zero_sum_row: None,
+            connectivity: Dsu::new(),
+        }
+    }
+}
+
+const NOT_DERIVABLE: &str = "Not derivable";
+
 impl<'h> Valuer<'h> for LinearSystemValuer<'h> {
     fn value(&mut self, quote_unit: &'h Unit<'h>, amount: Amount<'h>) -> ValuationResult<'h> {
-        // If the base unit is not in the system, we cannot value it.
-        if self.units.iter().all(|u| *u != amount.unit()) {
-            return Err(ValuationError::Undetermined(err!("Not derivable")));
+        // If the base unit or the quote unit is not in the system, we cannot value it.
+        if self.units.iter().all(|u| *u != amount.unit()) || !self.units.contains(&quote_unit) {
+            return Err(ValuationError::Undetermined(err!(NOT_DERIVABLE)));
         }
 
         let base_unit = amount.unit();
 
         // Ensure the quote unit is part of the system
-        let quote_col = self.ensure_has_unit(quote_unit);
+        let quote_col = self.unit_col(quote_unit);
         let base_col = self.unit_col(base_unit);
 
+        /*
         if !self.connectivity.connected(base_col, quote_col) {
-            return Err(ValuationError::Undetermined(err!(
-                "Not derivable; base and quote units are unconnected"
-            )));
-        }
+            return Err(ValuationError::Undetermined(err!(NOT_CONNECTED)));
+        }*/
 
         // The last row is special in that 1.0 is set against the column of the base_curr and
         // 0 for all others. This matches the 1.0 in the b vector and defines the system's solution to be in terms of
         // the base unit.
         for (j, i) in self.row_indices(self.row_count).enumerate() {
             self.data[i] = if self.unit_col(base_unit) == j { dec!(1.0) } else { dec!(0.0) };
+            //self.epsilon[i] = Decimal::zero();
         }
 
         #[allow(non_snake_case)]
         let mut A = vec![];
+        //let mut epsilon: SmallVec<[SmallVec<[Decimal; 4]>; 4]> = smallvec![];
         // Get the group id of the base_unit. We'll only include units that share
         // the same group in our linear system.
-        let base_root = self.connectivity.find(base_col);
+        //let base_root = self.connectivity.find(base_col);
+        let mut a_base_col = 0;
+        let mut a_quote_col = 0;
         for i in 0..self.row_count + 1 {
             let mut row = vec![];
-            for j in (0..self.units.len()).filter(|&u| self.connectivity.find(u) == base_root) {
+            //let mut epsilon_row: SmallVec<[Decimal; 4]> = smallvec![];
+            for j in (0..self.units.len())
+            /*.filter(|&u| self.connectivity.find(u) == base_root)*/
+            {
+                if self.units[j] == base_unit {
+                    a_base_col = row.len();
+                } else if self.units[j] == quote_unit {
+                    a_quote_col = row.len();
+                }
                 row.push(self.data[i * self.units.len() + j]);
+                //epsilon_row.push(self.epsilon[i * self.units.len() + j]);
             }
             A.push(row);
+            //epsilon.push(epsilon_row);
         }
         let mut b = vec![Decimal::zero(); A.len()];
         b[A.len() - 1] = Decimal::one();
-        //let mut A = DMatrix::from_row_slice(self.row_count + 1, self.units.len(), &self.data);
-        //let mut b = DVector::from_fn(A.len(), |i, _| if i == self.row_count { 1.0 } else { 0.0 });
 
-        // Compute a tolerance based on f64 machine accuracy.
-        // We use this to check whether values ~0 are considered zero.
-        //let singular_values = A.clone().svd(false, false).singular_values;
-        //let epsilon = 2.22 * 10.0f64.powf(-16.0);
-        //let tol = epsilon * A.ncols().max(A.nrows()) as f64 * singular_values[0];
+        /*
+        let mut epsilon = self
+            .units
+            .iter()
+            .map(|u| {
+                let unit_col = self.unit_col(u);
+                let max_data_epsilon = A
+                    .split_last()
+                    .unwrap()
+                    .1
+                    .iter()
+                    .map(|row| {
+                        if row[unit_col] != Decimal::zero() {
+                            u.with_quantity(row[unit_col]).epsilon()
+                        } else {
+                            Decimal::MIN
+                        }
+                    })
+                    .max()
+                    .unwrap();
+                max_data_epsilon.max(u.epsilon())
+            })
+            .collect::<Vec<_>>();
+         */
+        let mut epsilon = self.epsilon.clone();
 
         // Reorder the columns of A so that the units of interest are first. This ensures they are retained
         // when we retain only those columns that are linearly independent.
-
-        swap_columns(&mut A, base_col, 0);
-        swap_columns(&mut A, quote_col, 1);
+        swap_columns(&mut A, a_base_col, 0);
+        epsilon.swap(a_base_col, 0);
+        if a_quote_col == 0 {
+            a_quote_col = a_base_col
+        }
+        swap_columns(&mut A, a_quote_col, 1);
+        epsilon.swap(a_quote_col, 1);
+        a_quote_col = 1;
 
         // If the system is not full rank, we'll have to remove some columns below.
         // This means the zero sum row is no longer valid and will have to be removed.
-        let res = analyze_and_solve(&mut A, &mut b);
-        if res.rank < self.units.len()
-            && let Some(zsr) = self.zero_sum_row
+        let res = analyze_and_solve(&mut A, &mut b, &epsilon)?;
+        /*if res.rank < self.units.len()
+            && let Some(_zsr) = self.zero_sum_row
         {
+            // Not sure if this can happen
+            unreachable!("Unexpected rank < units.len()");
+            /*
             A.remove(zsr);
-            b.remove(0);
-        }
-
-        /*
-        // Decide on which columns of A are going to be included.
-        // We only want those that are linearly independent i.e. they contribute to the rank of A.
-        // If we don't do this the system will be underdetermined and we won't be able to solve it uniquely.
-        let mut span_matrix = DMatrix::zeros(A.len(), 0);
-        span_matrix = span_matrix.insert_column(0, 0.0);
-        span_matrix.column_mut(0).copy_from(&A.column(0));
-        for col_index in 1..A.ncols() {
-            let candidate_column = A.column(col_index).clone_owned();
-
-            // Create the augmented span matrix by adding the candidate column
-            let augmented_matrix = {
-                let mut augmented = span_matrix.clone();
-                let augmented_cols = augmented.ncols();
-                augmented = augmented.insert_column(augmented_cols, 0.0);
-                augmented.column_mut(augmented_cols).copy_from(&candidate_column);
-                augmented
-            };
-
-            // Compute the ranks
-            let current_rank = span_matrix.rank(tol);
-            let augmented_rank = augmented_matrix.rank(tol);
-
-            // If the rank increases, the candidate column is linearly independent
-            if augmented_rank > current_rank {
-                span_matrix = augmented_matrix;
-            } else if col_index == 1 {
-                // If the quote column is not linearly independent, we can't solve the system.
-                return Err(ValuationError::Undetermined(err!("Not derivable")));
-            }
+            b.remove(0);*/
         }*/
 
-        // We don't have our base/quote units included.
-        //if span_matrix.ncols() < 2 {
-        //    return Err(ValuationError::Undetermined(err!("Not derivable")));
-        //}
-
-        //trace!("A = {}", span_matrix);
-        //trace!("b = {}", b);
-
-        // Now we are ready to solve
-        //let svd = span_matrix.clone().svd(true, true);
-        //let x = svd.solve(&b, tol).unwrap();
-        //trace!("x = {}", x);
-
-        //let tol = 1e-10;
-        //let base_rate_adj = 1.0 / x.column(0)[0];
         if let Some(solution) = res.solution {
-            let rate = solution[1];
-            // A rate of approximately zero means there is no solution. The power should not be set too high - as high as experience allows.
-            //let zero_check = (rate * 10.0f64.powf(9.0)).round();
-            //if rate.abs() > tol {
-            let mut valuation = Valuation::from_amount(
-                quote_unit.with_quantity(Decimal::one() / rate) * amount.quantity(),
+            // The original row positons may have been reordered during solving so
+            // we need to find the correct row. It is the one whose a_quote_col is 1.
+            let rate = 'rate: {
+                for i in 0..A.len() {
+                    if A[i][a_quote_col] == Decimal::one() {
+                        break 'rate solution[i];
+                    }
+                }
+                return Err(ValuationError::Undetermined(err!(NOT_DERIVABLE)));
+            };
+            let mut valuation = Valuation::binary(
+                if rate == Decimal::zero() {
+                    quote_unit.with_quantity(0)
+                } else {
+                    quote_unit.with_quantity(Decimal::one() / rate) * amount.quantity()
+                },
                 amount,
             );
             valuation.add_source("Entry (Derived)");
             return Ok(valuation);
         }
 
-        Err(ValuationError::Undetermined(err!("Not derivable")))
+        Err(ValuationError::Undetermined(err!(NOT_DERIVABLE)))
     }
 }
 
-fn swap_columns(data: &mut Vec<Vec<Decimal>>, col_a: usize, col_b: usize) {
-    for row in 0..data.len() {
-        data[row].swap(col_a, col_b);
+fn swap_columns(data: &mut [Vec<Decimal>], col_a: usize, col_b: usize) {
+    for row in data {
+        row.swap(col_a, col_b);
     }
 }
 
@@ -334,21 +406,33 @@ fn swap_columns(data: &mut Vec<Vec<Decimal>>, col_a: usize, col_b: usize) {
 ///
 /// This point of this is to save us from interpreting near-zero values that in the solution that are intended
 /// to be zero but are not (due to f64 accuracy) as a non-zero solution (false positive).
+#[derive(Clone)]
 struct Dsu {
     parent: Vec<usize>,
     rank: Vec<u8>,
+    count: usize,
 }
 
 impl Dsu {
     fn new() -> Self {
-        Self { parent: Vec::new(), rank: Vec::new() }
+        Self { parent: Vec::new(), rank: Vec::new(), count: 0 }
     }
 
     fn make_set(&mut self) -> usize {
         let id = self.parent.len();
         self.parent.push(id);
         self.rank.push(0);
+        self.count += 1;
         id
+    }
+
+    fn len(&self) -> usize {
+        self.parent.len()
+    }
+
+    /// Gets the number of disjoint sets
+    fn count(&mut self) -> usize {
+        self.count
     }
 
     fn find(&mut self, x: usize) -> usize {
@@ -373,6 +457,7 @@ impl Dsu {
         if self.rank[ra] == self.rank[rb] {
             self.rank[ra] += 1;
         }
+        self.count -= 1;
     }
 
     /// Gets whether two units are connected; i.e. in the same sub group.
@@ -388,9 +473,19 @@ pub struct MatrixResult {
     pub rank: usize,
 }
 
-fn analyze_and_solve(a: &mut Vec<Vec<Decimal>>, b: &mut Vec<Decimal>) -> MatrixResult {
+#[allow(clippy::needless_range_loop)]
+fn analyze_and_solve(
+    a: &mut [Vec<Decimal>],
+    b: &mut [Decimal],
+    epsilon: &[Decimal],
+) -> Result<MatrixResult, ValuationError> {
+    // Keep track of the original row indices so we can validate accuracy later.
+    let original_a = a.iter().cloned().collect::<SmallVec<[_; 8]>>();
+    let original_b = b.iter().cloned().collect::<SmallVec<[_; 8]>>();
+    let mut row_ids: SmallVec<[usize; 8]> = (0..a.len()).collect();
+
     if a.is_empty() || a[0].is_empty() {
-        return MatrixResult { solution: None, rank: 0 };
+        return Ok(MatrixResult { solution: None, rank: 0 });
     }
 
     let rows = a.len();
@@ -416,6 +511,7 @@ fn analyze_and_solve(a: &mut Vec<Vec<Decimal>>, b: &mut Vec<Decimal>) -> MatrixR
 
         a.swap(pivot_row, best);
         b.swap(pivot_row, best);
+        row_ids.swap(pivot_row, best);
 
         // Normalize pivot row (crucial for solution extraction)
         let pivot = a[pivot_row][j];
@@ -440,17 +536,52 @@ fn analyze_and_solve(a: &mut Vec<Vec<Decimal>>, b: &mut Vec<Decimal>) -> MatrixR
     }
 
     let rank = pivot_row;
-    let mut solution = None;
 
-    if rank == cols && rank == rows {
-        let mut x = vec![Decimal::ZERO; rows];
-        for i in 0..rows {
-            x[i] = b[i]; // Already solved due to RREF
+    let mut solution = None;
+    if rank >= 2 {
+        if a[0][1..].iter().any(|&x| !x.is_zero()) || a[1][2..].iter().any(|&x| !x.is_zero()) {
+            return Err(ValuationError::Undetermined(err!(NOT_DERIVABLE)));
         }
+        let mut x = vec![Decimal::ZERO; rank];
+        x.copy_from_slice(&b[..rank]);
+        if x.iter().all(|&x| x.is_zero()) {
+            return Err(ValuationError::Undetermined(err!(NOT_DERIVABLE)));
+        }
+
+        check_tolerance(original_a.as_ref(), row_ids.as_ref(), &x, original_b.as_ref(), epsilon)?;
         solution = Some(x);
     }
 
-    MatrixResult { solution, rank }
+    Ok(MatrixResult { solution, rank })
+}
+
+/// Checks the tolerance of the solution by calculating a residual and tolerance for each row and comparing them.
+/// If any residual exceeds its corresponding tolerance, an error is returned.
+fn check_tolerance(
+    original_a: &[Vec<Decimal>],
+    row_ids: &[usize],
+    x: &[Decimal],
+    original_b: &[Decimal],
+    epsilon: &[Decimal],
+) -> Result<(), ValuationError> {
+    for (i, &row_id) in row_ids.iter().enumerate() {
+        let residual: Decimal =
+            original_a[row_id].iter().zip(x.iter()).map(|(a_ij, &x_j)| a_ij * x_j).sum::<Decimal>()
+                - original_b[row_id];
+
+        let tolerance: Decimal =
+            x.iter().zip(epsilon.iter()).map(|(x_i, &eps_ij)| x_i.abs() * eps_ij).sum();
+        // Decimal still has to round during calculations, so we need to set a minimum tolerance to avoid false positives.
+        let min_abs_tolerance = Decimal::new(1, 12);
+        let tolerance = tolerance.max(min_abs_tolerance);
+
+        if residual.abs() > tolerance {
+            return Err(ValuationError::Undetermined(err!(
+                "Valuation not within tolerance due to inconsistent values"
+            )));
+        }
+    }
+    Ok(())
 }
 /*
 #[derive(Debug)]
@@ -684,4 +815,30 @@ where
 }*/
 
 #[cfg(test)]
-mod test {}
+mod test {
+
+    use super::*;
+    use crate::{amount, unit};
+
+    #[test]
+    fn test_multiple_groups() {
+        // C and D are unconnected to A and B but we can still value A and B.
+        let mut lsv = LinearSystemValuer::new(
+            vec![(amount!("1 C"), amount!("10 D")), (amount!("1 A"), amount!("10 B"))].into_iter(),
+        );
+
+        assert_eq!(lsv.value(unit!("B"), amount!("1 A")), Ok(Valuation::unary(amount!("10 B"))));
+        assert_eq!(lsv.value(unit!("D"), amount!("1 C")), Ok(Valuation::unary(amount!("10 D"))));
+        assert_eq!(
+            lsv.value(unit!("B"), amount!("1 C")),
+            Err(ValuationError::Undetermined(err!(NOT_DERIVABLE)))
+        );
+    }
+
+    #[test]
+    fn test_not_full_rank() {
+        let mut lsv = LinearSystemValuer::new(vec![(amount!("1 A"), amount!("10 B"))].into_iter());
+        lsv.add_zero_sum(vec![amount!("1 A"), amount!("10 B"), amount!("100 C")].into_iter());
+        assert_eq!(lsv.value(unit!("B"), amount!("0.5 A")), Ok(Valuation::unary(amount!("5 B"))));
+    }
+}

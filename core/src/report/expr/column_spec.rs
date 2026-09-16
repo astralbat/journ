@@ -11,25 +11,29 @@ use crate::report::expr::parser::AggKind;
 /// A column specification consists of column expressions. If any column `Expr` should reference an aggregation function,
 /// it's referenced by an index into `agg_functions`.
 #[derive(Clone)]
-pub struct ColumnSpec<'h> {
-    exprs: Vec<Expr<'h>>,
-    agg_functions: Vec<AggKind<'h>>,
+pub struct ColumnSpec {
+    exprs: Vec<Expr>,
+    agg_functions: Vec<AggKind>,
     /// Whether an error should be reported if any expr cannot be evaluated
     lenient: bool,
 }
 
-impl<'h> ColumnSpec<'h> {
-    pub fn new(exprs: Vec<Expr<'h>>, agg_functions: Vec<AggKind<'h>>) -> Self {
+impl ColumnSpec {
+    pub fn new(exprs: Vec<Expr>, agg_functions: Vec<AggKind>) -> Self {
         Self { exprs, agg_functions, lenient: false }
     }
 
-    pub fn exprs(&self) -> &[Expr<'h>] {
+    pub fn exprs(&self) -> &[Expr] {
         &self.exprs
+    }
+
+    pub fn into_exprs(self) -> Vec<Expr> {
+        self.exprs
     }
 
     /// Gets the aggregate function at column `index` if one exists there,
     /// otherwise, returns `None`.
-    pub fn get_agg_function(&self, index: usize) -> Option<&AggKind<'h>> {
+    pub fn get_agg_function(&self, index: usize) -> Option<&AggKind> {
         for expr in self.exprs[index].iter() {
             if let Expr::AggFunction(_, _, j) = expr {
                 return Some(&self.agg_functions[*j]);
@@ -38,7 +42,7 @@ impl<'h> ColumnSpec<'h> {
         None
     }
 
-    pub fn agg_functions(&self) -> &[AggKind<'h>] {
+    pub fn agg_functions(&self) -> &[AggKind] {
         &self.agg_functions
     }
 

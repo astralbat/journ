@@ -11,9 +11,9 @@ use crate::datetime::{JDate, JTime};
 use crate::err;
 use crate::error::JournResult;
 use crate::error::parsing::IParseError;
+use crate::journal_context::JContext;
 use crate::parsing::IParseResult;
 use crate::parsing::input::TextInput;
-use crate::report::command::arguments::Cmd;
 use chrono::format::{DelayedFormat, Item, Parsed, parse_and_remainder};
 use chrono::{
     DateTime, Datelike, Duration, LocalResult, Months, NaiveDate, NaiveDateTime, NaiveTime,
@@ -23,12 +23,12 @@ use chrono_tz::Tz;
 use nom::{Err as NomErr, InputLength};
 use once_cell::sync::Lazy;
 use std::cmp::Ordering;
-use std::fmt;
 use std::hash::Hash;
 use std::ops::{Add, Deref, Sub};
 use std::sync::LazyLock;
+use std::{fmt, iter};
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone)]
 pub struct JDateTime {
     datetime: DateTime<Tz>,
     precision: DateTimePrecision, //pub(super) datetime_format: &'h DateTimeFormat<'h>,
@@ -82,13 +82,24 @@ impl JDateTime {
                 parse_and_remainder(&mut parsed, input.text(), dtf.date_items()).map_err(|_| {
                     NomErr::Error(IParseError::new("Invalid datetime", input.clone()))
                 })?;
-            // Try and read the date/time separator and time items
-            if let Ok(remainder) =
-                parse_and_remainder(&mut parsed, parsed_remainder, dtf.non_date_items())
-            {
-                parsed_remainder = remainder;
+
+            // Try and read the date/time separator and time items, allowing for shortening.
+            // E.g. " 10:15" as a shortcut for " 10:15:00"
+            // Any prefix is valid here. E.g. " 10:" but not " ".
+            let saved_remainder = parsed_remainder;
+            for ndi in dtf.non_date_items() {
+                match parse_and_remainder(&mut parsed, parsed_remainder, iter::once(ndi)) {
+                    Ok(rem) => parsed_remainder = rem,
+                    Err(_) => break,
+                }
             }
-            if parsed_remainder.starts_with('Z') {
+            // We just read spaces, so rollback the remainder.
+            if saved_remainder[..saved_remainder.len() - parsed_remainder.len()]
+                .trim_start()
+                .is_empty()
+            {
+                parsed_remainder = saved_remainder;
+            } else if parsed_remainder.starts_with('Z') {
                 parsed_remainder = &parsed_remainder[1..];
                 tz = Tz::UTC;
             }
@@ -279,6 +290,10 @@ impl JDateTime {
         }
     }
 
+    pub fn with_precision(&self, precision: DateTimePrecision) -> JDateTime {
+        JDateTime { datetime: self.datetime, precision }
+    }
+
     /// Gets the same datetime but with the time set as far back as possible towards midnight.
     /// Since midnight is not always a valid time in the timezone, this instead works by subtracting the hours, mins
     /// and secs from the datetime and then adding increments of 30 minutes until the date is the same.
@@ -356,10 +371,24 @@ impl JDateTime {
 
 impl fmt::Display for JDateTime {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        let cmd = Cmd::get();
+        let cmd = JContext::get().cmd();
         let dtf = cmd.datetime_fmt_cmd().datetime_format_or_default();
         let tz = cmd.datetime_fmt_cmd().timezone_or_default();
         write!(f, "{}", self.with_timezone(tz).format(dtf))
+    }
+}
+
+impl fmt::Debug for JDateTime {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        let cmd = JContext::get().cmd();
+        let dtf = cmd.datetime_fmt_cmd().datetime_format_or_default();
+        let tz = cmd.datetime_fmt_cmd().timezone_or_default();
+        // Format with second precision for debug.
+        write!(
+            f,
+            "{}",
+            self.with_timezone(tz).with_precision(DateTimePrecision::Second).format(dtf)
+        )
     }
 }
 

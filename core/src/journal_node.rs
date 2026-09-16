@@ -10,6 +10,7 @@ use crate::configuration::{AlwaysIncluded, Filter};
 use crate::directive::{Directive, DirectiveKind};
 use crate::err;
 use crate::error::JournResult;
+use crate::journal_context::JContext;
 use crate::journal_entry::{EntryId, JournalEntry};
 use crate::journal_node_segment::JournalNodeSegment;
 use crate::parsing::text_block::{PaddingPolicy, TextBlockWriter};
@@ -86,196 +87,6 @@ impl<'t, 'a, 'b> Drop for DirectiveTreeIter<'t, 'a, 'b> {
 
 pub type NodeId = BranchCountingTreeId;
 
-/*
-/// A unique identifier for nodes in journal trees. Each node id is allocated uniquely.
-///
-/// NodeIds can be compared as nodes are created with _some_ guarantee of order (assumed behaviour of parser):
-/// - Siblings are always created in order.
-/// - Children Ids are always created after parent Ids.
-// Implementation notes:
-// Different branches may create nodes at different rates with different ordering of `id`.
-#[derive(Clone, Copy)]
-pub struct NodeId {
-    /// Parent, or `Err(i)` if at the root node. Where `i` represents the `ith` journal incarnation.
-    //parent: Result<&'h NodeId<'h>, u16>,
-    /// A unique identifier.
-    id: u16,
-}
-impl Debug for NodeId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self)
-    }
-}
-
-impl<'h> NodeId {
-    pub const ROOT: NodeId = NodeId { id: 0 };
-
-    pub fn new_root() -> Self {
-        let parents = JournalContext::current().node_parents();
-        assert_eq!(parents.count(), 0);
-        parents.push(0);
-
-        NodeId { id: Self::ROOT.id }
-    }
-
-    fn parent(&self) -> Option<NodeId> {
-        let parents = JournalContext::current().node_parents();
-        // This is the root
-        if self.id == 0 {
-            return None;
-        }
-        let parent = parents[self.id as usize];
-        Some(NodeId { id: parent })
-    }
-
-    /// Gets the depth of the node and the journal id in the node tree where a depth of
-    /// 0 is the root.
-    fn depth(&self) -> u16 {
-        let parents = JournalContext::current().node_parents();
-        let mut depth = 0;
-        let mut id = self.id;
-        loop {
-            // Root found
-            if id == 0 {
-                break depth;
-            }
-            id = parents[id as usize];
-            depth += 1;
-        }
-    }
-
-    // We find the max() by looking at the parents structure. We could also
-    // more simply by examining the journal node tree directly but the problem
-    // is that the journal won't yet be available during parsing - and we may
-    // be called during parsing.
-    pub fn max() -> NodeId {
-        // The algorithm isn't immediately intuitive. We know that the root
-        // id is 0, so we look for the last 0. This gives us the last child of
-        // the root and its index is its id. Then repeat by looking for the last
-        // occurrence of that id.
-        let parents = JournalContext::current().node_parents();
-
-        // The algorithm would spin forever when empty.
-        if parents.count() == 0 {
-            return Self::ROOT;
-        }
-
-        let mut curr_parent = 0;
-        loop {
-            let mut last = None;
-            // Not a DoubleEndedIterator so can't reverse.
-            for (i, parent) in parents.iter() {
-                if *parent == curr_parent {
-                    last = Some(i as u16);
-                }
-            }
-            match last {
-                Some(last) => curr_parent = last,
-                None => break NodeId { id: curr_parent },
-            }
-        }
-
-        /*
-        let mut node = JournalContext::current().journal().root();
-        loop {
-            match node.children().last() {
-                Some(last_child) => node = last_child,
-                None => break node.id(),
-            }
-        }*/
-    }
-
-    pub fn branch(self) -> Self {
-        let parents = JournalContext::current().node_parents();
-        let len = parents.count() as u16;
-
-        parents.push(self.id);
-        Self { id: len }
-    }
-
-    /// A numeric identifier for this node, guaranteed to be unique. However, it should
-    /// not be directly used for ordering purposes.
-    pub fn id(&self) -> u16 {
-        self.id
-    }
-}
-
-impl PartialEq for NodeId {
-    fn eq(&self, other: &Self) -> bool {
-        self.id == other.id
-    }
-}
-
-impl Eq for NodeId {}
-
-impl Hash for NodeId {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.id.hash(state);
-    }
-}
-
-impl PartialOrd for NodeId {
-    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for NodeId {
-    /// Compares two nodes
-    fn cmp(&self, other: &Self) -> cmp::Ordering {
-        if self.id == other.id {
-            return cmp::Ordering::Equal;
-        }
-        let mut self_depth = self.depth();
-        let mut other_depth = other.depth();
-
-        // Bring the lower node up to the same depth as the upper one.
-        let mut self_base = *self;
-        let mut other_base = *other;
-        while self_depth > other_depth {
-            self_base = self_base.parent().unwrap();
-            self_depth -= 1;
-        }
-        while other_depth > self_depth {
-            other_base = other_base.parent().unwrap();
-            other_depth -= 1;
-        }
-
-        // Compare the nodes starting from the same depth.
-        self_base
-            .parent()
-            .cmp(&other_base.parent())
-            .then_with(|| self_base.id.cmp(&other_base.id))
-            .then_with(|| {
-                // We'll get here for example if comparing a parent to a chld node.
-                // Then just compare on the id.
-                self.id.cmp(&other.id)
-            })
-    }
-}
-
-impl fmt::Display for NodeId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let parents = JournalContext::current().node_parents();
-        let jid = JournalContext::current().jid();
-        let mut ancestors = Vec::with_capacity(4);
-        let mut next_parent = self.id;
-        loop {
-            if next_parent == 0 {
-                break;
-            }
-            let parent = parents[next_parent as usize];
-            ancestors.push(parent);
-            next_parent = parent;
-        }
-        write!(f, "{}#", jid)?;
-        for a in ancestors.iter().rev() {
-            write!(f, "{}.", a)?;
-        }
-        write!(f, "{}", self.id)
-    }
-}*/
-
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum JournalNodeKind {
     Entry,
@@ -288,10 +99,8 @@ pub struct JournalNode<'h> {
     node_id: NodeId,
     kind: JournalNodeKind,
     filename: Option<&'h Path>,
-    //input: TextBlockInput<'h, ()>,
     allocator: &'h HerdAllocator<'h>,
     segments: OnceLock<Vec<&'h JournalNodeSegment<'h>>>,
-    //directives: Mutex<Vec<Directive<'h>>>,
     parent: Option<&'h JournalNode<'h>>,
     children: OnceLock<Vec<&'h JournalNode<'h>>>,
 }
@@ -303,7 +112,6 @@ impl<'h> JournalNode<'h> {
         node_id: NodeId,
         filename: Option<&'h Path>,
         kind: JournalNodeKind,
-        //input: TextBlockInput<'h, ()>,
         allocator: &'h HerdAllocator<'h>,
     ) -> &'h JournalNode<'h> {
         allocator.alloc(Self {
@@ -345,48 +153,6 @@ impl<'h> JournalNode<'h> {
         self.children().last().and_then(|c| c.last_child_recursive())
     }
 
-    /*
-    /// Creates a new child node from this parent node.
-    /// `child_num` must be the number of children created by the parser node.
-    pub fn new_child_unchecked(
-        &'h self,
-        filename: Option<&'h Path>,
-        kind: JournalNodeKind,
-        child_num: usize,
-    ) -> &'h JournalNode<'h> {
-        let child = JournalNode {
-            parent: Some(self),
-            filename,
-            node_id: NodeId::branch(self.id()),
-            kind,
-            allocator: self.allocator,
-            segments: OnceLock::new(),
-            children: OnceLock::new(),
-        };
-        self.allocator.alloc(child)
-    }
-
-    /// Creates a new child node from this parent node.
-    /// If the filename has been parsed before, an `Err` is returned with that node.
-    pub fn new_child(
-        &'h self,
-        filename: Option<&'h Path>,
-        kind: JournalNodeKind,
-    ) -> Result<&'h JournalNode<'h>, &'h JournalNode<'h>> {
-        // Check parents recursively to see whether we've parsed this file before
-        // to prevent infinite parsing loop.
-        if let Some(filename) = filename {
-            for parent in iter::successors(Some(self), |c| c.parent()) {
-                if parent.filename == Some(filename) {
-                    warn!("Circular loop detected whilst parsing file: {}", filename.display());
-                    return Err(parent);
-                }
-            }
-        }
-
-        Ok(self.new_child_unchecked(filename, kind))
-    }*/
-
     pub fn find_by_node_id(&self, node_id: &TreeId) -> Option<&Self> {
         if &self.node_id == node_id {
             return Some(self);
@@ -403,7 +169,8 @@ impl<'h> JournalNode<'h> {
         self.filename
     }
 
-    /// Gets the path of the file this node belongs to, if any.
+    /// Gets the path of the file this node belongs to, if any. This will
+    /// always be `Some` if the journal was loaded from a file.
     pub fn nearest_filename(&self) -> Option<&'h Path> {
         if let Some(file) = self.filename {
             return Some(file);
@@ -446,15 +213,6 @@ impl<'h> JournalNode<'h> {
         self.segments.set(segments).unwrap_or_else(|_| panic!("Segments already set"));
     }
 
-    /*
-    pub fn input(&self) -> TextBlockInput<'h, ()> {
-        self.input
-    }
-
-    pub fn block(&self) -> &TextBlock<'h> {
-        self.input.block()
-    }*/
-
     pub fn clear_directives_filter<F>(&self, filter: F)
     where
         F: Fn(&Directive) -> bool,
@@ -466,7 +224,7 @@ impl<'h> JournalNode<'h> {
 
     /// Appends a new entry directive to the end of the node.
     pub(crate) fn append_entry(&self, mut entry: JournalEntry<'h>) -> &'h JournalEntry<'h> {
-        entry.attach(&self);
+        entry.attach(self);
         let alloc_entry: &'h JournalEntry<'h> = self.allocator.alloc(entry);
         self.append_directive(DirectiveKind::Entry(alloc_entry));
         alloc_entry
@@ -507,14 +265,15 @@ impl<'h> JournalNode<'h> {
         }
     }
 
+    /// Inserts the directive within the segment by using a binary search to find the right position.
+    /// This is done by comparing `DirectiveKind` until a suitable position is found.
+    ///
+    /// The insert position is guaranteed to be following any other equal `DirectiveKinds` within the segment.
     pub(crate) fn insert_directive_in_segment(
         &self,
         segment: &JournalNodeSegment<'h>,
         dir_kind: DirectiveKind<'h>,
     ) {
-        // This is the segment we need to insert into.
-        // Perform a binary search to find the right position.
-
         let mut dir_lock = segment.directives();
         let mut min = 0usize;
         let mut max = dir_lock.len();
@@ -528,11 +287,7 @@ impl<'h> JournalNode<'h> {
             for i in (min..mid).rev() {
                 match dir_lock[i].kind().partial_cmp(&dir_kind) {
                     Some(cmp::Ordering::Greater) => max = i,
-                    Some(cmp::Ordering::Less) => min = i + 1,
-                    Some(cmp::Ordering::Equal) => {
-                        max = i;
-                        min = i;
-                    }
+                    Some(cmp::Ordering::Less | cmp::Ordering::Equal) => min = i + 1,
                     // Not comparable, keep looking
                     None => continue,
                 }
@@ -542,15 +297,12 @@ impl<'h> JournalNode<'h> {
             min = mid;
         }
 
-        match max {
-            0 => dir_lock.insert(0, Directive::new(None, dir_kind)),
-            n => dir_lock.insert(n, Directive::new(None, dir_kind)),
-        }
+        dir_lock.insert(max, Directive::new(None, dir_kind))
     }
 
     /// Inserts a JournalEntry within the specified file and in the correct date position.
     pub(crate) fn insert_entry(&self, mut entry: JournalEntry<'h>) -> &'h JournalEntry<'h> {
-        entry.attach(&self);
+        entry.attach(self);
         let entry: &'h JournalEntry<'h> = self.allocator.alloc(entry);
         self.insert_directive(DirectiveKind::Entry(entry));
         entry
@@ -559,11 +311,9 @@ impl<'h> JournalNode<'h> {
     /// Returns `(old_entry, new_entry)`.
     pub fn replace_entry(
         &self,
-        mut new_entry: JournalEntry<'h>,
-        allocator: &'h HerdAllocator<'h>,
-    ) -> (&'h JournalEntry<'h>, &'h JournalEntry<'h>) {
-        new_entry.attach(&self);
-        let entry = allocator.alloc(new_entry);
+        entry: JournalEntry<'h>,
+    ) -> Option<(&'h JournalEntry<'h>, &'h JournalEntry<'h>)> {
+        let entry = JContext::get().allocator().alloc(entry);
         for seg in self.segments() {
             for dir in seg.directives().iter_mut() {
                 if let DirectiveKind::Entry(curr_entry) = dir.kind()
@@ -572,19 +322,24 @@ impl<'h> JournalNode<'h> {
                     let curr_entry = *curr_entry;
 
                     *dir = Directive::new(None, DirectiveKind::Entry(entry));
-                    return (curr_entry, entry);
+                    return Some((curr_entry, entry));
                 }
             }
         }
-        panic!("Entry no longer exists")
+        None
     }
 
-    pub fn remove_directive(&self, mut index: usize) -> Option<Directive<'h>> {
+    pub fn remove_entry(&self, entry: &JournalEntry<'h>) -> Option<Directive<'h>> {
         for seg in self.segments() {
-            match seg.remove_directive(index) {
-                Some(dir) => return Some(dir),
-                None => index -= seg.directives().len(),
-            }
+            let mut dirs = seg.directives();
+            dirs.retain(|dir| {
+                if let DirectiveKind::Entry(curr_entry) = dir.kind()
+                    && curr_entry.id() == entry.id()
+                {
+                    return false;
+                }
+                true
+            });
         }
         None
     }
@@ -674,7 +429,7 @@ impl<'h> JournalNode<'h> {
         writer: &mut TextBlockWriter<W>,
         directive_filter: &F,
     ) -> JournResult<()> {
-        for seg in self.segments().into_iter() {
+        for seg in self.segments().iter() {
             self.write_from_dir_iter(
                 Box::new(seg.directives().iter().map(|dir| (*seg, dir))),
                 writer,

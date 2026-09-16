@@ -6,7 +6,7 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::module_init::MODULE_NAME;
-use crate::pool_event::{PoolEvent, PoolEventKind};
+use crate::pool_event::PoolEvent;
 use crate::ruleset::{ActionRule, Rule, RuleSet};
 use chrono::{DateTime, Duration};
 use chrono_tz::Tz;
@@ -19,6 +19,7 @@ use journ_core::module::{
     ModuleConfiguration, ModuleConfigurationClone, ModuleConfigurationEq, ModuleDirectiveObj,
 };
 use journ_core::python::lambda::Lambda;
+use journ_core::report::expr::ScalarExpr;
 use std::any::Any;
 use std::ops::Deref;
 use std::str::FromStr;
@@ -33,11 +34,17 @@ pub enum MergeCgtError {
     MaxAgeNotAllowedFinalPool,
 }
 
+/// The default is to include all flows that are between an equity and a non-equity account.
+static DEFAULT_INCLUDE_FLOWS: LazyLock<ScalarExpr> = LazyLock::new(|| {
+    "EXISTS account.+equity AND NOT EXISTS linked.account.+equity".parse().unwrap()
+});
+
 /// The configuration object for the capital gains tax module. This must have a static lifetime in order to
 /// implement `ModuleConfiguration`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CagConfiguration {
     round_deal_values: Option<bool>,
+    include_flows: Option<ScalarExpr>,
     assign_expenses: Option<AssignExpenses>,
     pools: Vec<PoolConfiguration>,
     comments: Vec<String>,
@@ -51,6 +58,7 @@ impl CagConfiguration {
     pub fn empty() -> Self {
         Self {
             round_deal_values: None,
+            include_flows: None,
             assign_expenses: None,
             timezone: None,
             pools: vec![],
@@ -70,6 +78,14 @@ impl CagConfiguration {
 
     pub fn set_round_deal_values(&mut self, round_deal_values: bool) {
         self.round_deal_values = Some(round_deal_values)
+    }
+
+    pub fn include_flows(&self) -> Option<&ScalarExpr> {
+        self.include_flows.as_ref()
+    }
+
+    pub fn set_include_flows(&mut self, include_flows: ScalarExpr) {
+        self.include_flows = Some(include_flows);
     }
 
     pub fn assign_expenses(&self) -> AssignExpenses {
@@ -159,18 +175,21 @@ impl CagConfiguration {
         // Check the rules for unknown pools and create them if necessary.
         if let Some(ruleset) = &other.ruleset {
             for rule in ruleset.iter() {
-                if let Rule::Action(ActionRule::Pool(pool_name, _)) = rule {
-                    if !self_pools.iter().any(|p| p.name() == pool_name) {
-                        let mut pc = PoolConfiguration::new(pool_name.to_string());
-                        pc.set_id(POOL_ID.fetch_add(1, Ordering::Relaxed));
-                        self_pools.push(pc);
-                    }
+                if let Rule::Action(ActionRule::Pool(pool_name, _)) = rule
+                    && !self_pools.iter().any(|p| p.name() == pool_name)
+                {
+                    let mut pc = PoolConfiguration::new(pool_name.to_string());
+                    pc.set_id(POOL_ID.fetch_add(1, Ordering::Relaxed));
+                    self_pools.push(pc);
                 }
             }
             new_config.set_ruleset(ruleset.clone());
         }
 
         new_config.set_pools(self_pools);
+        if let Some(include_flows) = &other.include_flows {
+            new_config.set_include_flows(include_flows.clone());
+        }
         if let Some(round_deals) = other.round_deal_values {
             new_config.set_round_deal_values(round_deals);
         }
@@ -193,6 +212,7 @@ impl Default for CagConfiguration {
             round_deal_values: None,
             assign_expenses: None,
             timezone: None,
+            include_flows: Some(DEFAULT_INCLUDE_FLOWS.clone()),
             pools: vec![PoolConfiguration::default()],
             comments: vec![],
             ruleset: None,
@@ -249,170 +269,6 @@ impl ModuleConfigurationEq for CagConfiguration {
     }
 }
 
-/*
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum CapitalGainsGroupBy {
-    EventDate,
-    DealDate,
-    Disposal,
-    Pool,
-    Event,
-}
-
-impl CapitalGainsGroupBy {
-    /// Returns true if the two events should be aggregated together.
-    pub fn can_group<'h>(
-        &self,
-        e1: &AggregatedPoolEvent<'h, '_>,
-        e2: &AggregatedPoolEvent<'h, '_>,
-    ) -> bool {
-        match self {
-            CapitalGainsGroupBy::EventDate => {
-                e1.event_datetime().start().date() == e2.event_datetime().start().date()
-            }
-            CapitalGainsGroupBy::DealDate => {
-                e1.deal_datetime().start().date() == e2.deal_datetime().start().date()
-            }
-            CapitalGainsGroupBy::Disposal => match (
-                e1.kind().as_ref().map(|t| t.as_ref()),
-                e2.kind().as_ref().map(|t| t.as_ref()),
-            ) {
-                (Some(PoolEventKind::Match(_)), Some(PoolEventKind::Match(_))) => {
-                    e1.deal_datetime().start().date() == e2.deal_datetime().start().date()
-                }
-                _ => false,
-            },
-            CapitalGainsGroupBy::Pool => e1.pool_name() == e2.pool_name(),
-            CapitalGainsGroupBy::Event => {
-                e1.unit() == e2.unit()
-                    && if let (Some(e1), Some(e2)) = (
-                        e1.kind().as_ref().map(|k| k.as_ref()),
-                        e2.kind().as_ref().map(|k| k.as_ref()),
-                    ) {
-                        mem::discriminant(e1) == mem::discriminant(e2)
-                    } else {
-                        false
-                    }
-            }
-        }
-    }
-}
-
-impl FromStr for CapitalGainsGroupBy {
-    type Err = JournError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value.to_lowercase().as_str() {
-            "event-date" => Ok(CapitalGainsGroupBy::EventDate),
-            "deal-date" => Ok(CapitalGainsGroupBy::DealDate),
-            "pool" => Ok(CapitalGainsGroupBy::Pool),
-            "event" => Ok(CapitalGainsGroupBy::Event),
-            "disposal" => Ok(CapitalGainsGroupBy::Disposal),
-            _ => Err(err!(
-                "valid values are 'event-date', 'deal-date', 'event', 'disposal' and 'pool'"
-            )),
-        }
-    }
-}
-
-#[derive(Debug, Copy, Clone)]
-pub enum CapitalGainsOrderBy {
-    EventDate,
-    DealDate,
-    Unit,
-}
-
-impl FromStr for CapitalGainsOrderBy {
-    type Err = JournError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value.to_lowercase().as_str() {
-            "event-date" => Ok(CapitalGainsOrderBy::EventDate),
-            "deal-date" => Ok(CapitalGainsOrderBy::DealDate),
-            "unit" => Ok(CapitalGainsOrderBy::Unit),
-            _ => Err(err!("valid values are 'event-date', 'deal-date' or 'unit'")),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub enum CapitalGainsColumn {
-    /// The datetime range of the event
-    EventDate,
-    /// The datetime range of the deal which is the datetimes of the journal entries whence they came.
-    DealDate,
-    /// The unit operated with
-    Unit,
-    /// A description of the event
-    Event,
-    /// The name of the pool operated on
-    Pool,
-    /// The amount being acquired before expenses if this event represents the original point of acquisition.
-    Acquired,
-    /// The total cost, including expenses of the amount being acquired if this event represents the original point of acquisition, or an adjustment being made.
-    TotalCost,
-    /// The total cost of the acquisition if this a match event.
-    ActualCost,
-    /// The proceeds of a sale before expenses are considered.
-    Disposed,
-    /// The proceeds of a sale after expenses are deducted.
-    NetProceeds,
-    /// The expenses of a sale
-    Expenses,
-    /// The gain made from the match, if any.
-    Gain,
-    /// The loss made from the match, if any.
-    Loss,
-    /// The balance of the pool before the event
-    PoolBalBefore,
-    /// The balance of the pool after the event
-    PoolBalAfter,
-    /// The concatenated description taken from the underlying journal entries tied to this event.
-    Description,
-    /// The concatenated metadata of the specified tag, taken from the underlying journal entries tied to this event.
-    Metadata(String),
-}
-
-impl CapitalGainsColumn {
-    pub fn metadata_tag(&self) -> Option<&str> {
-        match self {
-            CapitalGainsColumn::Metadata(tag) => Some(tag),
-            _ => None,
-        }
-    }
-}
-
-impl FromStr for CapitalGainsColumn {
-    type Err = JournError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value.to_lowercase().as_str() {
-            "event-date" => Ok(CapitalGainsColumn::EventDate),
-            "deal-date" => Ok(CapitalGainsColumn::DealDate),
-            "unit" => Ok(CapitalGainsColumn::Unit),
-            "event" => Ok(CapitalGainsColumn::Event),
-            "pool" => Ok(CapitalGainsColumn::Pool),
-            "acquired" => Ok(CapitalGainsColumn::Acquired),
-            "total-cost" => Ok(CapitalGainsColumn::TotalCost),
-            "actual-cost" => Ok(CapitalGainsColumn::ActualCost),
-            "disposed" => Ok(CapitalGainsColumn::Disposed),
-            "net-proceeds" => Ok(CapitalGainsColumn::NetProceeds),
-            "expenses" => Ok(CapitalGainsColumn::Expenses),
-            "gain" => Ok(CapitalGainsColumn::Gain),
-            "loss" => Ok(CapitalGainsColumn::Loss),
-            "pool-bal-before" => Ok(CapitalGainsColumn::PoolBalBefore),
-            "pool-bal-after" => Ok(CapitalGainsColumn::PoolBalAfter),
-            "description" => Ok(CapitalGainsColumn::Description),
-            value if value.starts_with('+') => {
-                Ok(CapitalGainsColumn::Metadata(value[1..].to_string()))
-            }
-            _ => Err(err!(
-                "valid values are 'event-date', 'deal-date', 'unit', 'event', 'pool', 'acquired', 'total-cost', 'disposed', 'net-proceeds', 'gain', 'loss', 'pool-bal-before', 'pool-bal-after', 'description' or '+<METADATA_TAG>"
-            )),
-        }
-    }
-}*/
-
 /// A filter that only includes events that matches any of the strings within.
 ///
 /// Strings may take the format:
@@ -440,13 +296,15 @@ impl FromStr for EventPattern {
             || lower == "matched"
             || lower.starts_with("matched ")
             || lower == "adjusted"
-            || lower.starts_with("adjusted ");
+            || lower.starts_with("adjusted ")
+            || lower == "acquired"
+            || lower == "disposed";
 
         if valid {
             Ok(Self(lower))
         } else {
             Err(err!(
-                "must be one of 'pooled [pool]', 'moved [pool_to]', 'matched [pool]' or 'adjusted [pool]' where [pool] is an optional name of a pool"
+                "must be one of 'pooled [pool]', 'moved [pool_to]', 'matched [pool]', 'adjusted [pool]', 'acquired' or 'disposed' where [pool] is an optional name of a pool"
             ))
         }
     }
@@ -460,10 +318,11 @@ impl Deref for EventPattern {
     }
 }
 
+/*
 #[derive(Debug, Clone)]
 pub struct EventFilter<'a>(pub &'a Vec<EventPattern>);
 
-impl<'a, 'h> Filter<PoolEvent<'h>> for EventFilter<'_> {
+impl<'h> Filter<PoolEvent<'h>> for EventFilter<'_> {
     fn is_included(&self, event: &PoolEvent<'h>) -> bool {
         // No filter specified; always include.
         if self.0.is_empty() {
@@ -474,26 +333,26 @@ impl<'a, 'h> Filter<PoolEvent<'h>> for EventFilter<'_> {
         match event.kind() {
             PoolEventKind::PooledDeal(..) => self.0.iter().any(|s| {
                 s.deref() == "pooled"
-                    || s.starts_with("pooled ") && s.split_whitespace().nth(1) == Some(&lower_name)
+                    || s.strip_prefix("pooled ") == Some(&lower_name)
+                    || (s.deref() == "acquired" && event.acquired().is_some())
             }),
             PoolEventKind::MovedFrom(..)
             | PoolEventKind::MovedTo(..)
-            | PoolEventKind::MatchedFrom(..) => self.0.iter().any(|s| {
-                s.deref() == "moved"
-                    || s.starts_with("moved ") && s.split_whitespace().nth(1) == Some(&lower_name)
-            }),
+            /*| PoolEventKind::MatchedFrom(..) */ => self
+                .0
+                .iter()
+                .any(|s| s.deref() == "moved" || s.strip_prefix("moved ") == Some(&lower_name)),
             PoolEventKind::Match(..) => self.0.iter().any(|s| {
                 s.deref() == "matched"
-                    || s.starts_with("matched ") && s.split_whitespace().nth(1) == Some(&lower_name)
+                    || s.strip_prefix("matched ") == Some(&lower_name)
+                    || (s.deref() == "disposed" && event.disposed().is_some())
             }),
             PoolEventKind::Adjustment(..) => self.0.iter().any(|s| {
-                s.deref() == "adjusted"
-                    || s.starts_with("adjusted ")
-                        && s.split_whitespace().nth(1) == Some(&lower_name)
+                s.deref() == "adjusted" || s.strip_prefix("adjusted ") == Some(&lower_name)
             }),
         }
     }
-}
+}*/
 
 #[derive(Debug, Clone)]
 pub struct PoolFilter(pub Vec<Expression>);
@@ -504,7 +363,7 @@ impl<'a, 'h> Filter<PoolEvent<'h>> for PoolFilter {
         if self.0.is_empty() {
             return true;
         }
-        self.0.iter().any(|s| s.is_match(&event.pool_name()))
+        self.0.iter().any(|s| s.is_match(event.pool_name()))
     }
 }
 

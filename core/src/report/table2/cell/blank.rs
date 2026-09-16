@@ -26,6 +26,16 @@ impl Cell for BlankCell {
     }
 
     fn width(&self) -> CellWidth {
-        CellWidth::Unary(0)
+        CellWidth::Leaf(0)
+    }
+
+    fn height(&self) -> usize {
+        0
+    }
+}
+
+impl fmt::Debug for BlankCell {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "BlankCell")
     }
 }

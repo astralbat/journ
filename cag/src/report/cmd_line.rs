@@ -5,33 +5,35 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
-use crate::cgt_configuration::EventPattern;
 use crate::report::cag_command::CagCommand;
 use clap::Parser;
 use journ_core::error::JournResult;
-use journ_core::journal_context::JournalContext;
+use journ_core::journal_context::JContext;
 use journ_core::report::command::IntoExecCommand;
 use journ_core::report::command::arguments::{Arguments, DateTimeFormatCommand};
 use journ_core::report::command::cmd_line::BeginAndEndArguments;
+use journ_core::report::command::table_format_args::TableFormatArguments;
+use journ_core::report::expr::ScalarExprList;
 
 #[derive(Parser, Debug)]
 #[command(name = "cag", about = "Capital gains report")]
 pub struct CagArguments {
     #[command(flatten)]
     begin_and_end: BeginAndEndArguments,
+    #[command(flatten)]
+    table_format_arguments: TableFormatArguments,
     #[arg(value_name = "UNIT", value_delimiter = ',', help = "Specify which units to report on")]
     unit_filter: Vec<String>,
     #[arg(short = 'a', long = "accounts", value_delimiter = ',')]
     account_filter: Vec<String>,
     #[arg(
-        long = "events",
-        number_of_values = 1,
-        value_delimiter = ',',
-        help = "Filter the kind of events to report. E.g. \"-e Pooled MyPool,Matched \""
+        short = 'f',
+        long,
+        value_name = "FILTER_EXPR",
+        default_value = "true",
+        help = "A filter expression applied to events. Must evaluate to a boolean. E.g. 'Acquired'. The default is 'type == \"Matched\"'"
     )]
-    event_filter: Vec<EventPattern>,
-    #[arg(short = 'p', long = "pool", value_delimiter = ',')]
-    pool_filter: Vec<String>,
+    filter: Vec<ScalarExprList>,
     #[arg(long, help = "Show only the first `head` results")]
     head: Option<usize>,
     #[arg(long, help = "Show only the last `tail` results")]
@@ -54,8 +56,7 @@ pub struct CagArguments {
     #[arg(
         short = 'o',
         value_delimiter = ',',
-        help = "A comma separated list of columns to print for each capital gains event.",
-        default_value = "EventDate.Start.Date as Event-Date, DealDate.Start.Date as Deal-Date, Pool, Description, Amount, Cost, match.Gain as Gain, Balance"
+        help = "A comma separated list of columns to print for each capital gains event."
     )]
     column_spec: Vec<String>,
     #[arg(long = "where", help = "Filter the results on conditions", value_delimiter = ',')]
@@ -64,15 +65,15 @@ pub struct CagArguments {
     title: Option<String>,
     #[arg(short = 'H', long = "no-header", help = "do not print header row")]
     no_header: bool,
-    #[arg(long = "total", help = "Show a total row")]
-    show_total: bool,
+    #[arg(short = 'T', help = "Do not show a total row")]
+    no_total: bool,
     #[arg(
         long = "total-as",
         value_delimiter = ',',
         help = "Show a total row using the supplied column specification"
     )]
     #[arg(long, help = "Keep total to a single row in height in the output; do not show lists")]
-    brief_total: bool,
+    short_total: bool,
     #[arg(long = "yaml", help = "Write output as yaml")]
     yaml: bool,
     #[arg(
@@ -84,33 +85,34 @@ pub struct CagArguments {
     chain: Vec<String>,
 }
 
-impl IntoExecCommand for CagArguments {
-    type Command = CagCommand;
-
-    #[allow(clippy::field_reassign_with_default)]
-    fn into_exec_cmd(self, args: &Arguments) -> JournResult<CagCommand> {
-        let config = JournalContext::current().journal().config();
+impl CagArguments {
+    fn into_exec_cmd_inner(self, args: &Arguments) -> JournResult<CagCommand> {
+        let config = JContext::get().journal().config();
         let datetime_fmt_cmd = DateTimeFormatCommand::from_args_or_config(args, config);
-        let cmd: CagCommand = CagCommand {
+        let cmd = CagCommand {
             begin_and_end_cmd: self.begin_and_end.into_cmd(&datetime_fmt_cmd),
+            table_fmt_cmd: self.table_format_arguments.into_cmd(),
             datetime_fmt_cmd,
             account_filter: self.account_filter,
             unit_filter: self.unit_filter,
-            event_filter: self.event_filter,
-            pool_filter: self.pool_filter,
+            filter: self.filter.into_iter().flat_map(|l| l.0).collect(),
             head: self.head,
             tail: self.tail,
             group_deals_by_date: self.group_deals_by_date,
             group_by: self.group_by,
             order_by_spec: self.order_by,
-            order_ascending: !self.order_descending,
+            order_descending: self.order_descending,
             output_yaml: self.yaml,
             yaml_map_key: self.yaml_map_key,
             title: self.title,
             no_header: self.no_header,
-            show_total: self.show_total,
-            brief_total: self.brief_total,
-            column_spec: self.column_spec.join(","),
+            no_total: self.no_total,
+            short_total: self.short_total,
+            column_spec: if self.column_spec.is_empty() {
+                None
+            } else {
+                Some(self.column_spec.join(","))
+            },
             where_conditions: if self.where_conditions.is_empty() {
                 None
             } else {
@@ -126,5 +128,21 @@ impl IntoExecCommand for CagArguments {
             },
         };
         Ok(cmd)
+    }
+}
+
+impl IntoExecCommand for CagArguments {
+    type Command = CagCommand;
+
+    #[allow(clippy::field_reassign_with_default)]
+    fn into_exec_cmd(self, args: &Arguments) -> JournResult<CagCommand> {
+        let mut cag_cmd = self.into_exec_cmd_inner(args)?;
+        // The chained command is merged, with default options set by the previous command.
+        let mut cmd_opt = Some(&mut cag_cmd);
+        while let Some(cmd) = cmd_opt {
+            cmd.chain = cmd.chain.as_ref().map(|c| Box::new(c.merge_from(&cmd)));
+            cmd_opt = cmd.chain.as_deref_mut();
+        }
+        Ok(cag_cmd)
     }
 }

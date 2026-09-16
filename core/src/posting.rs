@@ -18,6 +18,7 @@ use std::cell::Cell;
 use std::cmp::Ordering;
 use std::fmt;
 use std::fmt::Write;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 pub type PostingId = TreeId;
@@ -66,9 +67,10 @@ impl<'h> Posting<'h> {
         self.posting_id = entry_id.branch(new_id);
     }
 
+    /*
     pub(super) fn detach(&mut self) {
         self.posting_id = TreeId::new_root();
-    }
+    }*/
 
     pub fn id(&self) -> &TreeId {
         &self.posting_id
@@ -187,10 +189,6 @@ impl<'h> Posting<'h> {
         self.comment
     }
 
-    pub fn matches_account_filter(&self, filter: &str) -> bool {
-        self.account.name().contains(filter)
-    }
-
     pub fn is_debit(&self) -> bool {
         debug_assert!(!self.valued_amount.is_nil(), "Amount not set; set amount first");
 
@@ -201,6 +199,22 @@ impl<'h> Posting<'h> {
         debug_assert!(!self.valued_amount.is_nil(), "Amount not set; set amount first");
 
         self.amount() < 0
+    }
+
+    /// Gets whether this posting contains another. This makes senses when it has the same account, unit
+    /// and its amount is >= other's amount. We can think of `other` being 'inside' `self`.
+    pub fn contains(&self, other: &'_ Posting<'h>) -> bool {
+        self.account == other.account
+            && self.unit() == other.unit()
+            && self.amount() >= other.amount()
+    }
+}
+
+impl Hash for Posting<'_> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.account.hash(state);
+        self.valued_amount.hash(state);
+        self.comment.hash(state);
     }
 }
 

@@ -13,11 +13,11 @@ use std::mem;
 
 #[derive(Debug, PartialEq)]
 pub struct Min<'h> {
-    arg: Expr<'h>,
+    arg: Expr,
     min: Option<ColumnValue<'h>>,
 }
 impl<'h> Min<'h> {
-    pub fn new(args: Vec<Expr<'h>>) -> JournResult<Self> {
+    pub fn new(args: Vec<Expr>) -> JournResult<Self> {
         if args.len() != 1 {
             return Err(err!("Function 'min' requires one argument"));
         }
@@ -25,17 +25,20 @@ impl<'h> Min<'h> {
         Ok(Self { arg: args.into_iter().next().unwrap(), min: None })
     }
 }
-impl<'h> AggState<'h> for Min<'h> {
-    fn add(&mut self, context: &mut dyn IdentifierContext<'h>) -> JournResult<()> {
+impl<'h, 'a> AggState<'h, 'a> for Min<'h>
+where
+    'h: 'a,
+{
+    fn add(&mut self, context: &mut dyn IdentifierContext<'h, 'a>) -> JournResult<()> {
         let val = self.arg.eval(context)?;
 
         if self.min.is_none() {
             self.min = Some(val);
-        } else if let Some(amnt) = val.as_amount()
-            && let Some(self_amnt) = self.min.as_ref().and_then(|m| m.as_amount())
+        } else if let Some((amnt, p_1)) = val.as_amount()
+            && let Some((self_amnt, p_2)) = self.min.as_ref().and_then(|m| m.as_amount())
             && amnt.unit() == self_amnt.unit()
         {
-            self.min = Some(ColumnValue::Amount(amnt.min(self_amnt)));
+            self.min = Some(ColumnValue::Amount(amnt.min(self_amnt), p_1 || p_2));
         } else if let Some(min) = self.min.as_ref()
             && mem::discriminant(min) == mem::discriminant(&val)
         {

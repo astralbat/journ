@@ -17,14 +17,13 @@ pub mod str;
 pub mod styled;
 pub mod wrapped;
 
-use crate::report::table2::ColumnWidth;
 use crate::report::table2::cell_width::CellWidth;
 use crate::report::table2::fmt::{BasicCellFormatter, CellFormatter, StringCellFormatter};
+use crate::report::table2::{BinaryCell, ColumnWidth};
 use smallvec::SmallVec;
 use smartstring::alias::String as SS;
 use smartstring::{SmartString, SmartStringMode};
 use std::cell::RefCell;
-use std::fmt::Write;
 use std::{fmt, iter};
 
 thread_local! {
@@ -93,7 +92,18 @@ where
     }
 }
 
-pub trait Cell {
+impl fmt::Debug for CellRef<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Maybe we'll get rid of cell ref in the future. As they are usually
+        // always owned, the variant debug is considered clutter.
+        match self {
+            CellRef::Owned(o) => write!(f, "{:?}", o),
+            CellRef::Borrowed(b) => write!(f, "{:?}", b),
+        }
+    }
+}
+
+pub trait Cell: fmt::Debug {
     /// Writes the contents of the cell to the formatter, optionally padding its content to fill it.
     /// Returns Ok(()) if the line was printed, or Err(fmt::Error) if the line does not exist.
     fn print(
@@ -106,20 +116,7 @@ pub trait Cell {
     /// The width of the cell in characters.
     fn width(&self) -> CellWidth;
 
-    /// The number of lines this cell occupies. The default implementation counts the number of lines
-    fn height(&self) -> usize {
-        struct Writer;
-        impl Write for Writer {
-            fn write_str(&mut self, s: &str) -> fmt::Result {
-                if s.is_empty() { Err(fmt::Error) } else { Ok(()) }
-            }
-        }
-        let mut lines = 0;
-        while self.print(&mut BasicCellFormatter::new(&mut Writer), lines, None).is_ok() {
-            lines += 1;
-        }
-        lines
-    }
+    fn height(&self) -> usize;
 
     /// Returns the number of horizontal cells this cell spans. The default implementation returns 1.
     /// This must return >= 1.
@@ -140,10 +137,29 @@ pub trait Cell {
     fn as_shrinkable(&self) -> Option<&dyn ShrinkableCell> {
         None
     }
+
+    fn as_binary(&self) -> Option<&BinaryCell> {
+        None
+    }
 }
 
 pub trait ShrinkableCell: Cell {
-    fn try_shrink(&self, max_width: usize) -> bool;
+    /// Try to shrink the cell's width.
+    ///
+    /// The `target_width` provides a hint on the ideal maximum the cell should shrink to. This _must_
+    /// be of magnitude less than or equal to the current width of the cell.
+    ///
+    /// Additionally, the `target_width` _must_ also be of the same shape as the cell's width.
+    ///
+    /// Returns how many chars the cell was shrunk by.
+    fn try_shrink(&self, target_width: &CellWidth) -> usize;
+
+    /// Gets whether shrinking this cell would result in the loss of information.
+    fn is_lossy(&self) -> bool;
+
+    fn min_width(&self) -> usize {
+        1
+    }
 }
 
 pub struct ModifiableCell<'c> {
@@ -175,8 +191,9 @@ impl<'c> ModifiableCell<'c> {
         self.lines.borrow_mut()
     }
 
+    /// Gets all lines that are equal to the max width
     pub fn longest_lines_mut(&self) -> impl Iterator<Item = std::cell::RefMut<'_, SS>> {
-        let max_width = self.width().width();
+        let max_width = self.width().sum();
         let mut index = 0;
         iter::from_fn(move || {
             let lines = self.lines.borrow_mut();
@@ -221,5 +238,26 @@ impl Cell for ModifiableCell<'_> {
 
     fn padding_char(&self) -> char {
         self.inner.padding_char()
+    }
+
+    fn as_shrinkable(&self) -> Option<&dyn ShrinkableCell> {
+        self.inner.as_shrinkable()
+    }
+
+    fn as_binary(&self) -> Option<&BinaryCell> {
+        self.inner.as_binary()
+    }
+}
+
+impl fmt::Debug for ModifiableCell<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let len = self.lines.borrow().len();
+        for (i, line) in self.lines.borrow().iter().enumerate() {
+            write!(f, "{:?}", line)?;
+            if i < len - 1 {
+                writeln!(f)?;
+            }
+        }
+        Ok(())
     }
 }

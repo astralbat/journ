@@ -6,6 +6,7 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::bindings_pyo3::{PyLedgerError, PyLedgerResult};
+use journ_core::journal_context::JContext;
 use journ_core::journal_entry::JournalEntry as CoreJournalEntry;
 use journ_core::posting::PostingId;
 use journ_core::unit::Unit;
@@ -16,12 +17,17 @@ use std::sync::{Arc, Mutex};
 
 #[pyclass(unsendable)]
 pub struct Posting {
+    context: Arc<JContext<'static>>,
     entry: Arc<Mutex<CoreJournalEntry<'static>>>,
     posting_id: PostingId,
 }
 impl Posting {
-    pub fn new(entry: Arc<Mutex<CoreJournalEntry<'static>>>, posting_id: &PostingId) -> Self {
-        Posting { entry, posting_id: posting_id.clone() }
+    pub fn new(
+        context: Arc<JContext<'static>>,
+        entry: Arc<Mutex<CoreJournalEntry<'static>>>,
+        posting_id: &PostingId,
+    ) -> Self {
+        Posting { context, entry, posting_id: posting_id.clone() }
     }
 }
 
@@ -34,9 +40,11 @@ impl Posting {
     }
 
     fn amount(&self) -> String {
-        let entry = self.entry.lock().unwrap();
-        let pst = entry.find_posting(&self.posting_id).unwrap();
-        pst.amount().to_string()
+        self.context.with(|| {
+            let entry = self.entry.lock().unwrap();
+            let pst = entry.find_posting(&self.posting_id).unwrap();
+            pst.amount().to_string()
+        })
     }
 
     fn amount_quantity(&self) -> PyLedgerResult<Decimal> {
@@ -45,22 +53,37 @@ impl Posting {
         Ok(pst.amount().quantity())
     }
 
-    fn unit(&self) -> String {
+    fn unit(&self) -> Option<String> {
         let entry = self.entry.lock().unwrap();
         let pst = entry.find_posting(&self.posting_id).unwrap();
-        pst.unit().to_string()
+        if pst.unit().is_none() { None } else { Some(pst.unit().to_string()) }
     }
 
     fn set_amount(&self, amount_str: &str) -> PyLedgerResult<()> {
-        let mut entry = self.entry.lock().unwrap();
-        let mut config = entry.config().clone();
-        let pst = entry.find_posting_mut(&self.posting_id).unwrap();
-        let amount =
-            parse!(config.alloc(amount_str.to_string()), parsing::amount::amount, &mut config)
-                .map(|r| r.1)
-                .map_err(|e| err!(e; "append_posting()"))?;
-        pst.set_amount(amount, false, config.allocator());
-        Ok(())
+        self.context.with(|| {
+            let mut entry = self.entry.lock().unwrap();
+            let mut config = entry.config().clone();
+            let pst = entry.find_posting_mut(&self.posting_id).unwrap();
+            let amount = parse!(
+                config.alloc(amount_str.to_string()),
+                parsing::amount::amount_expr,
+                &mut config
+            )
+            .map(|r| r.1)
+            .map_err(|e| err!(e; "append_posting()"))?;
+            pst.set_amount(amount, false, config.allocator());
+            Ok(())
+        })
+    }
+
+    fn unit_values(&self) -> PyLedgerResult<Vec<String>> {
+        let entry = self.entry.lock().unwrap();
+        let pst = entry.find_posting(&self.posting_id).unwrap();
+        Ok(pst
+            .posting_valuations()
+            .filter(|v| v.is_unit())
+            .map(|v| v.value().to_string())
+            .collect())
     }
 
     fn set_unit_value(&self, unit_value: &str) -> PyLedgerResult<()> {

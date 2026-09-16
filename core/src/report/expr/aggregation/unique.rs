@@ -13,11 +13,11 @@ use std::collections::HashSet;
 
 #[derive(Debug, PartialEq)]
 pub struct Unique<'h> {
-    expr: Expr<'h>,
+    expr: Expr,
     set: HashSet<ColumnValue<'h>>,
 }
 impl<'h> Unique<'h> {
-    pub fn new(mut args: Vec<Expr<'h>>) -> JournResult<Self> {
+    pub fn new(mut args: Vec<Expr>) -> JournResult<Self> {
         if args.len() != 1 {
             return Err(err!("Function 'unique' requires exactly one argument"));
         }
@@ -25,8 +25,11 @@ impl<'h> Unique<'h> {
     }
 }
 
-impl<'h> AggState<'h> for Unique<'h> {
-    fn add(&mut self, context: &mut dyn IdentifierContext<'h>) -> JournResult<()> {
+impl<'h, 'a> AggState<'h, 'a> for Unique<'h>
+where
+    'h: 'a,
+{
+    fn add(&mut self, context: &mut dyn IdentifierContext<'h, 'a>) -> JournResult<()> {
         self.expr
             .eval(context)
             .map_err(|e| err!(e; "Unable to evaluate Unique() expression"))?
@@ -39,7 +42,7 @@ impl<'h> AggState<'h> for Unique<'h> {
             .map(|_| ())
     }
 
-    fn merge(&mut self, other: &dyn AggState<'h>) -> JournResult<()> {
+    fn merge(&mut self, other: &dyn AggState<'h, 'a>) -> JournResult<()> {
         let b = other.finalize();
 
         b.into_list()

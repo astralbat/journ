@@ -9,28 +9,29 @@ use crate::bindings_pyo3::PyLedgerResult;
 use crate::file_id::FileId;
 use crate::posting::Posting;
 use journ_core::error::JournError;
-use journ_core::journal_context::JournalContext;
+use journ_core::journal_context::JContext;
 use journ_core::journal_entry::EntryObject;
 use journ_core::journal_entry::JournalEntry as CoreJournalEntry;
-use journ_core::journal_node::NodeId;
 use journ_core::metadata::Metadata;
 use journ_core::python::conversion::DateTimeWrapper;
-use journ_core::tree_id::TreeId;
 use journ_core::valued_amount::ValuedAmount;
+use journ_core::valuer::{SystemValuer, Valuer};
 use journ_core::{err, parse, parsing};
 use pyo3::PyResult;
-use std::sync::{Arc, Mutex, MutexGuard};
+use rust_decimal::Decimal;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 
 #[pyclass(unsendable)]
 pub struct JournalEntry {
-    context: Arc<JournalContext<'static>>,
+    context: Arc<JContext<'static>>,
     entry: Arc<Mutex<CoreJournalEntry<'static>>>,
     file_id: FileId,
 }
 
 impl JournalEntry {
     pub fn new(
-        context: Arc<JournalContext<'static>>,
+        context: Arc<JContext<'static>>,
         entry: Arc<Mutex<CoreJournalEntry<'static>>>,
         file_id: FileId,
     ) -> Self {
@@ -56,43 +57,50 @@ impl JournalEntry {
 
     fn postings(&self) -> PyLedgerResult<Vec<Posting>> {
         let entry = self.entry.lock().unwrap();
-        Ok(entry.postings().map(|pst| Posting::new(Arc::clone(&self.entry), pst.id())).collect())
+        Ok(entry
+            .postings()
+            .map(|pst| Posting::new(Arc::clone(&self.context), Arc::clone(&self.entry), pst.id()))
+            .collect())
     }
 
     #[pyo3(signature = (account, amount=None))]
     fn append_posting(&self, account: &str, amount: Option<&str>) -> PyLedgerResult<Posting> {
-        let mut entry = self.entry.lock().unwrap();
-        let mut config = entry.config().clone();
-        let account = config.get_or_create_account(account);
-        let money = amount
-            .map(|a| {
-                let alloc_amount = crate::bindings_pyo3::ALLOCATOR.alloc(a.to_string());
-                let amount = parse!(alloc_amount, parsing::amount::amount_expr, &mut config)
-                    .map(|r| r.1)
-                    .map_err(|e| err!(e; "append_posting()"))?;
-                Ok::<_, JournError>(amount)
-            })
-            .transpose()?;
-        let pst = journ_core::posting::Posting::new(
-            None,
-            account,
-            money
-                .map(|a| ValuedAmount::new_in(a, &crate::bindings_pyo3::ALLOCATOR))
-                .unwrap_or(ValuedAmount::nil()),
-            None,
-            None,
-        );
-        let posting_id = entry.append_posting(pst).id();
-        Ok(Posting::new(Arc::clone(&self.entry), posting_id))
+        self.context.with(|| {
+            let mut entry = self.entry.lock().unwrap();
+            let mut config = entry.config().clone();
+            let account = config.get_or_create_account(account);
+            let money = amount
+                .map(|a| {
+                    let alloc_amount = crate::bindings_pyo3::ALLOCATOR.alloc(a.to_string());
+                    let amount = parse!(alloc_amount, parsing::amount::amount_expr, &mut config)
+                        .map(|r| r.1)
+                        .map_err(|e| err!(e; "append_posting()"))?;
+                    Ok::<_, JournError>(amount)
+                })
+                .transpose()?;
+            let pst = journ_core::posting::Posting::new(
+                None,
+                account,
+                money
+                    .map(|a| ValuedAmount::new_in(a, &crate::bindings_pyo3::ALLOCATOR))
+                    .unwrap_or(ValuedAmount::nil()),
+                None,
+                None,
+            );
+            let posting_id = entry.append_posting(pst).id();
+            Ok(Posting::new(Arc::clone(&self.context), Arc::clone(&self.entry), posting_id))
+        })
     }
 
     fn metadata_value(&self, key: &str) -> Option<String> {
-        let entry = self.entry.lock().unwrap();
-        entry
-            .metadata()
-            .filter(|m| m.key() == key)
-            .next()
-            .and_then(|m| m.value().map(|v| v.to_string()))
+        self.context.with(|| {
+            let entry = self.entry.lock().unwrap();
+            entry
+                .metadata()
+                .filter(|m| m.key() == key)
+                .next()
+                .and_then(|m| m.value().map(|v| v.to_string()))
+        })
     }
 
     #[pyo3(signature = (key, value=None))]
@@ -140,26 +148,105 @@ impl JournalEntry {
         })
     }
 
-    fn is_balanced(&self) -> PyResult<bool> {
-        let entry = self.entry.lock().unwrap();
-        // Use a clone so as not to change the entry; this would be an unexpected side effect.
-        let mut entry_clone = entry.clone();
-        Ok(entry_clone.check().is_ok())
+    fn replace(&self) -> PyLedgerResult<bool> {
+        self.context.with(|| {
+            let mut journal = self.context.journal_mut();
+            let entry = self.entry.lock().unwrap().clone();
+            let replaced = journal.replace_entry(entry)?;
+            Ok(replaced.map(|_| true).unwrap_or(false))
+        })
+    }
+
+    fn remove(&self) -> bool {
+        self.context.with(|| {
+            let mut journal = self.context.journal_mut();
+            let entry = self.entry.lock().unwrap().clone();
+            journal.remove_entry(&entry)
+        })
+    }
+
+    /// Checks the entry is balanced and derives elided posting amounts.
+    fn check_and_derive(&self) -> PyLedgerResult<()> {
+        self.context.with(|| {
+            let mut entry = self.entry.lock().unwrap();
+            entry.check()?;
+            Ok(())
+        })
+    }
+
+    /// Checks but does not elide missing posting amounts.
+    fn check(&self) -> PyResult<bool> {
+        self.context.with(|| {
+            let entry = self.entry.lock().unwrap();
+            // Use a clone so as not to change the entry; this would be an unexpected side effect.
+            let mut entry_clone = entry.clone();
+            Ok(entry_clone.check().is_ok())
+        })
+    }
+
+    /// Performs a valuation lookup from `base_unit` @ `quantity` to `quote_unit`
+    /// using this entry as the starting point.
+    #[pyo3(signature = (quantity, base_unit, quote_unit))]
+    fn value_amount<'py>(
+        &self,
+        quantity: Decimal,
+        base_unit: &str,
+        quote_unit: &str,
+    ) -> PyLedgerResult<Decimal> {
+        self.context.with(|| {
+            let entry = self.entry.lock().unwrap();
+            let mut config = JContext::get().journal().config().clone();
+            let quote_unit = config.get_or_create_unit(quote_unit);
+            let base_unit = config.get_or_create_unit(base_unit);
+
+            let qty = {
+                let valuation = SystemValuer::from(&*entry)
+                    .value(quote_unit, base_unit.with_quantity(quantity))
+                    .map_err(JournError::from)?;
+                valuation.value().quantity()
+            };
+            Ok(qty)
+        })
     }
 
     fn __str__(&self) -> String {
-        format!("{}", self.entry.lock().unwrap())
+        // Debug format includes elided postings, which after calling check_and_derive(),
+        // the user might like to see.
+        format!("{:?}", self.entry.lock().unwrap())
     }
 
     fn __eq__(&self, other: &Self) -> bool {
         let entry = self.entry.lock().unwrap();
         let other_entry = other.entry.lock().unwrap();
-        entry.is_duplicate_of(&*other_entry)
+
+        // Check date and description are the same
+        if entry.datetime_range() != other_entry.datetime_range()
+            || entry.description() != other_entry.description()
+        {
+            return false;
+        }
+
+        // Check postings are the same
+        let entry_postings: HashSet<&journ_core::posting::Posting> = entry.postings().collect();
+        let other_entry_postings: HashSet<&journ_core::posting::Posting> =
+            other_entry.postings().collect();
+        if entry_postings != other_entry_postings {
+            return false;
+        }
+
+        // Check metadata is the same
+        let entry_metadata: HashSet<&Metadata> = entry.metadata().collect();
+        let other_entry_metadata: HashSet<&Metadata> = other_entry.metadata().collect();
+        if entry_metadata != other_entry_metadata {
+            return false;
+        }
+        true
     }
 }
 
+/*
 impl JournalEntry {
-    pub(super) fn entry_ref(&self) -> MutexGuard<CoreJournalEntry<'static>> {
+    pub(super) fn entry_ref(&self) -> MutexGuard<'_, CoreJournalEntry<'static>> {
         self.entry.lock().unwrap()
     }
-}
+}*/

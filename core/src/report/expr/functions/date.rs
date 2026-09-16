@@ -14,10 +14,13 @@ use chrono::NaiveDate;
 use rust_decimal::prelude::ToPrimitive;
 
 /// Constructs a date from year, month, and day arguments.
-pub fn date<'h>(
-    args: &[Expr<'h>],
-    context: &mut dyn IdentifierContext<'h>,
-) -> JournResult<ColumnValue<'h>> {
+pub fn date<'h, 'a>(
+    args: &[Expr],
+    context: &mut dyn IdentifierContext<'h, 'a>,
+) -> JournResult<ColumnValue<'h>>
+where
+    'h: 'a,
+{
     if args.len() != 3 {
         return Err(err!("Function 'date' requires three arguments: year, month, day"));
     }

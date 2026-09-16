@@ -8,15 +8,18 @@
 use crate::amount::Amount;
 use crate::err;
 use crate::error::JournResult;
-use crate::journal_context::JournalContext;
+use crate::journal_context::JContext;
 use crate::report::expr::context::IdentifierContext;
 use crate::report::expr::{ColumnValue, Expr};
 use crate::unit::Unit;
 
-pub fn value<'h>(
-    args: &[Expr<'h>],
-    context: &mut dyn IdentifierContext<'h>,
-) -> JournResult<ColumnValue<'h>> {
+pub fn value<'h, 'a>(
+    args: &[Expr],
+    context: &mut dyn IdentifierContext<'h, 'a>,
+) -> JournResult<ColumnValue<'h>>
+where
+    'h: 'a,
+{
     match context.as_valuer_context_mut() {
         Some(context) => {
             if args.is_empty() || args.len() > 3 {
@@ -35,9 +38,9 @@ pub fn value<'h>(
                     "Function 'value()' requires the first argument to be a string representing a unit"
                 ))
                 .map(|s| {
-                    JournalContext::current().journal().config()
+                    JContext::get().journal().config()
                         .get_unit(s)
-                        .unwrap_or(JournalContext::current().allocator().alloc(Unit::new(s)))
+                        .unwrap_or(JContext::get().allocator().alloc(Unit::new(s)))
                 })?;
 
             // The second argument is evaluated as the base amount that needs to be valued.
@@ -50,7 +53,7 @@ pub fn value<'h>(
             }
             let mut total_value = Amount::nil();
             for base_amount_val in base_amount_col.into_list() {
-                let base_amount = base_amount_val.as_amount().ok_or(err!(
+                let (base_amount, _) = base_amount_val.as_amount().ok_or(err!(
                     "Function 'value()' requires the second argument to be an `Amount` type"
                 ))?;
 
@@ -75,7 +78,7 @@ pub fn value<'h>(
                     val.into_sources().into_iter().map(ColumnValue::String).collect(),
                 );
             }
-            Ok(ColumnValue::Amount(total_value))
+            Ok(ColumnValue::Amount(total_value, false))
         }
         None => Err(err!("Function 'value()' is not supported in this context")),
     }

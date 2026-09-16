@@ -10,10 +10,13 @@ use crate::error::JournResult;
 use crate::report::expr::column_value::try_sort;
 use crate::report::expr::{ColumnValue, Expr, IdentifierContext};
 
-pub fn greatest<'h>(
-    args: &[Expr<'h>],
-    context: &mut dyn IdentifierContext<'h>,
-) -> JournResult<ColumnValue<'h>> {
+pub fn greatest<'h, 'a>(
+    args: &[Expr],
+    context: &mut dyn IdentifierContext<'h, 'a>,
+) -> JournResult<ColumnValue<'h>>
+where
+    'h: 'a,
+{
     if args.len() < 2 {
         return Err(err!("Function 'greatest' requires at least two arguments"));
     }

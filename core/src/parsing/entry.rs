@@ -16,7 +16,8 @@ use crate::parsing::amount::amount_expr;
 use crate::parsing::input::{BlockInput, ConfigInput, LocatedInput, NodeInput, TextInput};
 use crate::parsing::text_block::block_remainder1;
 use crate::parsing::util::{
-    blank_line0, blank_lines0, comment, recognize_rtrim, spaced_word, until_line_ending0,
+    blank_line0, blank_lines0, comment, double_space, recognize_rtrim, spaced_word,
+    until_line_ending0,
 };
 use crate::parsing::{IParseResult, JParseResult};
 use crate::posting::Posting;
@@ -24,11 +25,11 @@ use crate::valued_amount::{PostingValuation, ValuedAmount};
 use chrono_tz::Tz;
 use nom::branch::alt;
 use nom::bytes::complete::tag;
-use nom::character::complete::{space0, space1};
-use nom::combinator::{consumed, cut, map, map_res, opt, recognize, rest};
+use nom::character::complete::{line_ending, space0, space1};
+use nom::combinator::{consumed, cut, map, map_res, opt, peek, recognize, rest};
 use nom::error::context;
 use nom::multi::fold_many0;
-use nom::sequence::{pair, tuple};
+use nom::sequence::{pair, preceded, terminated, tuple};
 use nom::{Err as NomErr, Finish};
 use std::sync::Arc;
 
@@ -40,7 +41,7 @@ where
     JDate::parse(df)(input)
 }
 
-pub fn time<'h, I>(input: I) -> IParseResult<'h, I, JTime>
+pub fn time<'h, I>(input: I) -> IParseResult<'h, I, (JTime, bool)>
 where
     I: TextInput<'h> + ConfigInput<'h>,
 {
@@ -76,8 +77,9 @@ where
                 IErrorMsg::DATE_OR_TIME,
                 alt((
                     map(&mut datetime(tz), |dt| JDateTimeRange::new(datetime_from, Some(dt))),
-                    map_res(time, |time_to| {
+                    map_res(time, |(time_to, is_utc)| {
                         datetime_from
+                            .with_timezone(if is_utc { Tz::UTC } else { datetime_from.timezone() })
                             .with_time(time_to)
                             .map(|jdt| JDateTimeRange::new(datetime_from, Some(jdt)))
                     }),
@@ -87,9 +89,6 @@ where
         }
         None => (input, JDateTimeRange::new(datetime_from, None)),
     };
-
-    // Aux datetime is optional
-    //let (input, aux_date) = opt(preceded(tag("="), &mut datetime(tz)))(input)?;
 
     Ok((input, datetime_range))
 }
@@ -136,7 +135,7 @@ where
 
     let allocator = input.config().allocator();
     let (rem, expr) = amount_expr(input)?;
-    let va = || Ok(ValuedAmount::new_in(expr.clone(), allocator));
+    let va = || Ok(ValuedAmount::new_in(expr, allocator));
     let (rem, res) =
         fold_many0(consumed(alt((total_val, unit_val))), va, |va, (input, mut val)| {
             let mut acc = va?;
@@ -191,7 +190,10 @@ where
     // Read an optional valued amount
     let (mut input, mut valued_amount) = context(
         "Invalid valued amount",
-        alt((map(valued_amount, Some), map(recognize_rtrim(blank_line0), |_| None))),
+        alt((
+            map(valued_amount, Some),
+            map(alt((recognize_rtrim(blank_line0), peek(preceded(space0, tag(";"))))), |_| None),
+        )),
     )(input)?;
 
     // Replace the `valued_amount` primary unit if specified on the account (overrides global config)
@@ -277,8 +279,18 @@ where
 {
     let parse_node = input.parse_node();
 
-    let (input, description) =
-        map(recognize_rtrim(until_line_ending0), |s: I| s.text())(input).unwrap();
+    // The description is optional, in which case, we just read any number of spaces to the newline.
+    // If it is present, it needs to be preceded by a double space.
+    let (input, description) = promote(
+        "Unable to read description",
+        map(
+            recognize_rtrim(context(
+                "Double space expected",
+                alt((preceded(double_space, until_line_ending0), terminated(space0, line_ending))),
+            )),
+            |s: I| s.text(),
+        ),
+    )(input)?;
 
     let mut entry_objs = Vec::with_capacity_in(2, input.config().allocator());
     let rem = match_blocks!(input.clone(),

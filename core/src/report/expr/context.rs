@@ -7,8 +7,9 @@
  */
 use crate::datetime::JDateTime;
 use crate::error::JournResult;
-use crate::journal_context::JournalContext;
+use crate::journal_context::JContext;
 use crate::journal_entry::JournalEntry;
+use crate::journal_entry_flow::{Flow, LinkedFlow};
 use crate::posting::Posting;
 use crate::report::expr::{ColumnValue, GroupKey};
 use crate::valuer::{SystemValuer, Valuer};
@@ -17,20 +18,100 @@ use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::sync::Arc;
 
-pub trait EvalContext<'h> {
-    fn as_valuer_context(&self) -> Option<&dyn ValuerContext<'h>> {
+#[macro_export]
+macro_rules! _eval_call_handler {
+    // $part IS present: use handler as-is (guard already filters by left_ident)
+    ($eval_next:expr, $handler:expr, $left_ident:expr, $part:expr) => {
+        $eval_next($handler)
+    };
+    // $part is NOT present: pass left_ident into the handler
+    ($eval_next:expr, $handler:expr, $left_ident:expr,) => {
+        $handler($left_ident).and_then(|r| $eval_next(r))
+    };
+}
+
+/// Evaluates an identifier in `obj.property` syntax. The macro takes an identifier string, the type of the object to evaluate on,
+/// and a series of patterns and handlers. It splits the identifier on the first dot, matches the left part against
+/// the provided patterns, and if a match is found, evaluates the right part (if any) on the corresponding handler object.
+/// If no match is found, it returns None.
+///
+/// # Examples
+/// `eval_identifier("account.name", ColumnValue)
+#[macro_export]
+macro_rules! eval_identifier {
+    ($identifier:expr, $eval_ty:ty, $enum_ident:ident, $($member:pat $(if $part:expr)? => $handler:expr),+) => {{
+        use $crate::_eval_call_handler;
+
+        let split_times = if $identifier.starts_with('+') { 1 } else { 2 };
+        let mut split_dot = $identifier.splitn(split_times, '.');
+        let left_ident = split_dot.next().unwrap();
+
+        let mut eval_next = |obj: $eval_ty| match split_dot.next() {
+            Some(right_ident) => obj.eval_identifier(right_ident),
+            None => obj.eval_identifier(""),
+        };
+
+        let res = {
+            match $enum_ident {
+                $(
+                    $member $(if left_ident.eq_ignore_ascii_case($part))? => {
+                        _eval_call_handler!(eval_next, $handler, left_ident, $($part)?)
+                    }
+                )+,
+            }
+        };
+        res
+    }};
+
+    ($identifier:expr, $eval_ty:ty, $($part:expr => $handler:expr),+) => {{
+        let mut split_dot = $identifier.splitn(2, '.');
+        let left_ident = split_dot.next().unwrap();
+
+        let mut eval_next = |obj: $eval_ty| match split_dot.next() {
+            Some(right_ident) => obj.eval_identifier(right_ident),
+            None => obj.eval_identifier(""),
+        };
+
+        let res = {
+            #[allow(unreachable_patterns)]
+            match left_ident {
+                $(
+                    s if s.eq_ignore_ascii_case($part) => {
+                        eval_next($handler)
+                    }
+                )+,
+                _ => None
+            }
+        };
+
+        /*
+        let res = 'matcher: {
+            $(
+                if left_ident.eq_ignore_ascii_case($part) {
+                    break 'matcher eval_next($handler);
+                }
+            )+ else {
+                None
+            }
+        };*/
+        res
+    }};
+}
+
+pub trait EvalContext<'h, 'a> {
+    fn as_valuer_context(&self) -> Option<&dyn ValuerContext<'h, 'a>> {
         None
     }
 
-    fn as_valuer_context_mut(&mut self) -> Option<&mut dyn ValuerContext<'h>> {
+    fn as_valuer_context_mut(&mut self) -> Option<&mut dyn ValuerContext<'h, 'a>> {
         None
     }
 
-    fn as_posting_context(&self) -> Option<&PostingContext<'h>> {
+    fn as_posting_context(&self) -> Option<&PostingContext<'h, '_>> {
         None
     }
 
-    fn as_posting_context_mut(&mut self) -> Option<&mut PostingContext<'h>> {
+    fn as_posting_context_mut(&mut self) -> Option<&mut PostingContext<'h, 'a>> {
         None
     }
 
@@ -39,7 +120,7 @@ pub trait EvalContext<'h> {
     }
 }
 
-pub trait IdentifierContext<'h>: EvalContext<'h> {
+pub trait IdentifierContext<'h, 'a>: EvalContext<'h, 'a> {
     fn variables(&self) -> &HashMap<SS, ColumnValue<'h>>;
 
     fn variables_mut(&mut self) -> &mut HashMap<SS, ColumnValue<'h>>;
@@ -76,18 +157,18 @@ pub trait IdentifierContext<'h>: EvalContext<'h> {
     }
 }
 
-pub trait ValuerContext<'h>: IdentifierContext<'h> {
+pub trait ValuerContext<'h, 'p>: IdentifierContext<'h, 'p> {
     fn valuer<'a>(&'a self, date: Option<JDateTime>) -> JournResult<Box<dyn Valuer<'h> + 'a>>
     where
         'h: 'a,
     {
         match date {
             Some(date) => Ok(Box::new(SystemValuer::on_date(
-                JournalContext::current().journal().config().clone(),
+                JContext::get().journal().config().clone(),
                 date,
             ))),
             None => Ok(Box::new(SystemValuer::on_date(
-                JournalContext::current().journal().config().clone(),
+                JContext::get().journal().config().clone(),
                 JDateTime::now(),
             ))),
         }
@@ -116,12 +197,12 @@ impl<'h> LateContext<'h> {
         context
     }
 }
-impl<'h, 'j> EvalContext<'h> for LateContext<'h> {
-    fn as_valuer_context(&self) -> Option<&dyn ValuerContext<'h>> {
+impl<'h, 'a> EvalContext<'h, 'a> for LateContext<'h> {
+    fn as_valuer_context(&self) -> Option<&dyn ValuerContext<'h, 'a>> {
         Some(self)
     }
 
-    fn as_valuer_context_mut(&mut self) -> Option<&mut dyn ValuerContext<'h>> {
+    fn as_valuer_context_mut(&mut self) -> Option<&mut dyn ValuerContext<'h, 'a>> {
         Some(self)
     }
 
@@ -129,7 +210,7 @@ impl<'h, 'j> EvalContext<'h> for LateContext<'h> {
         self.aggregate_values.get(index).cloned()
     }
 }
-impl<'h, 'j> IdentifierContext<'h> for LateContext<'h> {
+impl<'h, 'a> IdentifierContext<'h, 'a> for LateContext<'h> {
     fn variables(&self) -> &HashMap<SS, ColumnValue<'h>> {
         &self.variables
     }
@@ -155,7 +236,7 @@ impl<'h, 'j> IdentifierContext<'h> for LateContext<'h> {
     }
 }
 
-impl<'h> ValuerContext<'h> for LateContext<'h> {}
+impl<'h, 'a> ValuerContext<'h, 'a> for LateContext<'h> {}
 
 pub struct TotalContext<'h> {
     aggregate_values: Vec<ColumnValue<'h>>,
@@ -166,11 +247,11 @@ impl<'h> TotalContext<'h> {
         TotalContext { aggregate_values, variables: HashMap::new() }
     }
 }
-impl<'h> EvalContext<'h> for TotalContext<'h> {
-    fn as_valuer_context(&self) -> Option<&dyn ValuerContext<'h>> {
+impl<'h, 'a> EvalContext<'h, 'a> for TotalContext<'h> {
+    fn as_valuer_context(&self) -> Option<&dyn ValuerContext<'h, 'a>> {
         Some(self)
     }
-    fn as_valuer_context_mut(&mut self) -> Option<&mut dyn ValuerContext<'h>> {
+    fn as_valuer_context_mut(&mut self) -> Option<&mut dyn ValuerContext<'h, 'a>> {
         Some(self)
     }
 
@@ -178,7 +259,7 @@ impl<'h> EvalContext<'h> for TotalContext<'h> {
         self.aggregate_values.get(index).cloned()
     }
 }
-impl<'h> IdentifierContext<'h> for TotalContext<'h> {
+impl<'h, 'a> IdentifierContext<'h, 'a> for TotalContext<'h> {
     fn variables(&self) -> &HashMap<SS, ColumnValue<'h>> {
         &self.variables
     }
@@ -188,54 +269,46 @@ impl<'h> IdentifierContext<'h> for TotalContext<'h> {
     }
 }
 
-impl<'h> ValuerContext<'h> for TotalContext<'h> {}
+impl<'h, 'a> ValuerContext<'h, 'a> for TotalContext<'h> {}
 
-pub struct PostingContext<'h> {
-    entry: &'h JournalEntry<'h>,
-    posting: &'h Posting<'h>,
+pub struct PostingContext<'h, 'a> {
+    entry: &'a JournalEntry<'h>,
+    posting: &'a Posting<'h>,
     variables: HashMap<SS, ColumnValue<'h>>,
 }
-impl<'h> PostingContext<'h> {
-    pub fn new(
-        //journal: &'j Journal<'h>,
-        entry: &'h JournalEntry<'h>,
-        posting: &'h Posting<'h>,
-    ) -> PostingContext<'h> {
+impl<'h, 'a> PostingContext<'h, 'a> {
+    pub fn new(entry: &'a JournalEntry<'h>, posting: &'a Posting<'h>) -> PostingContext<'h, 'a> {
         PostingContext { entry, posting, variables: HashMap::new() }
     }
-
-    //pub fn journal(&self) -> &'h Journal<'h> {
-    //    self.journal
-    //}
 
     pub fn entry(&self) -> &JournalEntry<'h> {
         self.entry
     }
 
-    pub fn posting(&self) -> &Posting<'h> {
+    pub fn posting(&self) -> &'a Posting<'h> {
         self.posting
     }
 }
 
-impl<'h> EvalContext<'h> for PostingContext<'h> {
-    fn as_valuer_context(&self) -> Option<&dyn ValuerContext<'h>> {
+impl<'h, 'a> EvalContext<'h, 'a> for PostingContext<'h, 'a> {
+    fn as_valuer_context(&self) -> Option<&dyn ValuerContext<'h, 'a>> {
         Some(self)
     }
 
-    fn as_valuer_context_mut(&mut self) -> Option<&mut dyn ValuerContext<'h>> {
+    fn as_valuer_context_mut(&mut self) -> Option<&mut dyn ValuerContext<'h, 'a>> {
         Some(self)
     }
 
-    fn as_posting_context(&self) -> Option<&PostingContext<'h>> {
+    fn as_posting_context(&self) -> Option<&PostingContext<'h, 'a>> {
         Some(self)
     }
 
-    fn as_posting_context_mut(&mut self) -> Option<&mut PostingContext<'h>> {
+    fn as_posting_context_mut(&mut self) -> Option<&mut PostingContext<'h, 'a>> {
         Some(self)
     }
 }
 
-impl<'h, 'j> IdentifierContext<'h> for PostingContext<'h> {
+impl<'h, 'a> IdentifierContext<'h, 'a> for PostingContext<'h, 'a> {
     fn variables(&self) -> &HashMap<SS, ColumnValue<'h>> {
         &self.variables
     }
@@ -245,103 +318,96 @@ impl<'h, 'j> IdentifierContext<'h> for PostingContext<'h> {
     }
 
     fn eval_identifier(&self, identifier: &str) -> Option<ColumnValue<'h>> {
-        if identifier.eq_ignore_ascii_case("account") {
-            Some(ColumnValue::Account(Arc::clone(self.posting.account())))
-        } else if identifier.eq_ignore_ascii_case("date") {
-            Some(ColumnValue::Date(self.entry.datetime_range().start().date()))
-        } else if identifier.eq_ignore_ascii_case("datetime_from") {
-            Some(ColumnValue::Datetime(self.entry.datetime_range().start()))
-        } else if identifier.eq_ignore_ascii_case("datetime_to") {
-            Some(ColumnValue::Datetime(self.entry.datetime_range().end()))
-        } else if identifier.eq_ignore_ascii_case("datetime_mid") {
-            Some(ColumnValue::Datetime(self.entry.datetime_range().average()))
-        } else if identifier.eq_ignore_ascii_case("description") {
-            Some(ColumnValue::Description(self.entry.description().into()))
-        } else if identifier.eq_ignore_ascii_case("amount") {
-            Some(ColumnValue::Amount(self.posting.amount()))
-        } else if identifier.eq_ignore_ascii_case("file") {
-            Some(
-                JournalContext::current()
+        use ColumnValue::*;
+        let res = eval_identifier!(identifier, ColumnValue<'h>,
+            "account" => Account(Arc::clone(self.posting.account())),
+            //"date" => Date(self.entry.datetime_range().start().date()),
+            "date" => DatetimeRange(self.entry.datetime_range()),
+            "description" => Description(self.entry.description().into()),
+            "amount" => Amount(self.posting.amount(), true),
+            "file" => {
+                JContext::get()
                     .journal()
                     .root()
                     .find_by_node_id(&self.entry.id().parent().unwrap())
                     .unwrap()
                     .nearest_filename()
-                    .map(|p| ColumnValue::String(p.to_str().unwrap().into()))
-                    .unwrap_or(ColumnValue::Undefined),
-            )
-        } else if identifier.starts_with('+') {
-            Some(
+                    .map(|p| String(p.to_str().unwrap().into()))
+                    .unwrap_or(Undefined)
+            }
+        );
+        res.or_else(|| {
+            identifier.strip_prefix('+').and_then(|key| {
                 self.entry
                     .metadata()
-                    .find(|m| m.key() == &identifier[1..])
-                    .and_then(|m| m.value().map(|m| ColumnValue::StringRef(m)))
-                    .unwrap_or(ColumnValue::Undefined),
-            )
-        } else {
-            self.variables.get(identifier.to_lowercase().as_str()).cloned()
-        }
+                    .find(|m| m.key() == key)
+                    .map(|m| {
+                        m.value().map(|v| String(SS::from(v))).unwrap_or_else(|| String(SS::new()))
+                    })
+                    .or(Some(Undefined))
+            })
+        })
+        .or_else(|| self.variables.get(identifier.to_lowercase().as_str()).cloned())
     }
 }
 
-impl<'h> ValuerContext<'h> for PostingContext<'h> {
+impl<'h, 'p> ValuerContext<'h, 'p> for PostingContext<'h, 'p> {
     fn valuer<'a>(&'a self, datetime: Option<JDateTime>) -> JournResult<Box<dyn Valuer<'h> + 'a>>
     where
         'h: 'a,
     {
         let sys_valuer = match datetime {
-            Some(datetime) => SystemValuer::on_date(
-                JournalContext::current().journal().config().clone(),
-                datetime,
-            ),
+            Some(datetime) => {
+                SystemValuer::on_date(JContext::get().journal().config().clone(), datetime)
+            }
             None => SystemValuer::from(self.entry()),
         };
         Ok(Box::new(sys_valuer))
     }
 }
 
-#[macro_export]
-macro_rules! eval_identifier {
-    ($identifier:expr, $eval_ty:ty, $enum_ident:ident, $($member:pat $(if $part:expr)? => $handler:expr),+) => {{
-        let mut split_dot = $identifier.splitn(2, '.');
-        let left_ident = split_dot.next().unwrap();
+impl<'h> Flow<'h> {
+    pub fn eval_identifier(&self, identifier: &str) -> Option<ColumnValue<'h>> {
+        use ColumnValue::*;
 
-        let mut eval_next = |obj: $eval_ty| match split_dot.next() {
-            Some(right_ident) => obj.eval_identifier(right_ident),
-            None => obj.eval_identifier(""),
-        };
+        eval_identifier!(identifier, ColumnValue<'h>,
+            "account" => Account(Arc::clone(self.account_root().unwrap())),
+            "amount" => Amount(self.amount(), true),
+            "unit" => Unit(self.unit())
+        )
+    }
+}
 
-        let res = {
-            match $enum_ident {
-                $(
-                    $member $(if left_ident.eq_ignore_ascii_case($part))? => {
-                        eval_next($handler)
-                    }
-                )+,
-                _ => None
-            }
-        };
-        res
-    }};
+pub struct LinkedFlowContext<'h, 'a> {
+    linked_flow: &'a LinkedFlow<'h>,
+    variables: HashMap<SS, ColumnValue<'h>>,
+}
+impl<'h, 'a> LinkedFlowContext<'h, 'a> {
+    pub fn new(linked_flow: &'a LinkedFlow<'h>) -> Self {
+        Self { linked_flow, variables: HashMap::new() }
+    }
+}
 
-    ($identifier:expr, $eval_ty:ty, $($part:expr => $handler:expr),+) => {{
-        let mut split_dot = $identifier.splitn(2, '.');
-        let left_ident = split_dot.next().unwrap();
+impl<'h, 'a> EvalContext<'h, 'a> for LinkedFlowContext<'h, 'a> {
+    fn as_valuer_context(&self) -> Option<&dyn ValuerContext<'h, 'a>> {
+        None
+    }
+}
 
-        let mut eval_next = |obj: $eval_ty| match split_dot.next() {
-            Some(right_ident) => obj.eval_identifier(right_ident),
-            None => obj.eval_identifier(""),
-        };
+impl<'h, 'a> IdentifierContext<'h, 'a> for LinkedFlowContext<'h, 'a> {
+    fn variables(&self) -> &HashMap<SS, ColumnValue<'h>> {
+        &self.variables
+    }
 
-        let res = 'matcher: {
-            $(
-                if left_ident.eq_ignore_ascii_case($part) {
-                    break 'matcher eval_next($handler);
-                }
-            )+ else {
-                None
-            }
-        };
-        res
-    }};
+    fn variables_mut(&mut self) -> &mut HashMap<SS, ColumnValue<'h>> {
+        &mut self.variables
+    }
+
+    fn eval_identifier(&self, identifier: &str) -> Option<ColumnValue<'h>> {
+        let res = eval_identifier!(identifier, &Flow<'h>,
+            "linked" => self.linked_flow.linked()
+        );
+
+        res.or_else(|| self.linked_flow.flow().eval_identifier(identifier))
+    }
 }

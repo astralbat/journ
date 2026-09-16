@@ -18,11 +18,12 @@ use crate::parsing::input::{
 };
 use crate::parsing::text_block::{TextBlock, TextBlockLocation};
 use crate::parsing::unit_directive::{unit_definition_body, unit_directive_body, units_directive};
-use crate::parsing::util::{double_quoted, line_value, param_value, rest_line1, word};
+use crate::parsing::util::{
+    double_quoted, line_value, param_value, param_value_untrimmed, rest_line1, word,
+};
 use crate::parsing::{IParseResult, entry};
 use crate::parsing::{JParseResult, util};
 use crate::price::Price;
-use crate::unit::Unit;
 use crate::{err, match_blocks, parsing};
 use chrono_tz::Tz;
 use nom::branch::alt;
@@ -165,13 +166,7 @@ where
         let (rem, unit_code) = unit(rem_value.clone())
             .map_err(|_| NomErr::Failure(err!(rem_value.into_err(E_BASE_UNIT))))?;
         let mut config = input.config_mut();
-        match config.get_unit(unit_code) {
-            Some(unit) => (rem, unit),
-            None => {
-                let unit = Unit::new(unit_code);
-                (rem, config.merge_unit(&unit, input.parse_node().allocator()))
-            }
-        }
+        (rem, config.get_or_create_unit(unit_code))
     };
 
     // Parse price
@@ -405,7 +400,8 @@ where
             param_value("timeformat") => |input| push_directive(timeformat_directive(input)?.1, false),
             param_value("datetimeformat") => |input| push_directive(datetimeformat_directive(input)?.1, false),
             param_value("timezone") => |input| push_directive(timezone_directive(input)?.1, false),
-            param_value("python") => |input| push_directive(python_directive(input)?.1, false),
+            // No trimming for python as we need to outdent accurately
+            param_value_untrimmed("python") => |input| push_directive(python_directive(input)?.1, false),
             param_value("units") => |input| push_directive(units_directive(input)?.1, false),
             plugin_dir => |(dir, input)| push_directive(plugin_directive(dir, input)?.1, false),
             rest => |input: I| Err(NomErr::Error(input.into_err("Unknown directive")))
@@ -484,6 +480,7 @@ mod tests {
     use crate::metadata::Metadata;
     use crate::parsing::directive::*;
     use crate::parsing::entry::entry_date_and_remainder;
+    use crate::unit::Unit;
     use crate::*;
     use chrono::{NaiveDate, NaiveTime};
     use indoc::indoc;

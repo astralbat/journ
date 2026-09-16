@@ -10,14 +10,17 @@ use crate::error::JournResult;
 use crate::report::expr::{ColumnValue, IdentifierContext};
 
 /// A trait for maintaining the state of an aggregation operation. E.g. sum(), count(), avg(), etc.
-pub trait AggState<'h> {
+pub trait AggState<'h, 'a>
+where
+    'h: 'a,
+{
     /// Add a value to the aggregation state.
-    fn add(&mut self, context: &mut dyn IdentifierContext<'h>) -> JournResult<()>;
+    fn add(&mut self, context: &mut dyn IdentifierContext<'h, 'a>) -> JournResult<()>;
 
-    fn merge(&mut self, _other: &dyn AggState<'h>) -> JournResult<()> {
+    fn merge(&mut self, _other: &dyn AggState<'h, 'a>) -> JournResult<()> {
         Err(err!("Merging aggregation states is not supported for this aggregation"))
     }
 
-    /// Finalize the aggregation and return the result.
+    /// Finalise the aggregation and return the result.
     fn finalize(&self) -> ColumnValue<'h>;
 }

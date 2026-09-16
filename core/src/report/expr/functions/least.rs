@@ -10,10 +10,13 @@ use crate::error::JournResult;
 use crate::report::expr::column_value::try_sort;
 use crate::report::expr::{ColumnValue, Expr, IdentifierContext};
 
-pub fn least<'h>(
-    args: &[Expr<'h>],
-    context: &mut dyn IdentifierContext<'h>,
-) -> JournResult<ColumnValue<'h>> {
+pub fn least<'h, 'a>(
+    args: &[Expr],
+    context: &mut dyn IdentifierContext<'h, 'a>,
+) -> JournResult<ColumnValue<'h>>
+where
+    'h: 'a,
+{
     if args.len() < 2 {
         return Err(err!("Function 'min' requires at least two arguments"));
     }

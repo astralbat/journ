@@ -8,10 +8,25 @@
 use crate::report::table2::{Cell, CellRef};
 use std::ops::Deref;
 
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+pub enum RowKind {
+    Heading,
+    Header,
+    Footer,
+    Title,
+    ChainSeparator,
+    TitleSeparator,
+    TotalSeparator,
+    GrandTotalSeparator,
+    #[default]
+    Data,
+    Total,
+}
+
 #[derive(Default)]
 pub struct Row<'c> {
     pub cells: Vec<CellRef<'c>>,
-    header: bool,
+    row_kind: RowKind,
 }
 impl<'c> Row<'c> {
     pub fn new<I, C>(cells: I) -> Self
@@ -20,23 +35,27 @@ impl<'c> Row<'c> {
         C: Into<CellRef<'c>>,
     {
         let cells = cells.into_iter().map(Into::into).collect();
-        Self { cells, header: false }
+        Self { cells, ..Default::default() }
     }
 
     pub fn column_count(&self) -> usize {
         self.cells.iter().map(|c| c.hspan()).sum()
     }
 
-    pub fn is_header(&self) -> bool {
-        self.header
+    pub fn kind(&self) -> RowKind {
+        self.row_kind
     }
 
-    pub fn set_header(&mut self, is_header: bool) {
-        self.header = is_header;
+    pub fn set_kind(&mut self, row_kind: RowKind) {
+        self.row_kind = row_kind;
+    }
+
+    pub fn is_striped(&self) -> bool {
+        self.row_kind == RowKind::Data
     }
 
     pub fn width(&self) -> usize {
-        self.cells.iter().map(|c| c.width().width()).sum()
+        self.cells.iter().map(|c| c.width().sum()).sum()
     }
 
     pub fn append_borrowed<'a>(&mut self, content: &'a dyn Cell)
@@ -78,3 +97,19 @@ impl<'a, C: Into<CellRef<'a>>> From<Vec<C>> for Row<'a> {
         Self::new(cells)
     }
 }
+
+pub trait Rows {
+    fn column_count(&self) -> usize;
+}
+
+macro_rules! impl_rows {
+    ($t:ty) => {
+        impl<'cell> Rows for $t {
+            fn column_count(&self) -> usize {
+                self.iter().map(|r| r.column_count()).max().unwrap_or(0)
+            }
+        }
+    };
+}
+impl_rows!(Vec<Row<'cell>>);
+impl_rows!([Row<'cell>]);

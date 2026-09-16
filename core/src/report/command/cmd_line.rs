@@ -88,4 +88,8 @@ impl BeginAndEndCommand {
         let end = self.end.map(Bound::Excluded);
         (Bound::Unbounded, end.unwrap_or(Bound::Unbounded))
     }
+
+    pub fn merge_from(&self, other: &Self) -> Self {
+        Self { begin: self.begin.or(other.begin), end: self.end.or(other.end) }
+    }
 }

@@ -8,6 +8,7 @@
 use crate::amount::Amount;
 use crate::error::parsing::{IErrorMsg, IParseError, tag_err};
 use crate::ext::StrExt;
+use crate::parsing::decimal::{decimal, decimal_str, pos_decimal_str};
 use crate::parsing::input::{ConfigInput, TextInput};
 use crate::parsing::util::recognize_rtrim;
 use crate::parsing::{IParseResult, util};
@@ -18,7 +19,7 @@ use nom::Parser;
 use nom::branch::{alt, permutation};
 use nom::bytes::complete::{tag, take, take_till1, take_while1};
 use nom::character::complete::{char, space0};
-use nom::combinator::{consumed, flat_map, map, map_res, opt, recognize, rest, verify};
+use nom::combinator::{consumed, flat_map, map, opt, rest, verify};
 use nom::error::context;
 use nom::multi::fold_many0;
 use nom::sequence::{delimited, pair, preceded};
@@ -59,75 +60,6 @@ pub fn unit<'h, I: TextInput<'h>>(input: I) -> IParseResult<'h, I, &'h str> {
     Ok((rem, unit_code))
 }
 
-/// Parses a positive decimal.
-///
-/// ```
-/// # use journ_core::parse;
-/// # use journ_core::parse_obj;
-/// # use rust_decimal_macros::dec;
-/// # use journ_core::parsing::amount::pos_decimal;
-///
-/// assert_eq!(parse_obj!("123 ABC", pos_decimal), "123");
-/// assert_eq!(parse_obj!("123- ABC", pos_decimal), "123");
-/// assert!(parse!("-123", pos_decimal).is_err());
-///
-/// // Can be in scientific format
-/// assert_eq!(parse_obj!("123e6 ABC", pos_decimal), "123e6");
-/// assert_eq!(parse_obj!("123E+6 ABC", pos_decimal), "123E+6");
-/// assert_eq!(parse_obj!("123E-6 ABC", pos_decimal), "123E-6");
-/// assert_eq!(parse_obj!("123E- ABC", pos_decimal), "123");
-/// ```
-pub fn pos_decimal<'h, I: TextInput<'h>>(input: I) -> IParseResult<'h, I, &'h str> {
-    let digit_taker = |input: I| {
-        let mut last_digit = 0usize;
-        let mut last_char = None;
-        let mut peek_char = input.text().char_indices().peekable();
-        while let Some((i, c)) = peek_char.next() {
-            match c {
-                d if d.is_ascii_digit() => last_digit = i + 1,
-                ',' | '.' | 'e' | 'E' => {}
-                '-' | '+' if last_char == Some('e') || last_char == Some('E') => {}
-                _ => {
-                    break;
-                }
-            }
-            last_char = Some(c);
-        }
-        if last_digit == 0 {
-            return Err(nom::Err::Error(IParseError::new(IErrorMsg::NUMBER, input)));
-        }
-        take(last_digit)(input)
-    };
-    map(preceded(space0, digit_taker), |output: I| output.text())(input)
-}
-
-/// Parses a negative (only) decimal to a string
-pub fn neg_decimal<'h, I: TextInput<'h>>(input: I) -> IParseResult<'h, I, &'h str> {
-    map(
-        preceded(
-            space0,
-            recognize(alt((
-                preceded(char('-'), pos_decimal),
-                delimited(char('('), pos_decimal, char(')')),
-            ))),
-        ),
-        |out: I| out.text(),
-    )(input)
-}
-
-/// Parses a positive or negative decimal to a string
-pub fn decimal<'h, I: TextInput<'h>>(input: I) -> IParseResult<'h, I, &'h str> {
-    alt((neg_decimal, pos_decimal))(input)
-}
-
-/// As [decimal()], but forces the parsing according to the `Configuration's` [Configuration::number_format()].
-pub fn parsed_decimal<'h, I: TextInput<'h> + ConfigInput<'h>>(
-    input: I,
-) -> IParseResult<'h, I, Decimal> {
-    let nf = input.config().number_format();
-    tag_err(IErrorMsg::NUMBER, map_res(decimal, move |output| output.to_decimal(&nf)))(input)
-}
-
 pub fn pos_decimal_format<'h, I: TextInput<'h>>(input: I) -> IParseResult<'h, I, &'h str> {
     map(
         tag_err(
@@ -161,13 +93,13 @@ pub fn decimal_format<'h, I: TextInput<'h>>(input: I) -> IParseResult<'h, I, &'h
 /// no negative sign preceding the amount string.
 ///
 /// E.g. "$10" or "$-10" but not "-$10" or "($10)".
-pub fn pos_amount<'h, I, F>(dec_parser: F) -> impl FnMut(I) -> IParseResult<'h, I, Amount<'h>>
+pub fn pos_amount<'h, 's, I, F>(dec_parser: F) -> impl FnMut(I) -> IParseResult<'s, I, Amount<'h>>
 where
-    F: Fn(I) -> IParseResult<'h, I, &'h str>,
-    I: TextInput<'h> + ConfigInput<'h>,
+    F: Fn(I) -> IParseResult<'s, I, &'s str>,
+    I: TextInput<'s> + ConfigInput<'h>,
 {
     move |input| {
-        let (input, (consumed, (unit_code, decimal_s))) =
+        let (input, (consumed, (unit_code, decimal_s))): (I, (I, (&'s str, &'s str))) =
             consumed(permutation((unit, &dec_parser)))(input)?;
 
         // On finding the unit, this checks whether there's a format being used. A missing format can arise where a unit
@@ -183,8 +115,7 @@ where
                 };
                 unit.set_format(unit_format(false)(consumed.clone())?.1);
                 let mut mut_config = input.config_mut();
-                let allocator = mut_config.allocator();
-                mut_config.merge_unit(&unit, allocator);
+                mut_config.merge_unit(&unit);
                 mut_config.get_unit(unit_code).unwrap()
             }
         };
@@ -201,14 +132,14 @@ where
 /// Reads a negative [Amount]
 ///
 /// E.g. "-$10" or "($10)"
-pub fn neg_amount<'h, I>(input: I) -> IParseResult<'h, I, Amount<'h>>
+pub fn neg_amount<'h, 's, I>(input: I) -> IParseResult<'s, I, Amount<'h>>
 where
-    I: TextInput<'h> + ConfigInput<'h>,
+    I: TextInput<'s> + ConfigInput<'h>,
 {
     map(
         alt((
-            preceded(char('-'), pos_amount(&pos_decimal)),
-            delimited(char('('), pos_amount(&pos_decimal), char(')')),
+            preceded(char('-'), pos_amount(&pos_decimal_str)),
+            delimited(char('('), pos_amount(&pos_decimal_str), char(')')),
         )),
         |out| out.negate(),
     )(input)
@@ -228,16 +159,16 @@ where
 /// assert_eq!(parse_obj!("12e-5 ABC", amount).quantity(), dec!(0.00012));
 /// assert_eq!(parse_obj!("12E+5 ABC", amount).quantity(), dec!(1200000));
 /// ```
-pub fn amount<'h, I>(input: I) -> IParseResult<'h, I, Amount<'h>>
+pub fn amount<'h, 's, I>(input: I) -> IParseResult<'s, I, Amount<'h>>
 where
-    I: TextInput<'h> + ConfigInput<'h>,
+    I: TextInput<'s> + ConfigInput<'h>,
 {
-    context("Unable to read amount", alt((neg_amount, pos_amount(decimal))))(input)
+    context("Unable to read amount", alt((neg_amount, pos_amount(decimal_str))))(input)
 }
 
-pub fn unit_format<'h, I: TextInput<'h>>(
+pub fn unit_format<'s, I: TextInput<'s>>(
     definitive: bool,
-) -> impl FnMut(I) -> IParseResult<'h, I, UnitFormat> {
+) -> impl FnMut(I) -> IParseResult<'s, I, UnitFormat> {
     move |mut input| {
         // Skip past any initial space. This will be the case when parsing within a unit directive.
         input = space0::<I, ()>(input).unwrap().0;
@@ -346,7 +277,7 @@ where
     let amount = |input: I| map(amount, |a| ((Some(a.unit()), a.quantity()), 1))(input);
     // Try parenthesis expression first. It will fail if there is only one factor inside, then allowing the amount
     // to be parsed as a negative instead.
-    alt((parens, amount, parsed_decimal.map(|d| ((None, d), 1))))(input)
+    alt((parens, amount, decimal.map(|d| ((None, d), 1))))(input)
 }
 
 // We read an initial factor and for each time we find
@@ -356,7 +287,7 @@ fn amount_term<'h, I>(input: I) -> IParseResult<'h, I, (UnitQuantity<'h>, u32)>
 where
     I: TextInput<'h> + ConfigInput<'h>,
 {
-    flat_map(factor, |(init, factor_count)| {
+    flat_map(preceded(space0, factor), |(init, factor_count)| {
         fold_many0(
             pair(
                 preceded(space0, alt((char('*'), char('/')))),
@@ -406,6 +337,14 @@ where
             },
         )
     })(input)
+}
+
+/// Parses an expression that evaluates to a decimal value.
+pub fn decimal_expr<'h, I>(input: I) -> IParseResult<'h, I, Decimal>
+where
+    I: TextInput<'h> + ConfigInput<'h>,
+{
+    map(amount_expr_inner::<I>, |((_, quantity), _)| quantity)(input)
 }
 
 pub fn amount_expr<'h, I>(input: I) -> IParseResult<'h, I, Amount<'h>>
@@ -507,6 +446,7 @@ mod tests {
         let expr = |s: &'static str| parse!(s, amount_expr);
 
         assert_eq!(expr("$10 --10"), Ok(("", amount!("$20"))));
+        assert_eq!(expr("-$10 + -$5"), Ok(("", amount!("-$15"))));
         assert_eq!(expr("$10 ---10"), Ok((" ---10", amount!("$10"))));
         assert_eq!(expr("(10 + 10) * $2"), Ok(("", amount!("$40"))));
         assert_eq!(expr("( 10 + (10 - 5) ) * $2 "), Ok((" ", amount!("$30"))));

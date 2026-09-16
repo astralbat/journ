@@ -13,11 +13,11 @@ use crate::report::expr::{ColumnValue, Expr, IdentifierContext};
 /// Always the last defined value.
 #[derive(Debug, PartialEq)]
 pub struct Last<'h> {
-    arg: Expr<'h>,
+    arg: Expr,
     last: ColumnValue<'h>,
 }
 impl<'h> Last<'h> {
-    pub fn new(args: Vec<Expr<'h>>) -> JournResult<Self> {
+    pub fn new(args: Vec<Expr>) -> JournResult<Self> {
         if args.len() != 1 {
             return Err(err!("Function 'last' requires one argument"));
         }
@@ -25,8 +25,11 @@ impl<'h> Last<'h> {
         Ok(Self { arg: args.into_iter().next().unwrap(), last: ColumnValue::Undefined })
     }
 }
-impl<'h> AggState<'h> for Last<'h> {
-    fn add(&mut self, context: &mut dyn IdentifierContext<'h>) -> JournResult<()> {
+impl<'h, 'a> AggState<'h, 'a> for Last<'h>
+where
+    'h: 'a,
+{
+    fn add(&mut self, context: &mut dyn IdentifierContext<'h, 'a>) -> JournResult<()> {
         let val = self.arg.eval(context)?;
 
         if !val.is_undefined() {

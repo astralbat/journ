@@ -8,37 +8,75 @@
 use crate::amount::Amount;
 use crate::datetime::JDateTime;
 use crate::err;
-use crate::unit::Unit;
+use crate::journal_context::JContext;
+use crate::unit::{DEFAULT_PRICE_LOOKUP_WITHIN_SECS, Unit};
 use crate::valuer::{Valuation, ValuationError, ValuationResult, Valuer};
 
 /// A valuer that looks up valuations from price databases for both `base_unit` and `quote_unit`
 pub struct PriceDatabaseValuer {
     datetime: JDateTime,
-    within_seconds: usize,
 }
 
 impl PriceDatabaseValuer {
-    pub fn new(datetime: JDateTime, within_seconds: usize) -> Self {
-        PriceDatabaseValuer { datetime, within_seconds }
+    pub fn new(datetime: JDateTime) -> Self {
+        PriceDatabaseValuer { datetime }
     }
 }
 
 impl<'h> Valuer<'h> for PriceDatabaseValuer {
     fn value(&mut self, quote_unit: &'h Unit<'h>, amount: Amount<'h>) -> ValuationResult<'h> {
-        let do_lookup = |_unit| {
-            if let Some(price_db) = quote_unit.prices() {
+        /*
+        let do_lookup = |unit: &'h Unit<'h>| {
+            if let Some(price_db) = unit.prices() {
                 if let Some(price) = price_db.get_closest(
                     self.datetime,
-                    self.within_seconds,
+                    amount.unit().pricedb_lookup_within_secs().unwrap_or(DEFAULT_PRICE_LOOKUP_WITHIN_SECS),
                     amount.unit(),
                     quote_unit,
                 ) {
-                    return Ok(Valuation::from_amount(price.price() * amount.quantity(), amount));
+                    return Ok(Valuation::binary(price.price() * amount.quantity(), amount));
                 }
             }
             Err(ValuationError::Undetermined(err!("No price found in database")))
-        };
+        };*/
 
-        do_lookup(amount.unit()).or_else(|_| do_lookup(quote_unit))
+        let price_db = amount.unit().prices().unwrap_or_else(|| JContext::get().price_database());
+        if let Some(price) = price_db.get_closest(
+            self.datetime,
+            amount.unit().pricedb_lookup_within_secs().unwrap_or(DEFAULT_PRICE_LOOKUP_WITHIN_SECS),
+            amount.unit(),
+            quote_unit,
+        ) {
+            Ok((price, false))
+        // Try the reverse lookup if the first one fails
+        } else if let Some(price) = price_db.get_closest(
+            self.datetime,
+            quote_unit.pricedb_lookup_within_secs().unwrap_or(DEFAULT_PRICE_LOOKUP_WITHIN_SECS),
+            quote_unit,
+            amount.unit(),
+        ) {
+            Ok((price, true))
+        } else {
+            Err(ValuationError::Undetermined(err!("No price found in database")))
+        }
+        .map(|(price, reverse)| {
+            // Put in terms of the quote unit passed in (as per contract). The quote unit in the price db
+            // might have different rounding precision.
+            let price_amount = if reverse { price.inverse().price() } else { price.price() };
+            let mut v = Valuation::binary(
+                quote_unit.with_quantity(price_amount.quantity() * amount.quantity()),
+                amount,
+            );
+            price.sources().for_each(|s| {
+                v.add_source(s);
+            });
+            v
+        })
+
+        /*
+        do_lookup(amount.unit()).or_else(|_| {
+            let mut v = do_lookup(quote_unit)?;
+            Valuer::value(&mut v, quote_unit, amount)
+        })*/
     }
 }

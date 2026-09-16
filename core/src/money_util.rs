@@ -99,6 +99,7 @@ impl<'h> MoneyPot<'h> {
 
         let total_in_pot = self.value;
         let weight_sum: Decimal = weights.iter().copied().map(Into::into).sum();
+        assert!(weight_sum > dec!(0), "sum of weights must be > 0");
         let num_portions = weights.len();
         weights.iter().enumerate().map(move |(i, weight)| match i {
             n if n == num_portions - 1 => self.take_all(),

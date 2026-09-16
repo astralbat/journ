@@ -38,7 +38,8 @@ impl<'h> Valuer<'h> for EntryValuer<'h, '_> {
     fn value(&mut self, quote_unit: &'h Unit<'h>, amount: Amount<'h>) -> ValuationResult<'h> {
         let mut valuation = None;
         // Look for a direct unit valuation. These take precedence over total valuations.
-        for pst in self.entry.postings() {
+        // Avoid 0 amount postings as these value everything as 0.
+        for pst in self.entry.postings().filter(|pst| !pst.amount().is_zero()) {
             if pst.unit() == amount.unit()
                 && let Ok(val) = pst.valued_amount().unit_valuer().value(quote_unit, amount)
             {
@@ -47,7 +48,8 @@ impl<'h> Valuer<'h> for EntryValuer<'h, '_> {
             }
         }
         // Next, look for a total valuation
-        for pst in self.entry.postings() {
+        // Avoid 0 amount postings as these value everything as 0.
+        for pst in self.entry.postings().filter(|pst| !pst.amount().is_zero()) {
             if let Ok(val) = pst.valued_amount().total_valuer().value(quote_unit, amount) {
                 valuation = Some(val);
                 break;

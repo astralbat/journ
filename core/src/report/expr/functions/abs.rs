@@ -9,10 +9,13 @@ use crate::err;
 use crate::error::JournResult;
 use crate::report::expr::{ColumnValue, Expr, IdentifierContext};
 
-pub fn abs<'h>(
-    args: &[Expr<'h>],
-    context: &mut dyn IdentifierContext<'h>,
-) -> JournResult<ColumnValue<'h>> {
+pub fn abs<'h, 'a>(
+    args: &[Expr],
+    context: &mut dyn IdentifierContext<'h, 'a>,
+) -> JournResult<ColumnValue<'h>>
+where
+    'h: 'a,
+{
     if args.len() != 1 {
         return Err(err!("Function 'abs' requires two arguments"));
     }
@@ -22,10 +25,21 @@ pub fn abs<'h>(
         return Ok(ColumnValue::Undefined);
     }
 
-    let err = || err!("Function 'abs' requires an `Amount` argument");
+    let err = || err!("Function 'abs' requires an `Amount`, `Number` or `List` argument");
 
-    val0.as_amount()
-        .map(|a| ColumnValue::Amount(a.abs()))
-        .or_else(|| val0.as_number().map(|n| ColumnValue::Number(n.abs())))
-        .ok_or_else(err)
+    match val0 {
+        ColumnValue::Amount(amount, p) => Ok(ColumnValue::Amount(amount.abs(), p)),
+        ColumnValue::Number(num) => Ok(ColumnValue::Number(num.abs())),
+        ColumnValue::List(mut values) => {
+            for amt in &mut values {
+                let (abs, precise) = amt
+                    .as_amount()
+                    .map(|(a, p)| (a.abs(), p))
+                    .ok_or_else(|| err!("Only `Amount` types may absolute"))?;
+                *amt = ColumnValue::Amount(abs, precise);
+            }
+            Ok(ColumnValue::List(values))
+        }
+        _ => Err(err()),
+    }
 }

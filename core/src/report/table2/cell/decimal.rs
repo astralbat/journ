@@ -26,4 +26,8 @@ impl Cell for Decimal {
         let s = self.to_string();
         s.width()
     }
+
+    fn height(&self) -> usize {
+        1
+    }
 }

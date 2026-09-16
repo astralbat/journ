@@ -10,16 +10,16 @@ use journ_core::account::Account;
 use journ_core::configuration::{AccountFilter, DescriptionFilter, FileFilter, Filter, UnitFilter};
 use journ_core::error::JournResult;
 use journ_core::journal::Journal;
-use journ_core::journal_context::JournalContext;
+use journ_core::journal_context::JContext;
 use journ_core::journal_entry::JournalEntry;
 use journ_core::journal_node::JournalNode;
 use journ_core::posting::Posting;
-use journ_core::report::command::arguments::{Cmd, Command, DateTimeFormatCommand};
+use journ_core::report::command::arguments::{Command, DateTimeFormatCommand};
 use journ_core::report::command::chained_result::ChainingResult;
 use journ_core::report::command::cmd_line::BeginAndEndCommand;
 use journ_core::report::expr::parser::parse_plan;
 use journ_core::report::expr::{ColumnValue, Expr, PostingContext, RowData};
-use journ_core::report::table2::{Row, StyledCell};
+use journ_core::report::table2::{PolicyWrappingCell, Row, StyledCell, WrapPolicy};
 use journ_core::report::term_style::{Style, Weight};
 use journ_core::unit::Unit;
 use std::collections::HashMap;
@@ -49,18 +49,18 @@ impl RegCommand {
     }
 
     pub fn file_filter(&self) -> impl for<'h> Filter<JournalNode<'h>> + '_ {
-        FileFilter(&self.file_filter)
+        FileFilter::new(self.file_filter.iter())
     }
 
     pub fn description_filter(&self) -> impl Filter<str> + '_ {
-        DescriptionFilter(&self.description_filter)
+        DescriptionFilter::new(self.description_filter.iter())
     }
 
     pub fn filtered_postings<'h>(
         &self,
         journ: &Journal<'h>,
     ) -> impl Iterator<Item = (&'h JournalEntry<'h>, &'h Posting<'h>)> {
-        let cmd = Cmd::cast::<RegCommand>();
+        let cmd = JContext::get().cast_cmd::<RegCommand>();
         let description_filter = self.description_filter();
         let file_filter = self.file_filter();
         let account_filter = self.account_filter();
@@ -89,9 +89,15 @@ impl Command for RegCommand {
 }
 
 impl ExecCommand for RegCommand {
-    fn execute<'h>(&self, _chained: Option<ChainingResult>) -> JournResult<()> {
-        let cmd: &RegCommand = Cmd::cast();
-        let journ = JournalContext::current().journal();
+    fn execute<'h, 'a, 'cell>(
+        &self,
+        _chained: Option<ChainingResult<'h, 'a, 'cell>>,
+    ) -> JournResult<()>
+    where
+        'h: 'cell,
+    {
+        let cmd: &RegCommand = JContext::get().cast_cmd();
+        let journ = JContext::get().journal();
         let config = journ.config();
 
         // Parse the column specification. We need a lower-case version for evaluation.
@@ -103,6 +109,8 @@ impl ExecCommand for RegCommand {
             HashMap::new(),
             cmd.order_by_spec.as_deref(),
             cmd.order_ascending,
+            None,
+            None,
         )?;
 
         let mut table = journ_core::report::table2::Table::default();
@@ -112,9 +120,14 @@ impl ExecCommand for RegCommand {
             .column_spec()
             .exprs()
             .iter()
-            .map(|col| StyledCell::new(col.to_string(), heading_style))
+            .map(|col| {
+                StyledCell::new(
+                    PolicyWrappingCell::new(col.to_string(), WrapPolicy::Word),
+                    heading_style,
+                )
+            })
             .collect::<Vec<_>>();
-        table.append_heading_row(headings);
+        table.push_row(table.create_heading_row(headings));
 
         // Allow these columns to expand. Look better.
         for (i, col) in plan.column_spec().exprs().iter().enumerate() {
@@ -132,19 +145,21 @@ impl ExecCommand for RegCommand {
              row: &mut RowData<'h>,
              (_entry, pst): (&JournalEntry<'h>, &Posting<'h>)| {
                 for prev_row in prev.iter().rev() {
-                    let amount = prev_row.running_balance("balance").unwrap().as_amount().unwrap();
+                    let (amount, _precise) =
+                        prev_row.running_balance("balance").unwrap().as_amount().unwrap();
                     if amount.unit() == pst.unit() {
                         row.set_running_balance(
                             "balance",
-                            ColumnValue::Amount(amount + pst.amount()),
+                            ColumnValue::Amount(amount + pst.amount(), true),
                         );
                         return;
                     }
                 }
-                row.set_running_balance("balance", ColumnValue::Amount(pst.amount()));
+                row.set_running_balance("balance", ColumnValue::Amount(pst.amount(), true));
             };
-        let data = plan.execute(
-            self.filtered_postings(&journ),
+        let (data, _total) = plan.execute(
+            self.filtered_postings(&journ).map(Ok),
+            None,
             |(entry, pst)| PostingContext::new(entry, pst),
             Some(balance_update_fn),
         )?;

@@ -5,6 +5,7 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
+use crate::amount::Amount;
 use crate::err;
 use crate::error::JournResult;
 use crate::unit::{NegativeStyle, NumberFormat};
@@ -591,6 +592,21 @@ impl NumExt for Decimal {
         } else {
             (self.is_sign_positive() && other.is_sign_positive())
                 || (self.is_sign_negative() && other.is_sign_negative())
+        }
+    }
+}
+
+impl NumExt for Amount<'_> {
+    fn min_abs(self, other: Self) -> Self {
+        if self.abs() < other.abs() { self } else { other }
+    }
+
+    fn is_sign_compatible(&self, other: Self) -> bool {
+        if self.is_zero() || other.is_zero() {
+            true
+        } else {
+            (self.is_positive() && other.is_positive())
+                || (self.is_negative() && other.is_negative())
         }
     }
 }

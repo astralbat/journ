@@ -32,7 +32,7 @@ impl Cell for SeparatorCell {
     }
 
     fn width(&self) -> CellWidth {
-        CellWidth::Unary(0)
+        CellWidth::Leaf(0)
     }
 
     fn height(&self) -> usize {
@@ -45,5 +45,11 @@ impl Cell for SeparatorCell {
 
     fn padding_char(&self) -> char {
         self.padding_char
+    }
+}
+
+impl fmt::Debug for SeparatorCell {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
+        write!(f, "SeparatorCell")
     }
 }

@@ -9,20 +9,23 @@ use crate::err;
 use crate::error::JournResult;
 use crate::report::expr::{ColumnValue, Expr, IdentifierContext};
 
-pub fn neg<'h>(
-    args: &[Expr<'h>],
-    context: &mut dyn IdentifierContext<'h>,
-) -> JournResult<ColumnValue<'h>> {
+pub fn neg<'h, 'a>(
+    args: &[Expr],
+    context: &mut dyn IdentifierContext<'h, 'a>,
+) -> JournResult<ColumnValue<'h>>
+where
+    'h: 'a,
+{
     if args.len() != 1 {
         return Err(err!("Function '-' requires one argument"));
     }
     match args[0].eval(context)? {
-        ColumnValue::Amount(amount) => Ok(ColumnValue::Amount(-amount)),
+        ColumnValue::Amount(amount, p) => Ok(ColumnValue::Amount(-amount, p)),
         ColumnValue::List(mut values) => {
             for amt in &mut values {
-                *amt = ColumnValue::Amount(
-                    -amt.as_amount().ok_or_else(|| err!("Only `Amount` types may be negated"))?,
-                );
+                let (a, p) =
+                    amt.as_amount().ok_or_else(|| err!("Only `Amount` types may be negated"))?;
+                *amt = ColumnValue::Amount(-a, p);
             }
             Ok(ColumnValue::List(values))
         }

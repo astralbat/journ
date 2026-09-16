@@ -5,6 +5,7 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
+mod binary_tree;
 mod cell;
 mod cell_width;
 mod column;
@@ -22,7 +23,9 @@ pub use cell::spanned::SpannedCell;
 pub use cell::styled::StyledCell;
 pub use cell::wrapped::{PolicyWrappingCell, WrapEase, WrapPolicy};
 pub use cell::{Cell, CellRef, ShrinkableCell};
-pub use cell_width::{CellWidth, ColumnWidth, SpaceDistribution};
+pub use cell_width::{
+    CellWidth, ColumnWidth, SpaceDistribution, distribute, distributed_max, distributed_min,
+};
 pub use column::TableColumn;
-pub use row::Row;
+pub use row::{Row, RowKind, Rows};
 pub use table::Table;

@@ -9,7 +9,7 @@ use crate::report::table2::cell::blank::BLANK_CELL;
 use crate::report::table2::column::ColumnsVec;
 use crate::report::table2::fmt::CellFormatter;
 use crate::report::table2::table::ColumnPreferences;
-use crate::report::table2::{ColumnWidth, Row, TableColumn};
+use crate::report::table2::{ColumnWidth, Row, TableColumn, distribute};
 use std::fmt;
 
 pub trait RowFormatter<'format>: CellFormatter {
@@ -34,6 +34,8 @@ pub trait RowFormatter<'format>: CellFormatter {
         Ok(())
     }
 
+    fn cell_separator(&self) -> &str;
+
     fn prepare_columns(&mut self, _columns: &mut Vec<TableColumn>) {}
 
     fn print<'cell>(
@@ -44,7 +46,7 @@ pub trait RowFormatter<'format>: CellFormatter {
     where
         'cell: 'format,
     {
-        let mut columns = create_columns(rows, column_preferences);
+        let mut columns = create_columns(rows, column_preferences, self.cell_separator());
         self.prepare_columns(&mut columns);
 
         let mut iline = 0;
@@ -57,9 +59,15 @@ pub trait RowFormatter<'format>: CellFormatter {
                 let mut icol = 0;
                 while icol < row.len() {
                     let cell = row.cell(icol).unwrap();
+                    // Grow the width rather than append to it to retain its structure.
+                    // This should be less surprising to cells that span multiple columns.
+                    let mut width: ColumnWidth = columns[icol].width().clone();
+                    #[allow(clippy::needless_range_loop)]
+                    for i in icol + 1..icol + cell.hspan() {
+                        width = distribute(&width, columns[i].width().sum() as isize);
+                    }
+                    let width: ColumnWidth = (&mut columns[icol..icol + cell.hspan()]).width();
                     // Some cells will not print anything on this cell_line so ignore the result.
-                    let width: ColumnWidth =
-                        columns[icol..icol + cell.hspan()].iter().map(|col| col.width()).sum();
                     write!(
                         self,
                         "{:indent$}",
@@ -84,6 +92,7 @@ pub trait RowFormatter<'format>: CellFormatter {
 fn create_columns<'r>(
     rows: &'r [Row],
     column_preferences: &[ColumnPreferences],
+    cell_separator: &str,
 ) -> Vec<TableColumn<'r>> {
     let mut columns: Vec<TableColumn> = Vec::new();
     for (irow, row) in rows.iter().enumerate() {
@@ -98,7 +107,6 @@ fn create_columns<'r>(
 
             if col >= columns.len() {
                 columns.push(TableColumn::new(
-                    col,
                     column_preferences.get(col).cloned().unwrap_or_default(),
                 ));
             }
@@ -115,7 +123,6 @@ fn create_columns<'r>(
             for c in 1..cell.hspan() {
                 if col + c >= columns.len() {
                     columns.push(TableColumn::new(
-                        col,
                         column_preferences.get(col).cloned().unwrap_or_default(),
                     ));
                 }
@@ -124,6 +131,6 @@ fn create_columns<'r>(
             col += cell.hspan();
         }
     }
-    columns.as_mut_slice().finalise_spanned();
+    columns.as_mut_slice().finalise_spanned(cell_separator, false);
     columns
 }

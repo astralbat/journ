@@ -5,13 +5,13 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
-use crate::cgt_configuration::{AssignExpenses, CagConfiguration};
+use crate::cag_configuration::{AssignExpenses, CagConfiguration};
 use crate::module_init::MODULE_NAME;
 use journ_core::journal_entry::JournalEntry;
 use journ_core::metadata::{Metadata, MetadataKey};
 use journ_core::unit::Unit;
 use journ_core::valued_amount::ValuedAmount;
-use journ_core::valuer::ValueResult;
+use journ_core::valuer::{ValueError, ValueResult};
 use rust_decimal::Decimal;
 use smallvec::SmallVec;
 use std::borrow::Cow;
@@ -76,11 +76,11 @@ impl<'h> EntryExpenses<'h> {
             };
             match &*accum + pst.valued_amount() {
                 Some(val) if val.units().count() == 1 && val.value_in(value_unit).is_none() => {
-                    ValueResult::ValuationNeeded(value_unit, val.amount())?;
+                    Err(ValueError::ValuationNeeded(value_unit, val.amount()))?;
                 }
                 Some(val) => *accum = val,
                 None => {
-                    ValueResult::ValuationNeeded(value_unit, pst.amount())?;
+                    Err(ValueError::ValuationNeeded(value_unit, pst.amount()))?;
                 }
             }
         }
@@ -93,14 +93,14 @@ impl<'h> EntryExpenses<'h> {
         {
             Some(sum) if sum.is_nil() => {}
             Some(sum) if sum.units().count() == 1 && sum.value_in(value_unit).is_none() => {
-                ValueResult::ValuationNeeded(value_unit, sum.amount())?;
+                Err(ValueError::ValuationNeeded(value_unit, sum.amount()))?;
             }
             Some(_) => {}
             None => {
                 for expense in [&acquisition_expenses, &disposal_expenses, &shared_expenses].iter()
                 {
                     if expense.value_in(value_unit).is_none() {
-                        ValueResult::ValuationNeeded(value_unit, expense.amount())?;
+                        Err(ValueError::ValuationNeeded(value_unit, expense.amount()))?;
                     }
                 }
             }
@@ -119,7 +119,7 @@ impl<'h> EntryExpenses<'h> {
             assign_expenses,
             value_unit,
         };
-        ValueResult::Ok(expenses)
+        Ok(expenses)
     }
 
     /// Creates an `ExpensesDivision` that allows the expenses to be divided between a particular list
@@ -166,14 +166,14 @@ impl<'h> EntryExpenses<'h> {
             _ => {
                 for val in iter.clone() {
                     if val.value_in(self.value_unit).is_none() {
-                        ValueResult::ValuationNeeded(self.value_unit, val.amount())?;
+                        return Err(ValueError::ValuationNeeded(self.value_unit, val.amount()));
                     }
                 }
                 unreachable!()
             }
         };
 
-        ValueResult::Ok(ExpensesDivision {
+        Ok(ExpensesDivision {
             acquisition_expenses: self.acquisition_expenses,
             disposal_expenses: self.disposal_expenses,
             shared_expenses: self.shared_expenses,

@@ -8,6 +8,7 @@
 use crate::directive::{Directive, DirectiveKind};
 use crate::error::parsing::promote;
 use crate::journal_node::JournalNodeKind;
+use crate::parsing::amount::decimal_expr;
 use crate::parsing::directive::{StreamResult, stream};
 use crate::parsing::input::{BlockInput, ConfigInput, LocatedInput, NodeInput, TextInput};
 use crate::parsing::util::{
@@ -27,6 +28,7 @@ use std::sync::Arc;
 pub const E_INVALID_UNIT_RANKING: &str = "Unit ranking must be a positive integer";
 pub const E_INVALID_VALUE_EXPRESSION: &str = "Unit value expression must be a valid lambda";
 pub const E_UNKNOWN_UNIT_KEY: &str = "Unknown unit configuration parameter";
+pub const E_INVALID_PRICES_WITHIN_SECS: &str = "Unit priceWithinSecs must be a positive integer";
 
 pub fn unit_definition_body<'h, 's, 'p, I>(input: I) -> JParseResult<I, &'h Unit<'h>>
 where
@@ -60,7 +62,7 @@ where
     's: 'p,
 {
     let (rem, mut unit) = unit_definition_body(input.clone())?;
-    unit = input.config_mut().merge_unit(unit, input.parse_node().allocator());
+    unit = input.config_mut().merge_unit(unit);
     Ok((rem, Directive::new(Some(input.block()), DirectiveKind::Unit(unit))))
 }
 
@@ -96,6 +98,17 @@ where
                 let pd = Arc::new(PriceDatabase::new(node));
                 PythonLedgerModule::set_default_price_database(&pd);
                 def_unit.set_prices(Some(pd));
+                Ok(())
+            },
+            param_value("pricedbLookupWithinSecs") => |input: I| {
+                let d = promote(E_INVALID_PRICES_WITHIN_SECS, map_res(decimal_expr, |d| {
+                    if !d.is_integer() || !d.is_sign_positive() {
+                        Err(err!("Prices within seconds must evaluate to a positive integer: {}", d))
+                    } else {
+                        Ok(d)
+                    }
+                }))(input)?.1;
+                def_unit.set_pricedb_lookup_within_secs(usize::try_from(d).unwrap());
                 Ok(())
             },
             util::comment => |_| Ok(()),
@@ -172,6 +185,17 @@ where
                             unit.set_prices(Some(pd));
                         }
                     }
+                    Ok(())
+                },
+                param_value("pricedbLookupWithinSecs") => |input: I| {
+                    let d = promote(E_INVALID_PRICES_WITHIN_SECS, map_res(decimal_expr, |d| {
+                        if !d.is_integer() || !d.is_sign_positive() {
+                            Err(err!("Prices within seconds must evaluate to a positive integer: {}", d))
+                        } else {
+                            Ok(d)
+                        }
+                    }))(input)?.1;
+                    unit.set_pricedb_lookup_within_secs(usize::try_from(d).unwrap());
                     Ok(())
                 },
                 util::comment => |_| Ok(()),

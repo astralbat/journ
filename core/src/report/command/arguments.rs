@@ -11,15 +11,12 @@ use crate::datetime::{
     DEFAULT_DATE_FORMAT, DEFAULT_DATETIME_FORMAT, DateTimeFormat, DateTimePrecision,
 };
 use crate::report::command::cmd_line::BeginAndEndCommand;
-use crate::report::command::{ChainableCommand, ExecCommand};
 use chrono::{NaiveDateTime, TimeZone};
 use chrono_tz::Tz;
 use std::any::Any;
 use std::default::Default;
 use std::fmt::Debug;
-use std::ops::Deref;
-use std::ptr;
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 
 /// The command we're executing.
 pub trait Command: Debug + Send + Sync + Any {
@@ -29,80 +26,27 @@ pub trait Command: Debug + Send + Sync + Any {
 }
 
 static ARGS: OnceLock<Arguments> = OnceLock::new();
-static ROOT_CMD: OnceLock<Box<dyn ExecCommand>> = OnceLock::new();
-static CURR_CMD: OnceLock<Mutex<&'static dyn ExecCommand>> = OnceLock::new();
 pub struct Cmd;
 impl Cmd {
     pub fn args() -> &'static Arguments {
-        ARGS.get_or_init(|| Arguments::default())
+        ARGS.get_or_init(Default::default)
     }
 
     pub fn set_args(args: Arguments) -> &'static Arguments {
         ARGS.set(args).expect("arguments already initialized");
         Self::args()
     }
-
-    /// Gets the `Command` being run
-    ///
-    /// # Panics
-    /// If the command hasn't been set yet
-    pub fn get() -> &'static dyn ExecCommand {
-        *CURR_CMD.get().expect("CURR_CMD not initialized").lock().unwrap().deref()
-    }
-
-    /// Gets and converts the `Command` being run
-    ///
-    /// # Panics
-    /// If the command hasn't been set yet, or the type of the command is not correct.
-    pub fn cast<Cmd: ExecCommand>() -> &'static Cmd {
-        (Self::get() as &dyn Any).downcast_ref().expect("Command not of expected type")
-    }
-
-    /// Sets the command being run. This is done early, shortly after the command has been first
-    /// created.
-    pub fn set(command: Box<dyn ExecCommand>) -> &'static dyn ExecCommand {
-        ROOT_CMD.set(command).expect("command already initialized");
-        CURR_CMD.set(Mutex::new(ROOT_CMD.get().unwrap().deref())).unwrap();
-        Self::get()
-    }
-
-    pub fn advance_chain() -> Option<&'static dyn ChainableCommand> {
-        Self::get().as_chainable().and_then(|c| c.next_chain()).map(|chainable| {
-            *CURR_CMD.get().unwrap().lock().unwrap() = chainable;
-            chainable
-        })
-    }
-
-    /// Gets the position of the current command in the entire command chain
-    /// where `0` is the first command in the chain.
-    pub fn chain_position() -> usize {
-        let mut next_in_chain =
-            match ROOT_CMD.get().expect("CURR_CMD not initialized").deref().as_chainable() {
-                Some(chainable) => chainable,
-                None => return 0,
-            };
-        let cmd = Self::get();
-        let mut pos = 0;
-        while !ptr::addr_eq(cmd, next_in_chain) {
-            next_in_chain = next_in_chain.next_chain().unwrap();
-            pos += 1;
-        }
-        pos
-    }
 }
 
 #[derive(Debug, Default)]
 pub struct Arguments {
     pub datetime_cmd: DateTimeFormatCommand,
-    //pub begin: Option<DateTime<Tz>>,
-    //pub end: Option<DateTime<Tz>>,
     pub color: bool,
     pub no_color: bool,
     pub real_postings: bool,
-    //cmd: OnceLock<Box<dyn Command>>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct DateTimeFormatCommand {
     date_format: Option<&'static DateTimeFormat<'static>>,
     time_format: Option<&'static DateTimeFormat<'static>>,
@@ -185,6 +129,15 @@ impl DateTimeFormatCommand {
 
     pub fn timezone_or_default(&self) -> Tz {
         self.timezone.unwrap_or(Tz::UTC)
+    }
+
+    pub fn merge_from(&self, other: &Self) -> Self {
+        Self {
+            datetime_format: self.datetime_format.or(other.datetime_format),
+            time_format: self.time_format.or(other.time_format),
+            date_format: self.date_format.or(other.date_format),
+            timezone: self.timezone.or(other.timezone),
+        }
     }
 }
 

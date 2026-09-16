@@ -6,6 +6,7 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 pub mod amount;
+pub mod decimal;
 pub mod directive;
 pub mod entry;
 pub mod input;
@@ -15,12 +16,15 @@ pub mod text_block;
 mod unit_directive;
 pub mod util;
 
+use crate::alloc::HerdAllocator;
 use crate::configuration::Configuration;
 use crate::error::parsing::IParseError;
 use crate::error::{JournError, JournResult};
+use crate::journal_context::JContext;
 use crate::parsing::input::TextBlockInput;
 use crate::parsing::parser::JournalParseNode;
 use crate::parsing::text_block::TextBlock;
+use bumpalo_herd::Herd;
 use nom::{Err as NomErr, Finish, IResult};
 use nom_locate::LocatedSpan;
 use std::cell::RefCell;
@@ -123,30 +127,35 @@ pub fn parse<
     func(input).finish().map(|(rem, out)| (*rem.fragment(), out)).map_err(|e| e.into())
 }
 
-pub fn parse_with_config<'h, O, E: Into<JournError>, F>(
-    expr: &'h str,
+pub fn parse_with_config<'h, 's, O, E: Into<JournError>, F>(
+    expr: &'s str,
     mut func: F,
     config: &Configuration<'h>,
-) -> JournResult<(&'h str, O)>
+) -> JournResult<(&'s str, O)>
 where
     F: FnMut(
-        LocatedSpan<&'h str, RefCell<Configuration<'h>>>,
-    ) -> IResult<LocatedSpan<&'h str, RefCell<Configuration<'h>>>, O, E>,
+        LocatedSpan<&'s str, RefCell<Configuration<'h>>>,
+    ) -> IResult<LocatedSpan<&'s str, RefCell<Configuration<'h>>>, O, E>,
 {
     let config = config.clone();
     let input = LocatedSpan::new_extra(expr, RefCell::new(config));
-    func(input).finish().map(|(rem, out)| (*rem.fragment(), out)).map_err(|e| e.into())
+    let herd = Herd::new();
+    let allocator = herd.get().alloc(HerdAllocator::new(&herd));
+    let context = JContext::new(allocator);
+    context.with(|| {
+        func(input).finish().map(|(rem, out)| (*rem.fragment(), out)).map_err(|e| e.into())
+    })
 }
 
-pub fn parse_with_config_mut<'h, O, E: Into<JournError>, F>(
-    expr: &'h str,
+pub fn parse_with_config_mut<'h, 's, O, E: Into<JournError>, F>(
+    expr: &'s str,
     mut func: F,
     config: &mut Configuration<'h>,
-) -> JournResult<(&'h str, O)>
+) -> JournResult<(&'s str, O)>
 where
     F: FnMut(
-        LocatedSpan<&'h str, RefCell<Configuration<'h>>>,
-    ) -> IResult<LocatedSpan<&'h str, RefCell<Configuration<'h>>>, O, E>,
+        LocatedSpan<&'s str, RefCell<Configuration<'h>>>,
+    ) -> IResult<LocatedSpan<&'s str, RefCell<Configuration<'h>>>, O, E>,
 {
     let config_owned = config.clone();
     let input = LocatedSpan::new_extra(expr, RefCell::new(config_owned));
@@ -281,7 +290,7 @@ macro_rules! match_parser {
 }
 
 /// Repeatedly matches a parser and applies an associated handler.
-/// This will only produce an error when a parser returns a `Failure` or if an handler fails.
+/// This will only produce an error when a parser returns a `Failure` or if a handler fails.
 ///
 /// If no parsers match the expressions, then `Ok(I, I)` is returned with the remaining input.
 #[macro_export]
@@ -344,7 +353,7 @@ macro_rules! parse_node {
 mod testing {
     use crate::configuration::Configuration;
     use crate::error::{JournError, JournResult};
-    use crate::journal_context::JournalContext;
+    use crate::journal_context::JContext;
     use crate::journal_node::{JournalNode, JournalNodeKind};
     use crate::parsing::block_parse;
     use crate::parsing::input::TextBlockInput;
@@ -359,16 +368,11 @@ mod testing {
     /// A configuration is required unless testing.
     #[macro_export]
     macro_rules! parse {
-        ($str:expr, $func:expr, $config:expr) => {{
-            $crate::parsing::parse_with_config_mut($str, $func, $config)
-            //use $crate::parsing::OwnedOrMutConfigParseHelper;
-            //$config.handle_str($str, $func)
-        }};
+        ($str:expr, $func:expr, $config:expr) => {{ $crate::parsing::parse_with_config_mut($str, $func, $config) }};
         ($str:expr, $func:expr) => {{
             use $crate::config;
             let config = config!();
             $crate::parsing::parse_with_config($str, $func, &config)
-            //parse!($str, $func, config)
         }};
     }
 
@@ -396,7 +400,7 @@ mod testing {
     where
         'h: 's,
     {
-        let allocator = JournalContext::current().allocator();
+        let allocator = JContext::get().allocator();
         let tb = &*allocator.alloc(TextBlock::from(text));
         let node = allocator.alloc(JournalNode::new(
             None,

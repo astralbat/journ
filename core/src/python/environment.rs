@@ -6,7 +6,7 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::error::{BlockContext, BlockContextError, JournError, JournResult};
-use crate::journal_context::JournalContext;
+use crate::journal_context::JContext;
 use crate::parsing::text_block::TextBlock;
 use crate::python::conversion::{DateTimeWrapper, DeferredArg};
 use crate::{err, pyerr};
@@ -319,7 +319,7 @@ impl PythonEnvironment {
     }
 
     pub(super) fn set_active_journal(py: Python) -> u16 {
-        let jid = JournalContext::current().jid();
+        let jid = JContext::get().jid();
         py.run(CString::new(format!("__active_journal={}", jid)).unwrap().as_c_str(), None, None)
             .unwrap();
         jid
@@ -331,7 +331,7 @@ impl PythonEnvironment {
     ) -> Bound<'py, PyDict> {
         let mod_main = py.import("__main__").unwrap();
         let main_dict = mod_main.dict();
-        let jid = JournalContext::current().jid();
+        let jid = JContext::get().jid();
 
         let journal_dict = match main_dict
             .get_item(intern!(py, "__journals"))

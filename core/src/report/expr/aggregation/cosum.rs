@@ -16,13 +16,13 @@ use smallvec::SmallVec;
 
 #[derive(Debug, PartialEq)]
 pub struct CoSum<'h> {
-    args: Vec<Expr<'h>>,
+    args: Vec<Expr>,
     account_filter: Option<AccountFilter>,
     totals: SmallVec<[Amount<'h>; 2]>,
     completed_entries: Vec<TreeId>,
 }
 impl<'h> CoSum<'h> {
-    pub fn new(args: Vec<Expr<'h>>) -> JournResult<Self> {
+    pub fn new(args: Vec<Expr>) -> JournResult<Self> {
         Ok(Self {
             args,
             account_filter: None,
@@ -32,8 +32,11 @@ impl<'h> CoSum<'h> {
     }
 }
 
-impl<'h> AggState<'h> for CoSum<'h> {
-    fn add(&mut self, context: &mut dyn IdentifierContext<'h>) -> JournResult<()> {
+impl<'h, 'a> AggState<'h, 'a> for CoSum<'h>
+where
+    'h: 'a,
+{
+    fn add(&mut self, context: &mut dyn IdentifierContext<'h, 'a>) -> JournResult<()> {
         // Initialize the account filter on the first call to add()
         if self.account_filter.is_none() {
             let accounts = self.args.iter().map(|arg| arg.eval(context)?.into_string().ok_or(err!("cosum() requires arguments of type `String`, representing account patterns to match"))).collect::<Result<Vec<_>, _>>()?;
@@ -43,7 +46,7 @@ impl<'h> AggState<'h> for CoSum<'h> {
 
         match context.as_posting_context() {
             Some(context) => {
-                if self.completed_entries.contains(&context.entry().id()) {
+                if self.completed_entries.contains(context.entry().id()) {
                     return Ok(());
                 }
                 for pst in context.entry().postings() {
@@ -58,11 +61,11 @@ impl<'h> AggState<'h> for CoSum<'h> {
         }
     }
 
-    fn merge(&mut self, other: &dyn AggState<'h>) -> JournResult<()> {
+    fn merge(&mut self, other: &dyn AggState<'h, 'a>) -> JournResult<()> {
         let b = other.finalize();
 
         b.as_list().iter().try_fold(&mut self.totals, |acc, v| {
-            let amount =
+            let (amount, _precise) =
                 v.as_amount().ok_or_else(|| err!("CoSum() can only sum `Amount` types"))?;
             if !amount.is_nil() {
                 *acc += amount;
@@ -74,9 +77,11 @@ impl<'h> AggState<'h> for CoSum<'h> {
 
     fn finalize(&self) -> ColumnValue<'h> {
         match self.totals.len() {
-            0 => ColumnValue::Amount(Amount::nil()),
-            1 => ColumnValue::Amount(self.totals[0]),
-            _ => ColumnValue::List(self.totals.iter().map(|a| ColumnValue::Amount(*a)).collect()),
+            0 => ColumnValue::Amount(Amount::nil(), false),
+            1 => ColumnValue::Amount(self.totals[0], false),
+            _ => ColumnValue::List(
+                self.totals.iter().map(|a| ColumnValue::Amount(*a, false)).collect(),
+            ),
         }
     }
 }

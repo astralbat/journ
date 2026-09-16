@@ -5,9 +5,9 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
-use crate::cgt_configuration::UnitOfAccountChange;
-use crate::cgt_configuration::{AssignExpenses, MatchMethod};
-use crate::cgt_configuration::{CagConfiguration, PoolConfiguration};
+use crate::cag_configuration::UnitOfAccountChange;
+use crate::cag_configuration::{AssignExpenses, MatchMethod};
+use crate::cag_configuration::{CagConfiguration, PoolConfiguration};
 use crate::report::cag_command::CagCommand;
 use crate::ruleset;
 use chrono_tz::Tz;
@@ -21,8 +21,11 @@ use journ_core::parsing::input::{BlockInput, ConfigInput, LocatedInput, TextInpu
 use journ_core::parsing::util::rest_line1;
 use journ_core::parsing::util::{line_value, param_value};
 use journ_core::parsing::{amount, entry};
+use journ_core::report::expr::ScalarExpr;
+use journ_core::report::expr::parser::scalar_expr;
 use journ_core::unit::Unit;
 use nom::combinator::{map, rest};
+use nom::error::convert_error;
 use std::str::FromStr;
 use std::sync::LazyLock;
 
@@ -83,8 +86,7 @@ impl ModuleDirective for CgtDirective {
             },
             param_value("unitOfAccount") => |input: ModuleDirectiveInput<'h, 's, 'p>| {
                 let (input, unit_code) = promote(IErrorMsg::UNIT, amount::unit)(input)?;
-                let allocator = input.config().allocator();
-                let unit = input.config_mut().merge_unit(&Unit::new(unit_code), allocator);
+                let unit = input.config_mut().merge_unit(&Unit::new(unit_code));
                 let mut value_date = None;
                 match_blocks!(input,
                     param_value("revalueDate") => |input: ModuleDirectiveInput<'h, 's, 'p>| {
@@ -102,6 +104,11 @@ impl ModuleDirective for CgtDirective {
             },
             param_value("rules") => |input: ModuleDirectiveInput<'h, 's, 'p>| {
                 config.set_ruleset(promote("Invalid rules", ruleset::ruleset)(input)?.1);
+                Ok(())
+            },
+            param_value("include") => |input: ModuleDirectiveInput<'h, 's, 'p>| {
+                let expr: ScalarExpr = scalar_expr(input.text()).map_err(|e| e.map(|err| err!(convert_error(input.text(), err))))?.1;
+                config.set_include_flows(expr);
                 Ok(())
             },
             rest => |input: ModuleDirectiveInput<'h, 's, 'p>| {

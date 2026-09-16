@@ -14,13 +14,12 @@ use chrono::format::{DelayedFormat, Item, Parsed, parse_and_remainder};
 use nom::{Err as NomErr, InputLength};
 use std::cmp::Ordering;
 use std::hash::Hash;
+use std::iter;
 use std::ops::Deref;
 
 #[derive(Copy, Clone, Debug)]
 pub struct JTime {
     time: NaiveTime,
-    //pub(super) format: &'h TimeFormat<'h>,
-    //pub(super) print_utc_marker: bool,
 }
 
 impl JTime {
@@ -28,30 +27,47 @@ impl JTime {
         Self { time }
     }
 
-    /*
-    pub fn formatter(&self) -> &'h TimeFormat<'h> {
-        self.format
-    }*/
-
     /// Parses a time from a string. The time format is required to parse the time.
     /// This will only return a simple error message due to performance reasons.
+    ///
+    /// Returns the parsed time with a `bool` indicating if this time is UTC (i.e. if the string ended with 'Z').
     pub fn parse<'h, 'i, I: TextInput<'i>>(
         time_format: &'h DateTimeFormat<'h>,
-    ) -> impl Fn(I) -> IParseResult<'i, I, Self> {
+    ) -> impl Fn(I) -> IParseResult<'i, I, (Self, bool)> {
         move |input| {
             let mut parsed = Parsed::new();
-            let mut parsed_remainder =
-                parse_and_remainder(&mut parsed, input.text(), time_format.items())
-                    .map_err(|_| NomErr::Error(IParseError::new("Invalid time", input.clone())))?;
+
+            // Try and read the date/time separator and time items, allowing for shortening.
+            // E.g. " 10:15" as a shortcut for " 10:15:00"
+            // Any prefix is valid here. E.g. " 10:" but not " ".
+            let saved_remainder = input.text();
+            let mut parsed_remainder = saved_remainder;
+            for item in time_format.time_items() {
+                match parse_and_remainder(&mut parsed, parsed_remainder, iter::once(item)) {
+                    Ok(rem) => parsed_remainder = rem,
+                    Err(_) => break,
+                }
+            }
+            // We just read spaces, so rollback the remainder.
+            if saved_remainder[..saved_remainder.len() - parsed_remainder.len()]
+                .trim_start()
+                .is_empty()
+            {
+                return Err(NomErr::Error(IParseError::new("Invalid time", input)));
+            }
+
+            let mut explicit_utc = false;
             if parsed_remainder.starts_with('Z') {
                 parsed_remainder = &parsed_remainder[1..];
+                explicit_utc = true;
             }
+
             let rem = input.slice(input.input_len() - parsed_remainder.input_len()..);
             let time = parsed.to_naive_time().map_err(|_| {
                 NomErr::Error(IParseError::new("Cannot parse time from string", input))
             })?;
 
-            Ok((rem, Self::new(time)))
+            Ok((rem, (Self::new(time), explicit_utc)))
         }
     }
 
@@ -71,13 +87,6 @@ impl Deref for JTime {
         &self.time
     }
 }
-
-/*
-impl fmt::Display for JTime {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.format.format(self.time))
-    }
-}*/
 
 impl PartialEq for JTime {
     fn eq(&self, other: &Self) -> bool {

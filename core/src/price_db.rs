@@ -32,16 +32,14 @@ impl<'h> PriceDatabase<'h> {
     fn prices_init(&self) -> MutexGuard<'_, (Vec<Arc<Price<'h>>>, bool)> {
         let mut prices_lock = self.prices.lock().unwrap();
         let (prices, initialised) = &mut *prices_lock;
-        if !*initialised {
-            if let Some(node) = self.node {
-                for (_seg, dir) in node.all_directives_iter() {
-                    if let DirectiveKind::Price(p) = dir.kind() {
-                        prices.push(Arc::clone(p))
-                    }
+        if !*initialised && let Some(node) = self.node {
+            for (_seg, dir) in node.all_directives_iter() {
+                if let DirectiveKind::Price(p) = dir.kind() {
+                    prices.push(Arc::clone(p))
                 }
-                prices.sort_unstable();
-                *initialised = true;
             }
+            prices.sort_unstable();
+            *initialised = true;
         }
         prices_lock
     }
@@ -60,13 +58,14 @@ impl<'h> PriceDatabase<'h> {
     /// the specified `base_unit`, `quote_unit`.
     ///
     /// This will return `Some` if that closest price's time is `within_seconds` of the `target's`
-    /// according to either:
+    /// according to:
     ///
-    /// * `abs(closest - target) <= within_seconds`
-    /// * `abs(target - closest) < within_seconds`
+    /// * `abs(closest - target) < abs(within_seconds)`
     ///
-    /// Following these inequalities, rounding of targets can be used effectively. For example,
-    /// if the `within_seconds` equates to 30min, then a 11:30 target will match 12:00 but not 11.00.
+    /// # Example scenarios
+    /// * If the `within_seconds` equates to 30min, then an 11:30 target will _neither_ match 12:00 nor 11.00.
+    ///   This is useful when prices are available every 30 mins and we want to map one and only one possible
+    ///   closest to each target.
     pub fn get_closest(
         &self,
         target: JDateTime,
@@ -74,24 +73,41 @@ impl<'h> PriceDatabase<'h> {
         base_unit: &Unit<'h>,
         quote_unit: &Unit<'h>,
     ) -> Option<Arc<Price<'h>>> {
-        debug!(
-            "{} Looking in price_db within_seconds: {}, base_curr: {}, quote_curr: {}",
-            target, within_seconds, base_unit, quote_unit
-        );
-
         let closest_price = self.closest_by_key(target, |price| {
             price.base_unit() == base_unit && price.quote_unit() == quote_unit
         });
-        let target = target.datetime();
+        let target_dt = target.datetime();
 
         closest_price.and_then(|closest_price| {
             let closest = closest_price.datetime().datetime();
-            if !((closest - target).abs().num_seconds() <= within_seconds as i64
-                || (target - closest).abs().num_seconds() < within_seconds as i64)
-            {
-                None
-            } else {
+            if ((closest - target_dt).abs().num_seconds() as usize) < within_seconds {
+                if let Some(node) = self.node.as_ref()
+                    && let Some(filename) = node.nearest_filename()
+                {
+                    debug!(
+                        "{:?} {}/{} price found in {} within {}s",
+                        target,
+                        closest_price.base_unit(),
+                        closest_price.price(),
+                        filename.to_str().unwrap(),
+                        within_seconds,
+                    );
+                }
                 Some(closest_price)
+            } else {
+                if let Some(node) = self.node.as_ref()
+                    && let Some(filename) = node.nearest_filename()
+                {
+                    debug!(
+                        "{:?} {}/{} price not found in {} within {}s",
+                        target,
+                        base_unit,
+                        quote_unit,
+                        filename.to_str().unwrap(),
+                        within_seconds,
+                    );
+                }
+                None
             }
         })
     }

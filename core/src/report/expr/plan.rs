@@ -9,7 +9,8 @@ use crate::err;
 use crate::error::JournResult;
 use crate::report::expr::column_spec::ColumnSpec;
 use crate::report::expr::{
-    ColumnValue, Expr, GroupKey, GroupState, IdentifierContext, LateContext, TotalContext,
+    ColumnValue, Expr, GroupKey, GroupState, IdentifierContext, LateContext, ScalarExpr,
+    TotalContext,
 };
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashMap};
@@ -35,26 +36,30 @@ impl<'h, E> BalanceUpdater<'h, E> for NullBalanceUpdater<'h, E> {
     fn update(&self, _: &[RowData<'h>], _row: &mut RowData<'h>, _item: E) {}
 }
 
-pub struct Plan<'h> {
-    column_spec: ColumnSpec<'h>,
-    where_conditions: Vec<Expr<'h>>,
-    group_by: Vec<Expr<'h>>,
+pub struct Plan {
+    column_spec: ColumnSpec,
+    where_conditions: Vec<ScalarExpr>,
+    group_by: Vec<ScalarExpr>,
     show_total: bool,
     // Any extra fields that need be evaluated that aren't columns
-    additional: HashMap<&'static str, Expr<'h>>,
-    sort_exprs: Vec<Expr<'h>>,
+    additional: HashMap<&'static str, ScalarExpr>,
+    sort_exprs: Vec<ScalarExpr>,
     sort_ascending: bool,
+    total_spec: ColumnSpec,
+    grand_total_spec: ColumnSpec,
 }
 
-impl<'h> Plan<'h> {
+impl<'h> Plan {
     pub fn new(
-        column_spec: ColumnSpec<'h>,
-        where_conditions: Vec<Expr<'h>>,
+        column_spec: ColumnSpec,
+        where_conditions: Vec<ScalarExpr>,
         show_total: bool,
-        group_by: Vec<Expr<'h>>,
-        additional: HashMap<&'static str, Expr<'h>>,
-        sort_exprs: Vec<Expr<'h>>,
+        group_by: Vec<ScalarExpr>,
+        additional: HashMap<&'static str, ScalarExpr>,
+        sort_exprs: Vec<ScalarExpr>,
         sort_ascending: bool,
+        total_spec: ColumnSpec,
+        grand_total_spec: ColumnSpec,
     ) -> Self {
         Plan {
             column_spec,
@@ -64,15 +69,25 @@ impl<'h> Plan<'h> {
             additional,
             sort_exprs,
             sort_ascending,
+            total_spec,
+            grand_total_spec,
         }
     }
 
     /// The specification for the data rows.
-    pub fn column_spec(&self) -> &ColumnSpec<'h> {
+    pub fn column_spec(&self) -> &ColumnSpec {
         &self.column_spec
     }
 
-    pub fn group_by(&self) -> &[Expr<'h>] {
+    pub fn total_spec(&self) -> &ColumnSpec {
+        &self.total_spec
+    }
+
+    pub fn grand_total_spec(&self) -> &ColumnSpec {
+        &self.grand_total_spec
+    }
+
+    pub fn group_by(&self) -> &[ScalarExpr] {
         &self.group_by
     }
 
@@ -91,7 +106,14 @@ impl<'h> Plan<'h> {
     }
 
     fn validate_no_nested_aggregates(&self) -> JournResult<()> {
-        for expr in self.column_spec.exprs().iter().chain(self.additional.values()) {
+        for expr in self
+            .column_spec
+            .exprs()
+            .iter()
+            .chain(self.additional.values().map(|a| &**a))
+            .chain(self.total_spec.exprs())
+            .chain(self.grand_total_spec.exprs())
+        {
             if expr.iter().any(|e| {
                 matches!(e, Expr::AggFunction { .. })
                     && e.children().any(|inner| matches!(inner, Expr::AggFunction { .. }))
@@ -102,15 +124,16 @@ impl<'h> Plan<'h> {
         Ok(())
     }
 
-    pub fn execute<'e, 'j, E, F, B, C>(
+    pub fn execute<'e, 'a, E, F, B, C>(
         &self,
-        items: impl Iterator<Item = E>,
+        items: impl Iterator<Item = JournResult<E>>,
+        grand_total: Option<&mut GroupState<'h, 'a>>,
         context_fn: F,
         balance_updater: Option<B>,
-    ) -> JournResult<Vec<RowData<'h>>>
+    ) -> JournResult<(Vec<RowData<'h>>, Option<RowData<'h>>)>
     where
         B: BalanceUpdater<'h, E>,
-        C: IdentifierContext<'h> + 'e,
+        C: IdentifierContext<'h, 'a> + 'e,
         F: FnMut(E) -> C,
         E: Copy + 'e,
     {
@@ -118,27 +141,28 @@ impl<'h> Plan<'h> {
         // be mixed. Also, when aggregate functions have been specified but no group-by clause -
         // the whole dataset effectively becomes a single group.
         if !self.group_by.is_empty() || !self.column_spec.agg_functions().is_empty() {
-            self.execute_with_groups(items, context_fn)
+            self.execute_with_groups(items, grand_total, context_fn)
         } else {
-            self.execute_without_groups(items, context_fn, balance_updater)
+            Ok((self.execute_without_groups(items, context_fn, balance_updater)?, None))
         }
     }
 
-    pub fn execute_to_groups<'e, E, F, C>(
+    pub fn execute_to_groups<'e, 'a, E, F, C>(
         &self,
-        items: impl Iterator<Item = E>,
+        items: impl Iterator<Item = JournResult<E>>,
+        mut grand_total: Option<&mut GroupState<'h, 'a>>,
         mut context_fn: F,
-    ) -> JournResult<(BTreeMap<GroupKey<'h>, GroupState<'h>>, GroupState<'h>)>
+    ) -> JournResult<(BTreeMap<GroupKey<'h>, GroupState<'h, 'a>>, GroupState<'h, 'a>)>
     where
-        C: IdentifierContext<'h> + 'e,
+        C: IdentifierContext<'h, 'a> + 'e,
         F: FnMut(E) -> C,
         E: 'e,
     {
         // Aggregate events into groups
         let mut groups: BTreeMap<GroupKey, GroupState> = BTreeMap::new();
-        let mut total_group = GroupState::try_from(self.column_spec.agg_functions())?;
+        let mut total_group = GroupState::try_from(self.total_spec.clone())?;
         for item in items {
-            let mut context = context_fn(item);
+            let mut context = context_fn(item?);
 
             let key = GroupKey::new(
                 self.group_by()
@@ -152,27 +176,31 @@ impl<'h> Plan<'h> {
             );
             let group = match groups.entry(key) {
                 Entry::Occupied(e) => e.into_mut(),
-                Entry::Vacant(e) => {
-                    e.insert(GroupState::try_from(self.column_spec.agg_functions())?)
-                }
+                Entry::Vacant(e) => e.insert(GroupState::try_from(self.column_spec.clone())?),
             };
             group.add(&mut context)?;
+            grand_total.as_mut().map(|t| t.add(&mut context)).transpose()?;
             total_group.add(&mut context)?;
         }
         Ok((groups, total_group))
     }
 
-    fn execute_with_groups<'e, 'j, E, F, C>(
+    /// Execute the evaluation of items in a group context, returning a list of row values, including
+    /// a total row if `self.show_total` is true.
+    /// The `GroupState` for the grand total is also returned for further aggregation towards a grand total
+    /// if required.
+    fn execute_with_groups<'e, 'a, 'j, E, F, C>(
         &self,
-        items: impl Iterator<Item = E>,
+        items: impl Iterator<Item = JournResult<E>>,
+        grand_total: Option<&mut GroupState<'h, 'a>>,
         context_fn: F,
-    ) -> JournResult<Vec<RowData<'h>>>
+    ) -> JournResult<(Vec<RowData<'h>>, Option<RowData<'h>>)>
     where
-        C: IdentifierContext<'h> + 'e,
+        C: IdentifierContext<'h, 'a> + 'e,
         F: FnMut(E) -> C,
         E: Copy + 'e,
     {
-        let (groups, total_group) = self.execute_to_groups(items, context_fn)?;
+        let (groups, total_group) = self.execute_to_groups(items, grand_total, context_fn)?;
 
         let mut rows = Vec::new();
         'next_row: for (key, group) in groups {
@@ -181,12 +209,11 @@ impl<'h> Plan<'h> {
 
             self.eval_sort_exprs(&mut context, &mut row_data)?;
 
-            for (additional_key, col) in self
-                .column_spec()
+            for (additional_key, col) in group
                 .exprs()
                 .iter()
                 .map(|e| (None, e))
-                .chain(self.additional.iter().map(|(k, v)| (Some(*k), v)))
+                .chain(self.additional.iter().map(|(k, v)| (Some(*k), &**v)))
             {
                 // Get the value from the group key if possible, otherwise evaluate the expression
                 let value = key
@@ -212,7 +239,7 @@ impl<'h> Plan<'h> {
                         }
                     }
                     val => {
-                        return Err(err!("Unable to evaluate where condition: '{}'", cond)
+                        return Err(err!("Unable to evaluate where condition: '{}'", **cond)
                             .with_source(err!("Value is not a boolean: '{}'", val)));
                     }
                 }
@@ -221,34 +248,37 @@ impl<'h> Plan<'h> {
             rows.insert(self.row_insert_pos(&rows, &row_data), row_data);
         }
         // Evaluate total row
+        let mut total_row = None;
         if self.show_total {
             let mut total_context = TotalContext::new(total_group.finalize());
             let mut row_data = RowData::default();
-            for col in self.column_spec.exprs() {
+            for col in total_group.exprs() {
                 row_data.push_column_value(
                     col.eval(&mut total_context).unwrap_or_else(|_| ColumnValue::StringRef("")),
                 );
             }
-            rows.push(row_data);
+            total_row = Some(row_data);
         }
-        Ok(rows)
+        Ok((rows, total_row))
     }
 
-    fn execute_without_groups<'e, E, F, B, C>(
+    fn execute_without_groups<'e, 'a, E, F, B, C>(
         &self,
-        items: impl Iterator<Item = E>,
+        items: impl Iterator<Item = JournResult<E>>,
         mut context_fn: F,
         balance_updater: Option<B>,
     ) -> JournResult<Vec<RowData<'h>>>
     where
-        C: IdentifierContext<'h> + 'e,
+        C: IdentifierContext<'h, 'a> + 'e,
         F: FnMut(E) -> C,
         B: BalanceUpdater<'h, E>,
         E: Copy + 'e,
+        'h: 'a,
     {
         // First Pass - sort the data
         let mut sorted_items = Vec::new();
         'next_item: for item in items {
+            let item = item?;
             let mut context = context_fn(item);
             let mut row_data = RowData::default();
 
@@ -262,7 +292,7 @@ impl<'h> Plan<'h> {
                         }
                     }
                     val => {
-                        return Err(err!("Unable to evaluate where condition: '{}'", cond)
+                        return Err(err!("Unable to evaluate where condition: '{}'", **cond)
                             .with_source(err!("Value is not a boolean: '{}'", val)));
                     }
                 }
@@ -293,7 +323,7 @@ impl<'h> Plan<'h> {
                 .exprs()
                 .iter()
                 .map(|e| (None, e))
-                .chain(self.additional.iter().map(|(k, v)| (Some(*k), v)))
+                .chain(self.additional.iter().map(|(k, v)| (Some(*k), &**v)))
             {
                 let value = col
                     .eval(&mut context)
@@ -309,17 +339,22 @@ impl<'h> Plan<'h> {
         Ok(rows)
     }
 
-    fn eval_sort_exprs<C: IdentifierContext<'h>>(
+    /// Evaluates the sort expressions to values that can be sorted.
+    /// The sort values are not expected to rely on balances, nor column aliases (which can in turn evaluate balances).
+    fn eval_sort_exprs<'a, C: IdentifierContext<'h, 'a>>(
         &self,
         context: &mut C,
         row_data: &mut RowData<'h>,
-    ) -> JournResult<()> {
+    ) -> JournResult<()>
+    where
+        'h: 'a,
+    {
         for sort_res in self.sort_exprs.iter().map(|k| {
             k.eval(context)
                 .map_err(|e| err!(e; "Unable to evaluate sort key from context"))
                 .and_then(|v| {
                     if v.is_undefined() {
-                        Err(err!("Sort key cannot evaluate as undefined: {}", k))
+                        Err(err!("Sort key cannot evaluate as undefined: {}", **k))
                     } else {
                         Ok(v)
                     }
@@ -335,15 +370,16 @@ impl<'h> Plan<'h> {
         if self.sort_exprs.is_empty() {
             return rows.len();
         }
-        match rows.binary_search_by(|r: &(E, RowData<'h>)| {
-            let cmp = r.1.sort_values.partial_cmp(&row.sort_values).expect(&format!(
-                "{:?} and {:?} to be comparable",
-                &r.1.sort_values, &row.sort_values
-            ));
-            if !self.sort_ascending { cmp.reverse() } else { cmp }
-        }) {
-            Ok(i) | Err(i) => i,
-        }
+
+        // Find the partition point, biasing towards the last possible position for equal values
+        // so that equal rows are inserted in the order they were evaluated.
+        rows.partition_point(|r| {
+            let cmp = r.1.sort_values.partial_cmp(&row.sort_values).unwrap_or_else(|| {
+                panic!("{:?} and {:?} to be comparable", &r.1.sort_values, &row.sort_values)
+            });
+            let cmp = if !self.sort_ascending { cmp.reverse() } else { cmp };
+            cmp.is_le()
+        })
     }
 
     fn row_insert_pos(&self, rows: &[RowData<'h>], row: &RowData<'h>) -> usize {
@@ -351,15 +387,16 @@ impl<'h> Plan<'h> {
         if self.sort_exprs.is_empty() {
             return rows.len();
         }
-        match rows.binary_search_by(|r: &RowData<'h>| {
-            let cmp = r.sort_values.partial_cmp(&row.sort_values).expect(&format!(
-                "{:?} and {:?} to be comparable",
-                &r.sort_values, &row.sort_values
-            ));
-            if !self.sort_ascending { cmp.reverse() } else { cmp }
-        }) {
-            Ok(i) | Err(i) => i,
-        }
+
+        // Find the partition point, biasing towards the last possible position for equal values
+        // so that equal rows are inserted in the order they were evaluated.
+        rows.partition_point(|r| {
+            let cmp = r.sort_values.partial_cmp(&row.sort_values).unwrap_or_else(|| {
+                panic!("{:?} and {:?} to be comparable", &r.sort_values, &row.sort_values)
+            });
+            let cmp = if !self.sort_ascending { cmp.reverse() } else { cmp };
+            cmp.is_le()
+        })
     }
 }
 

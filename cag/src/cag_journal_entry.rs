@@ -6,9 +6,8 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::adjustment::{Adjustment, AmountAdjustment};
-use crate::deal::Deal;
-use journ_core::error::JournError;
 use journ_core::error::parsing::{IErrorMsg, IParseError, tag_err};
+use journ_core::error::{JournError, JournResult};
 use journ_core::journal_entry::JournalEntry;
 use journ_core::metadata::Metadata;
 use journ_core::parsing::entry::valued_amount;
@@ -27,55 +26,66 @@ use smallvec::{SmallVec, smallvec};
 use std::fmt::Debug;
 
 pub trait CapitalGainsMetadataAccess<'h> {
-    fn cg_metadata(&self, uoa: &'h Unit<'h>) -> Result<CapitalGainsEntryMetadata<'h>, JournError>;
+    fn cg_metadata(&self, uoa: &'h Unit<'h>) -> JournResult<CapitalGainsEntryMetadata<'h>>;
 }
 
 impl<'h> CapitalGainsMetadataAccess<'h> for &'h JournalEntry<'h> {
-    fn cg_metadata(&self, uoa: &'h Unit<'h>) -> Result<CapitalGainsEntryMetadata<'h>, JournError> {
+    fn cg_metadata(&self, uoa: &'h Unit<'h>) -> JournResult<CapitalGainsEntryMetadata<'h>> {
         let mut deal_metadata = vec![];
         let mut adjustment_metadata = vec![];
+        let mut position = 0;
 
-        for (position, metadata) in self.metadata().enumerate() {
+        for metadata in self.metadata() {
             if metadata.key() == "CAG-Deal" || metadata.key() == "CAG-Deal!" {
-                deal_metadata.push(CapitalGainsEntryMetadata::parse_deal(
-                    metadata,
-                    self,
-                    position as u32,
-                    uoa,
-                )?)
+                let (valued_amount, expenses, taxable_gain) =
+                    CapitalGainsEntryMetadata::parse_deal(metadata)?;
+                deal_metadata.push((valued_amount, expenses, taxable_gain, position));
             } else if metadata.key() == "CAG-Adjust" {
-                adjustment_metadata.push(CapitalGainsEntryMetadata::parse_adjustment(
-                    metadata,
-                    self,
-                    position as u32,
-                )?)
+                adjustment_metadata
+                    .push(CapitalGainsEntryMetadata::parse_adjustment(metadata, self, position)?)
             } else if metadata.key() == "CAG-AdjustPool" {
                 adjustment_metadata.push(CapitalGainsEntryMetadata::parse_pool_adjustment(
-                    metadata,
-                    self,
-                    position as u32,
+                    metadata, self, position,
                 )?)
             }
+            position += 1;
         }
 
-        Ok(CapitalGainsEntryMetadata { entry: self, deal_metadata, adjustment_metadata })
+        Ok(CapitalGainsEntryMetadata {
+            entry: self,
+            uoa,
+            deal_metadata,
+            adjustment_metadata,
+            md_count: position + 1,
+        })
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct CapitalGainsEntryMetadata<'h> {
     entry: &'h JournalEntry<'h>,
-    deal_metadata: Vec<Deal<'h>>,
+    uoa: &'h Unit<'h>,
+    deal_metadata: Vec<(ValuedAmount<'h>, ValuedAmount<'h>, Option<ValuedAmount<'h>>, usize)>,
     adjustment_metadata: Vec<Adjustment<'h>>,
+    md_count: usize,
 }
 
 impl<'h> CapitalGainsEntryMetadata<'h> {
+    /*
     pub fn deals(&self, unit: &'h Unit<'h>) -> SmallVec<[Deal<'h>; 2]> {
         self.deal_metadata.iter().filter(|a| a.unit() == unit).cloned().collect()
+    }*/
+
+    pub fn into_deal_metadata(
+        self,
+    ) -> Vec<(ValuedAmount<'h>, ValuedAmount<'h>, Option<ValuedAmount<'h>>, usize)> {
+        self.deal_metadata
     }
 
-    pub fn all_deals(&self) -> impl Iterator<Item = &Deal<'h>> {
-        self.deal_metadata.iter()
+    pub fn deal_metadata(
+        &self,
+    ) -> &Vec<(ValuedAmount<'h>, ValuedAmount<'h>, Option<ValuedAmount<'h>>, usize)> {
+        &self.deal_metadata
     }
 
     pub fn adjustments(&self) -> impl Iterator<Item = &Adjustment<'h>> {
@@ -86,36 +96,34 @@ impl<'h> CapitalGainsEntryMetadata<'h> {
         self.entry
     }
 
-    pub fn add_deal(&mut self, deal: Deal<'h>) {
-        self.deal_metadata.push(deal);
+    pub fn md_count(&self) -> usize {
+        self.md_count
     }
 
     /// Parses all `CAG-Deal` metadata values from the entry.
     /// # Example:
     /// ## Valid:
     /// * `+CAG-Deal  $400 @@ £300 ++ £10  ; An acquisition of $400 costing a total of £310 including £10 in expenses`
-    /// * `+CAG-Deal  $400 @@ £310 -- £10  ; Same as above`
+    /// * `+CAG-Deal  $400 @@ £310 -- £10  ; Not allowed currently, but represents a total cost of £310 including £10 in expenses (same as above)`
     /// * `+CAG-Deal  -$400 @@ £310 -- £10 ; A disposal of $400 for a gross total of £310, £300 net after expenses`
-    /// * `+CAG-Deal  -$400 @@ £300 ++ £10 ; Same as above`
+    /// * `+CAG-Deal  -$400 @@ £300 ++ £10 ; Not allowed currently, but represents net proceeds of £300 after expenses of £10 (same as above)`
     /// * `+CAG-Deal  $400 @@ £300 @@ €400 ++ £10 @@ €14`
     fn parse_deal(
         metadata: &Metadata<'h>,
-        entry: &'h JournalEntry<'h>,
-        position: u32,
-        uoa: &'h Unit<'h>,
-    ) -> Result<Deal<'h>, JournError> {
+    ) -> Result<(ValuedAmount<'h>, ValuedAmount<'h>, Option<ValuedAmount<'h>>), JournError> {
         let err = "Unable to parse CAG-Deal. Deals should be in the format:\n\
                 CAG-Deal  <deal_amount> [++ deal_expenses] [== taxable_gain] -OR- CAG-Deal  -<deal_amount> [-- deal_expenses] [== taxable_gain]";
-        let res = metadata.parse_value(Self::deal_parser(entry, metadata, position, uoa), err)?;
+        let res = metadata.parse_value(Self::deal_parser(), err)?;
         Ok(res)
     }
 
-    fn deal_parser<I>(
-        entry: &'h JournalEntry<'h>,
-        metadata: &Metadata<'h>,
-        position: u32,
-        uoa: &'h Unit<'h>,
-    ) -> impl FnMut(I) -> IParseResult<'h, I, Deal<'h>>
+    fn deal_parser<I>() -> impl FnMut(
+        I,
+    ) -> IParseResult<
+        'h,
+        I,
+        (ValuedAmount<'h>, ValuedAmount<'h>, Option<ValuedAmount<'h>>),
+    >
     where
         I: TextInput<'h> + ConfigInput<'h> + BlockInput<'h>,
     {
@@ -139,8 +147,6 @@ impl<'h> CapitalGainsEntryMetadata<'h> {
                     )));
                 }
 
-                // The expenses are negative when using --.
-                //expenses.negate();
                 (rem, expenses)
             } else if let Ok((rem, _)) =
                 preceded::<_, _, _, (), _, _>(space0, tag("++"))(input.clone())
@@ -172,28 +178,7 @@ impl<'h> CapitalGainsEntryMetadata<'h> {
                     Err(_) => (input, None),
                 };
 
-            let mut all_md = smallvec![metadata.clone()];
-            // Add entry metadata
-            all_md.append(
-                &mut entry
-                    .metadata_by_key("CAG-Note")
-                    .into_iter()
-                    .cloned()
-                    .collect::<SmallVec<[_; 2]>>(),
-            );
-            // Append nested metadata under this CAG-Deal
-            all_md.append(&mut metadata.value_as_metadata_lines());
-
-            let mut deal =
-                Deal::new(Some(position), entry, all_md, valued_amount, taxable_gain, true, uoa)
-                    .map_err(|_| {
-                        NomErr::Error(IParseError::new(
-                            "Unable to detect unit of account for deal",
-                            rem.clone(),
-                        ))
-                    })?;
-            deal.add_expenses(expenses);
-            Ok((rem, deal))
+            Ok((rem, (valued_amount, expenses, taxable_gain)))
         }
     }
 
@@ -247,7 +232,7 @@ impl<'h> CapitalGainsEntryMetadata<'h> {
     pub fn parse_adjustment(
         metadata: &Metadata<'h>,
         entry: &'h JournalEntry<'h>,
-        position: u32,
+        position: usize,
     ) -> Result<Adjustment<'h>, JournError> {
         let err = "Adjustments should be in the format:\nCAG-Adjust: *<amount_adjustment>, [consideration_adjustment]";
         let amount_adjustments = metadata.parse_value(Self::adj_parser(), err)?;
@@ -323,7 +308,7 @@ impl<'h> CapitalGainsEntryMetadata<'h> {
     pub fn parse_pool_adjustment(
         metadata: &'h Metadata<'h>,
         entry: &'h JournalEntry<'h>,
-        position: u32,
+        position: usize,
     ) -> Result<Adjustment<'h>, JournError> {
         let err = "Adjustments should be in the format:\nCAG-AdjustPool: <pool_name>, <amount_adjustment>, [consideration_adjustment]";
         let parsed = metadata.parse_value(Self::pool_adj_parser(entry, metadata, position), err)?;
@@ -333,7 +318,7 @@ impl<'h> CapitalGainsEntryMetadata<'h> {
     fn pool_adj_parser<'p, 'c, I>(
         entry: &'h JournalEntry<'h>,
         metadata: &'h Metadata<'h>,
-        position: u32,
+        position: usize,
     ) -> impl FnMut(I) -> IParseResult<'h, I, Adjustment<'h>> + 'p
     where
         I: TextInput<'h> + ConfigInput<'h>,

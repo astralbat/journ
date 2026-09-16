@@ -5,18 +5,19 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
+use crate::report::expr::GroupState;
 use crate::report::table2::Table;
 use yaml_rust2::Yaml;
 
-pub enum ChainingResult<'cell> {
-    Table(Table<'cell>),
+pub enum ChainingResult<'h, 'a, 'cell> {
+    Table { table: Table<'cell>, grand_total: Option<GroupState<'h, 'a>> },
     Yaml(Yaml),
 }
 
-impl<'cell> ChainingResult<'cell> {
-    pub fn into_table(self) -> Option<Table<'cell>> {
+impl<'h, 'a, 'cell> ChainingResult<'h, 'a, 'cell> {
+    pub fn into_table(self) -> Option<(Table<'cell>, Option<GroupState<'h, 'a>>)> {
         match self {
-            Self::Table(table) => Some(table),
+            Self::Table { table, grand_total } => Some((table, grand_total)),
             Self::Yaml(_) => None,
         }
     }
@@ -24,7 +25,7 @@ impl<'cell> ChainingResult<'cell> {
     pub fn into_yaml(self) -> Option<Yaml> {
         match self {
             Self::Yaml(yaml) => Some(yaml),
-            Self::Table(_) => None,
+            Self::Table { table: _, grand_total: _ } => None,
         }
     }
 }

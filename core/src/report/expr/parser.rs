@@ -7,16 +7,16 @@
  */
 use crate::err;
 use crate::error::JournResult;
-use crate::report::expr::Expr;
 use crate::report::expr::aggregation::{
     AggState, CoSum, First, Last, Max, Min, Sum, SumIf, Unique,
 };
 use crate::report::expr::column_spec::ColumnSpec;
 use crate::report::expr::plan::Plan;
-use nom::Err as NomErr;
-use nom::bytes::complete::{tag_no_case, take_while};
-use nom::combinator::{cut, map_res};
+use crate::report::expr::{Expr, ScalarExpr};
+use nom::bytes::complete::{escaped_transform, tag_no_case};
+use nom::combinator::{cut, map_res, value};
 use nom::error::{VerboseError, context, convert_error};
+use nom::{Err as NomErr, Parser};
 use nom::{
     IResult,
     branch::alt,
@@ -27,23 +27,24 @@ use nom::{
     sequence::{delimited, pair, preceded, tuple},
 };
 use rust_decimal::Decimal;
+use smartstring::alias::String as SS;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum AggKind<'h> {
-    Sum(Vec<Expr<'h>>),
-    SumIf(Vec<Expr<'h>>),
-    CoSum(Vec<Expr<'h>>),
-    Min(Vec<Expr<'h>>),
-    Max(Vec<Expr<'h>>),
-    First(Vec<Expr<'h>>),
-    Last(Vec<Expr<'h>>),
-    Unique(Vec<Expr<'h>>),
+pub enum AggKind {
+    Sum(Vec<Expr>),
+    SumIf(Vec<Expr>),
+    CoSum(Vec<Expr>),
+    Min(Vec<Expr>),
+    Max(Vec<Expr>),
+    First(Vec<Expr>),
+    Last(Vec<Expr>),
+    Unique(Vec<Expr>),
 }
-impl<'h> AggKind<'h> {
-    fn from_str_and_args(s: &str, args: Vec<Expr<'h>>) -> Option<Self> {
+impl<'h, 'a> AggKind {
+    fn from_str_and_args(s: SS, args: Vec<Expr>) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "sum" => Some(AggKind::Sum(args)),
             "sumif" => Some(AggKind::SumIf(args)),
@@ -57,36 +58,39 @@ impl<'h> AggKind<'h> {
         }
     }
 
-    pub fn make(&self) -> JournResult<Box<dyn AggState<'h> + 'h>> {
+    pub fn make(&self) -> JournResult<Box<dyn AggState<'h, 'a> + 'h>>
+    where
+        'h: 'a,
+    {
         match self {
             AggKind::Sum(args) => {
-                Sum::new(args.clone()).map(|s| Box::new(s) as Box<dyn AggState<'h>>)
+                Sum::new(args.clone()).map(|s| Box::new(s) as Box<dyn AggState<'h, 'a>>)
             }
             AggKind::SumIf(args) => {
-                SumIf::new(args.clone()).map(|s| Box::new(s) as Box<dyn AggState<'h>>)
+                SumIf::new(args.clone()).map(|s| Box::new(s) as Box<dyn AggState<'h, 'a>>)
             }
             AggKind::CoSum(args) => {
-                CoSum::new(args.clone()).map(|s| Box::new(s) as Box<dyn AggState<'h>>)
+                CoSum::new(args.clone()).map(|s| Box::new(s) as Box<dyn AggState<'h, 'a>>)
             }
             AggKind::Min(args) => {
-                Min::new(args.clone()).map(|s| Box::new(s) as Box<dyn AggState<'h>>)
+                Min::new(args.clone()).map(|s| Box::new(s) as Box<dyn AggState<'h, 'a>>)
             }
             AggKind::Max(args) => {
-                Max::new(args.clone()).map(|s| Box::new(s) as Box<dyn AggState<'h>>)
+                Max::new(args.clone()).map(|s| Box::new(s) as Box<dyn AggState<'h, 'a>>)
             }
             AggKind::First(args) => {
-                First::new(args.clone()).map(|s| Box::new(s) as Box<dyn AggState<'h>>)
+                First::new(args.clone()).map(|s| Box::new(s) as Box<dyn AggState<'h, 'a>>)
             }
             AggKind::Last(args) => {
-                Last::new(args.clone()).map(|s| Box::new(s) as Box<dyn AggState<'h>>)
+                Last::new(args.clone()).map(|s| Box::new(s) as Box<dyn AggState<'h, 'a>>)
             }
             AggKind::Unique(args) => {
-                Unique::new(args.clone()).map(|s| Box::new(s) as Box<dyn AggState<'h>>)
+                Unique::new(args.clone()).map(|s| Box::new(s) as Box<dyn AggState<'h, 'a>>)
             }
         }
     }
 }
-impl fmt::Display for AggKind<'_> {
+impl fmt::Display for AggKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let join_args =
             |args: &Vec<Expr>| args.iter().map(ToString::to_string).collect::<Vec<_>>().join(",");
@@ -120,6 +124,22 @@ impl fmt::Display for BinOp {
             BinOp::Mul => "*",
             BinOp::Div => "/",
             BinOp::Mod => "%",
+        };
+        write!(f, "{}", symbol)
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum UnaryOp {
+    Not,
+    Exists,
+}
+
+impl fmt::Display for UnaryOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let symbol = match self {
+            UnaryOp::Not => "NOT",
+            UnaryOp::Exists => "EXISTS",
         };
         write!(f, "{}", symbol)
     }
@@ -178,26 +198,53 @@ where
 }
 
 // Parse a string literal (e.g., "some text" or 'some text')
-fn string_literal(input: &str) -> IResult<&str, &str, VerboseError<&str>> {
-    context(
+fn string_literal(input: &str) -> IResult<&str, SS, VerboseError<&str>> {
+    let take_literal = |terminator: char, terminator_str: &'static str| {
+        map(
+            alt((
+                escaped_transform(
+                    take_while1(move |c| c != '\\' && c != terminator),
+                    '\\',
+                    alt((
+                        value("\\", char('\\')),
+                        value("\n", tag("n")),
+                        value(terminator_str, char(terminator)),
+                    )),
+                ),
+                // Match empty string
+                value(String::new(), tag("")),
+            )),
+            SS::from,
+        )
+    };
+
+    let (rem, s) = context(
         "string literal (use quotes, e.g. \"Assets..\")",
         alt((
-            delimited(char('"'), take_while(|c: char| c != '"'), char('"')),
-            delimited(char('\''), take_while(|c: char| c != '\''), char('\'')),
+            delimited(char('"'), take_literal('"', "\""), char('"')),
+            delimited(char('\''), take_literal('\'', "'"), char('\'')),
         )),
-    )(input)
+    )(input)?;
+    Ok((rem, SS::from(s)))
 }
 
 // Parse identifiers (column names, function names)
-fn identifier(input: &str) -> IResult<&str, &str, VerboseError<&str>> {
+fn identifier(input: &str) -> IResult<&str, SS, VerboseError<&str>> {
     context(
         "identifier",
         map(
-            take_while1(|c: char| {
-                // Metadata can have '-' in keys. E.g. "+CAG-Note"
-                c.is_alphanumeric() || c == '_' || c == ':' || c == '.' || c == '+' || c == '-'
-            }),
-            |s: &str| s,
+            escaped_transform(
+                take_while1(|c: char| c != '\\' && c != '(' && c != ')' && c != ',' && c != ' '),
+                '\\',
+                alt((
+                    value("\\", char('\\')),
+                    value("(", char('(')),
+                    value(")", char(')')),
+                    value(",", char(',')),
+                    value(" ", char(' ')),
+                )),
+            ),
+            SS::from,
         ),
     )(input)
 }
@@ -214,10 +261,25 @@ fn number(input: &str) -> IResult<&str, Decimal, VerboseError<&str>> {
     )(input)
 }
 
+fn unary_op<'h>(
+    agg_functions: &RefCell<Vec<AggKind>>,
+) -> impl FnMut(&'h str) -> IResult<&str, Expr, VerboseError<&str>> {
+    move |input| match ws(alt((
+        value(UnaryOp::Not, tag_no_case("NOT")),
+        value(UnaryOp::Exists, tag_no_case("EXISTS")),
+    )))(input)
+    {
+        Ok((rem, op)) => {
+            map(ws(primary(agg_functions)), |expr| Expr::Unary { op, expr: Box::new(expr) })(rem)
+        }
+        Err(e) => Err(e),
+    }
+}
+
 // Parse function arguments (comma-separated expressions)
 fn function_args<'h>(
-    agg_functions: &RefCell<Vec<AggKind<'h>>>,
-) -> impl FnMut(&'h str) -> IResult<&'h str, Vec<Expr<'h>>, VerboseError<&'h str>> {
+    agg_functions: &RefCell<Vec<AggKind>>,
+) -> impl FnMut(&'h str) -> IResult<&'h str, Vec<Expr>, VerboseError<&'h str>> {
     move |input| {
         context(
             "function arguments",
@@ -229,12 +291,12 @@ fn function_args<'h>(
     }
 }
 
-fn aggregation_function<'h>(
-    agg_functions: &RefCell<Vec<AggKind<'h>>>,
-) -> impl FnMut(&'h str) -> IResult<&'h str, Expr<'h>, VerboseError<&'h str>> {
+fn aggregation_function(
+    agg_functions: &RefCell<Vec<AggKind>>,
+) -> impl FnMut(&str) -> IResult<&str, Expr, VerboseError<&str>> {
     move |input| {
         map_res(function(agg_functions), |(name, args)| {
-            let kind = AggKind::from_str_and_args(name, args.clone()).ok_or_else(|| {
+            let kind = AggKind::from_str_and_args(name.clone(), args.clone()).ok_or_else(|| {
                 NomErr::Error(VerboseError {
                     errors: vec![(
                         input,
@@ -254,12 +316,12 @@ fn aggregation_function<'h>(
 
 // Parse function calls: name(arg1, arg2, ...)
 fn function<'h>(
-    agg_functions: &RefCell<Vec<AggKind<'h>>>,
-) -> impl FnMut(&'h str) -> IResult<&'h str, (&'h str, Vec<Expr<'h>>), VerboseError<&'h str>> {
+    agg_functions: &RefCell<Vec<AggKind>>,
+) -> impl FnMut(&'h str) -> IResult<&'h str, (SS, Vec<Expr>), VerboseError<&'h str>> {
     move |input| {
         map(
             tuple((
-                alt((identifier, tag("-"))),
+                identifier,
                 preceded(
                     ws(char('(')),
                     cut(tuple((
@@ -277,9 +339,9 @@ fn function<'h>(
 }
 
 // Parse primary expressions (atoms)
-fn primary<'h>(
-    agg_functions: &RefCell<Vec<AggKind<'h>>>,
-) -> impl FnMut(&'h str) -> IResult<&'h str, Expr<'h>, VerboseError<&'h str>> {
+fn primary(
+    agg_functions: &RefCell<Vec<AggKind>>,
+) -> impl FnMut(&str) -> IResult<&str, Expr, VerboseError<&str>> {
     move |input| {
         context(
             "primary expression",
@@ -288,10 +350,11 @@ fn primary<'h>(
                 map(string_literal, Expr::Literal),
                 aggregation_function(agg_functions),
                 map(function(agg_functions), |(name, args)| Expr::ScalarFunction {
-                    name: name.into(),
+                    name: SS::from(name),
                     args,
                 }),
-                map(identifier, |s| Expr::Identifier(s.into())),
+                unary_op(agg_functions),
+                map(identifier, Expr::Identifier),
                 map(delimited(ws(char('(')), expr(agg_functions), ws(char(')'))), |e| {
                     Expr::Parenthesized(Box::new(e))
                 }),
@@ -312,9 +375,9 @@ fn binary_op(input: &str) -> IResult<&str, BinOp, VerboseError<&str>> {
 }
 
 // Parse expressions with operator precedence (simplified)
-fn binop_expr<'h>(
-    agg_functions: &RefCell<Vec<AggKind<'h>>>,
-) -> impl FnMut(&'h str) -> IResult<&'h str, Expr<'h>, VerboseError<&'h str>> {
+fn binop_expr(
+    agg_functions: &RefCell<Vec<AggKind>>,
+) -> impl FnMut(&str) -> IResult<&str, Expr, VerboseError<&str>> {
     move |input| {
         let (input, left) = ws(primary(agg_functions))(input)?;
 
@@ -332,8 +395,8 @@ fn binop_expr<'h>(
 }
 
 fn compare<'h>(
-    agg_functions: &RefCell<Vec<AggKind<'h>>>,
-) -> impl FnMut(&'h str) -> IResult<&'h str, Expr<'h>, VerboseError<&'h str>> {
+    agg_functions: &RefCell<Vec<AggKind>>,
+) -> impl FnMut(&'h str) -> IResult<&'h str, Expr, VerboseError<&'h str>> {
     move |input| {
         let (input, left) = ws(binop_expr(agg_functions))(input)?;
         match opt(tuple((
@@ -358,11 +421,21 @@ fn compare<'h>(
     }
 }
 
-fn expr<'h>(
-    agg_functions: &RefCell<Vec<AggKind<'h>>>,
-) -> impl FnMut(&'h str) -> IResult<&'h str, Expr<'h>, VerboseError<&'h str>> {
+fn aliased_expr<'s, F>(f: F) -> impl FnMut(&'s str) -> IResult<&'s str, Expr, VerboseError<&'s str>>
+where
+    F: Parser<&'s str, Expr, VerboseError<&'s str>>,
+{
+    map(pair(f, opt(column_alias)), |(expr, alias)| match alias {
+        Some(alias) => Expr::Aliased(Box::new(expr), SS::from(alias)),
+        None => expr,
+    })
+}
+
+pub(crate) fn expr<'s>(
+    agg_functions: &RefCell<Vec<AggKind>>,
+) -> impl FnMut(&'s str) -> IResult<&'s str, Expr, VerboseError<&'s str>> {
     move |input| {
-        let (input, left) = ws(compare(agg_functions))(input)?;
+        let (input, left) = ws(aliased_expr(compare(agg_functions)))(input)?;
 
         // Try to parse as a sequence of logical operations
         let (input, log_parts) = many0(tuple((
@@ -370,7 +443,7 @@ fn expr<'h>(
                 map(tag_no_case("AND"), |_| LogicalOp::And),
                 map(tag_no_case("OR"), |_| LogicalOp::Or),
             ))),
-            ws(compare(agg_functions)),
+            ws(aliased_expr(compare(agg_functions))),
         )))(input)?;
         // Build left-associative expression tree
         let result = log_parts.into_iter().fold(left, |acc, (op, right)| Expr::LogicalOp {
@@ -381,6 +454,12 @@ fn expr<'h>(
 
         Ok((input, result))
     }
+}
+
+pub fn scalar_expr<'s>(input: &'s str) -> IResult<&'s str, ScalarExpr, VerboseError<&'s str>> {
+    let agg_fns = RefCell::new(Vec::new());
+    let (rem, expr) = expr(&agg_fns)(input)?;
+    Ok((rem, ScalarExpr(expr)))
 }
 
 // Parse column alias: as "Alias Name"
@@ -396,52 +475,44 @@ fn column_alias(input: &str) -> IResult<&str, &str, VerboseError<&str>> {
 }
 
 // Parse a single column specification
-fn column_spec<'h>(
-    agg_functions: &RefCell<Vec<AggKind<'h>>>,
-) -> impl FnMut(&'h str) -> IResult<&'h str, Expr<'h>, VerboseError<&'h str>> {
-    move |input| {
-        map(tuple((expr(agg_functions), opt(column_alias))), |(expr, alias)| match alias {
-            Some(alias) => Expr::Aliased(Box::new(expr), alias),
-            None => expr,
-        })(input)
+fn column_spec<'s>(
+    agg_functions: &RefCell<Vec<AggKind>>,
+) -> impl FnMut(&'s str) -> IResult<&'s str, Expr, VerboseError<&'s str>> {
+    expr(agg_functions)
+}
+
+fn parse_spec(input: &str) -> JournResult<(Vec<Expr>, Vec<AggKind>)> {
+    let agg_functions = RefCell::new(Vec::new());
+    match separated_list0(ws(char(',')), ws(column_spec(&agg_functions)))(input) {
+        Ok(("", cols)) => Ok((cols, agg_functions.take())),
+        Ok((remaining, _)) => Err(err!("Unexpected input after parsing: '{}'", remaining)),
+        Err(NomErr::Error(e)) | Err(NomErr::Failure(e)) => Err(err!(convert_error(input, e))),
+        Err(NomErr::Incomplete(_)) => Err(err!("Incomplete input while parsing")),
     }
 }
 
 // Parse the full column list: col1, col2, expr as "Alias", ...
-pub fn parse_columns(input: &'_ str) -> JournResult<ColumnSpec<'_>> {
-    let agg_functions = RefCell::new(Vec::new());
-    match separated_list0(ws(char(',')), ws(column_spec(&agg_functions)))(input) {
-        Ok(("", cols)) => Ok(ColumnSpec::new(cols, agg_functions.take())),
-        Ok((remaining, _)) => Err(err!("Unexpected input after parsing columns: '{}'", remaining)),
-        Err(NomErr::Error(e)) | Err(NomErr::Failure(e)) => Err(err!(convert_error(input, e))),
-        Err(NomErr::Incomplete(_)) => Err(err!("Incomplete input while parsing columns")),
-    }
+pub fn parse_columns(input: &'_ str) -> JournResult<ColumnSpec> {
+    parse_spec(input).map(|(exprs, agg_functions)| ColumnSpec::new(exprs, agg_functions))
 }
 
-pub fn parse_non_aggregate<'h>(input: &'h str) -> JournResult<Vec<Expr<'h>>> {
-    let agg_functions = RefCell::new(Vec::new());
-    let res = match separated_list0(ws(char(',')), ws(column_spec(&agg_functions)))(input) {
-        Ok(("", col)) => Ok(col),
-        Ok((remaining, _)) => Err(err!("Unexpected input after parsing: '{}'", remaining)),
-        Err(NomErr::Error(e)) | Err(NomErr::Failure(e)) => Err(err!(convert_error(input, e))),
-        Err(NomErr::Incomplete(_)) => Err(err!("Incomplete input while parsing")),
-    };
-    if !agg_functions.borrow().is_empty() {
-        Err(err!("Aggregation functions are not allowed here"))
-    } else {
-        res
-    }
+/// Parses an expression that must not include aggregate functions.
+pub fn parse_non_aggregate(input: &str) -> JournResult<Vec<ScalarExpr>> {
+    let (exprs, _agg_functions) = parse_spec(input)?;
+    exprs.into_iter().map(ScalarExpr::try_from).collect::<Result<Vec<_>, _>>()
 }
 
-pub fn parse_plan<'h>(
-    column_spec: &'h str,
-    where_conditions: Option<&'h str>,
+pub fn parse_plan(
+    column_spec: &str,
+    where_conditions: Option<&str>,
     show_total: bool,
-    group_by: Option<&'h str>,
-    additional: HashMap<&'static str, &'h str>,
-    sort_spec: Option<&'h str>,
+    group_by: Option<&str>,
+    additional: HashMap<&'static str, &str>,
+    sort_spec: Option<&str>,
     sort_ascending: bool,
-) -> JournResult<Plan<'h>> {
+    total_as: Option<&str>,
+    grand_total_as: Option<&str>,
+) -> JournResult<Plan> {
     let column_spec = parse_columns(column_spec)?;
     let where_conditions = where_conditions
         .map(|wc| {
@@ -458,10 +529,9 @@ pub fn parse_plan<'h>(
             let mut group_by_exprs = vec![];
             let mut found_agg = false;
             for expr in column_spec.exprs().iter() {
-                if !expr.is_aggregate() {
-                    group_by_exprs.push(expr.clone());
-                } else {
-                    found_agg = true;
+                match ScalarExpr::try_from(expr.clone()) {
+                    Ok(expr) => group_by_exprs.push(expr),
+                    Err(_) => found_agg = true,
                 }
             }
             if !found_agg || group_by_exprs.is_empty() { None } else { Some(group_by_exprs) }
@@ -472,6 +542,34 @@ pub fn parse_plan<'h>(
             parse_non_aggregate(s).map_err(|e| err!("Unable to parse --sort-by").with_source(e))
         })
         .transpose()?;
+
+    let total_spec = total_as
+        .map(|s| {
+            parse_spec(s)
+                .and_then(|(exprs, aggs)| {
+                    match exprs.iter().find(|e| !e.is_aggregate() && !e.is_const()) {
+                        Some(e) => Err(err!("Only aggregation and constant functions are allowed here, but found non-aggregate expression: {}", e)),
+                        None => Ok(ColumnSpec::new(exprs, aggs)),
+                    }
+                })
+                .map_err(|e| err!("Unable to parse --total-as").with_source(e))
+        })
+        .transpose()?
+        .unwrap_or_else(|| column_spec.clone());
+
+    let grand_total_spec = grand_total_as
+        .map(|s| {
+            parse_spec(s)
+                .and_then(|(exprs, aggs)| {
+                    match exprs.iter().find(|e| !e.is_aggregate() && !e.is_const()) {
+                        Some(e) => Err(err!("Only aggregation and constant functions are allowed here, but found non-aggregate expression: {}", e)),
+                        None => Ok(ColumnSpec::new(exprs, aggs)),
+                    }
+                })
+                .map_err(|e| err!("Unable to parse --grand-total-as").with_source(e))
+        })
+        .transpose()?
+        .unwrap_or_else(|| total_spec.clone());
 
     let mut additional_expr = HashMap::new();
     for (k, v) in additional.into_iter() {
@@ -485,6 +583,8 @@ pub fn parse_plan<'h>(
         additional_expr,
         sort_exprs.unwrap_or_default(),
         sort_ascending,
+        total_spec,
+        grand_total_spec,
     );
     plan.validate()?;
     Ok(plan)
@@ -508,10 +608,10 @@ mod tests {
             Compare {
                 left: Box::new(ScalarFunction {
                     name: "iferror".into(),
-                    args: vec![Literal("abc"), Literal("acb")]
+                    args: vec![Literal("abc".into()), Literal("acb".into())]
                 }),
                 op: CompareOp::Lt,
-                right: Box::new(Literal("def"))
+                right: Box::new(Literal("def".into()))
             }
         )
     }

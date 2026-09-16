@@ -11,7 +11,7 @@ mod linear_system_valuer;
 mod price_db_valuer;
 mod system_valuer;
 
-use crate::amount::Amount;
+use crate::amount::{Amount, Quantity};
 use crate::error::{JournError, JournResult};
 use crate::journal_entry::JournalEntry;
 use crate::unit::Unit;
@@ -20,16 +20,16 @@ pub use entry_valuer::EntryValuer;
 pub use lambda_valuer::LambdaValuer;
 pub use linear_system_valuer::LinearSystemValuer;
 pub use price_db_valuer::PriceDatabaseValuer;
+use rust_decimal::prelude::One;
 use smallvec::SmallVec;
 use smartstring::alias::String as SS;
 use std::borrow::Cow;
 use std::cell::LazyCell;
-use std::convert::Infallible;
-use std::ops::{Add, ControlFlow, Deref, DerefMut, FromResidual, Try};
+use std::ops::{Add, Deref, DerefMut};
 use std::{fmt, iter};
 pub use system_valuer::SystemValuer;
 
-#[derive(Debug, Default, Clone)]
+#[derive(Default, Clone)]
 pub struct Valuation<'h> {
     /// The valuation
     amount: Amount<'h>,
@@ -41,7 +41,7 @@ pub struct Valuation<'h> {
 }
 impl<'h> Valuation<'h> {
     /// Creates a new valuation `from_amount`.
-    pub fn from_amount(valuation: Amount<'h>, from_amount: Amount<'h>) -> Self {
+    pub fn binary(valuation: Amount<'h>, from_amount: Amount<'h>) -> Self {
         Self {
             amount: valuation,
             via: Some(Box::new(Valuation { amount: from_amount, ..Default::default() })),
@@ -50,12 +50,22 @@ impl<'h> Valuation<'h> {
     }
 
     /// The basis valuation is a valuation of itself.
-    pub fn basis(valuation: Amount<'h>) -> Self {
+    pub fn unary(valuation: Amount<'h>) -> Self {
         Self { amount: valuation, ..Default::default() }
     }
 
     pub fn rounded(&mut self) {
         self.amount = self.amount.rounded();
+    }
+
+    /// Sets the valuation unit, which must be the same as the current valuation unit.
+    ///
+    /// This is done to ensure the valuation unit is identical to the quote_unit passed in to the
+    /// valuation call.
+    pub fn set_unit(&mut self, unit: &'h Unit<'h>) {
+        assert_eq!(unit, self.amount.unit(), "Cannot change valuation unit to a different unit");
+
+        self.amount = unit.with_quantity(self.amount.quantity());
     }
 
     /// Gets the `quote/base` price in the valuation unit.
@@ -64,12 +74,42 @@ impl<'h> Valuation<'h> {
     }
 
     /// Gets the `base/quote` in the base unit.
-    pub fn price_with_inverse(&self, base_amount: Amount<'h>) -> Amount<'h> {
-        base_amount / self.amount.quantity()
+    pub fn price_with_inverse(
+        &self,
+        base_amount: Amount<'h>,
+        quote_unit: &'h Unit<'h>,
+    ) -> Amount<'h> {
+        if self.amount.is_zero() {
+            quote_unit.with_quantity(dec!(0))
+        } else {
+            quote_unit
+                .with_quantity(Quantity::one() / self.amount.quantity() * base_amount.quantity())
+        }
+    }
+
+    /// Tries to invert the valuation, which will succeed for non-basis valuations.
+    pub fn invert(&self) -> Option<Valuation<'h>> {
+        let base_amount = self.via().last()?;
+        Some(Valuation::binary(
+            base_amount.unit().with_quantity(base_amount.quantity() / self.amount.quantity()),
+            self.amount,
+        ))
     }
 
     pub fn value(&self) -> Amount<'h> {
         self.amount
+    }
+
+    pub fn values(&self) -> impl DoubleEndedIterator<Item = Amount<'h>> {
+        // Collect to make reverse iteration possible
+        iter::once(self.amount)
+            .chain(self.via().map(|v| v.amount))
+            .collect::<SmallVec<[Amount; 3]>>()
+            .into_iter()
+    }
+
+    pub fn contains_unit(&self, unit: &'h Unit<'h>) -> bool {
+        self.amount.unit() == unit || self.via().any(|v| v.amount.unit() == unit)
     }
 
     /// Revalues this valuation or a component in the valuation chain. All
@@ -108,8 +148,17 @@ impl<'h> Valuation<'h> {
         iter::successors(self.via.as_deref(), |next| next.via.as_deref())
     }
 
+    pub fn via_values(&self) -> impl Iterator<Item = Amount<'h>> + '_ {
+        self.via().map(|v| v.amount)
+    }
+
     /// Sets the previous value in the Valuation chain.
     pub fn set_via(&mut self, via: Valuation<'h>) {
+        if via.via().any(|v| v.unit() == self.amount.unit()) {
+            panic!(
+                "Cannot set valuation via a valuation that contains the same unit as the current valuation"
+            );
+        }
         self.via = Some(Box::new(via));
     }
 
@@ -144,6 +193,50 @@ impl<'h> Deref for Valuation<'h> {
     }
 }
 
+impl fmt::Display for Valuation<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut iter = self.values().rev().peekable();
+        while let Some(value) = iter.next() {
+            write!(f, "{}", value)?;
+            if iter.peek().is_some() {
+                write!(f, " ==> ")?;
+            }
+        }
+        /*
+        let mut iter = self.values().enumerate().peekable();
+        while let Some((i, val)) = iter.next() {
+            // Skip last (base amount)
+            if iter.peek().is_none() {
+                break;
+            }
+            if i > 0 {
+                write!(f, " via ")?;
+            }
+            write!(f, "{}", val)?;
+        }*/
+        Ok(())
+    }
+}
+
+impl fmt::Debug for Valuation<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut iter = self.values().rev().peekable();
+        while let Some(value) = iter.next() {
+            write!(f, "{:?}", value)?;
+            if iter.peek().is_some() {
+                write!(f, " ==> ")?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl PartialEq for Valuation<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.amount == other.amount
+    }
+}
+
 impl<'h> Add for &Valuation<'h> {
     type Output = Option<Valuation<'h>>;
 
@@ -167,7 +260,42 @@ impl<'h> Add for &Valuation<'h> {
     }
 }
 
-#[derive(Debug)]
+impl<'h> Valuer<'h> for Valuation<'h> {
+    /// Values an `amount` in `quote_unit` by evaluating the valuation chain for both units.
+    /// If they exist, the valuation can be returned.
+    fn value(&mut self, quote_unit: &'h Unit<'h>, amount: Amount<'h>) -> ValuationResult<'h> {
+        let mut new_value = self.clone();
+        match new_value.revalue(amount) {
+            Ok(()) => {
+                if new_value.value().unit() == quote_unit {
+                    new_value.set_unit(quote_unit);
+                    return Ok(new_value);
+                }
+                new_value
+                    .via()
+                    .find(|v| v.unit() == quote_unit)
+                    .cloned()
+                    .map(|v| {
+                        let mut v = v;
+                        v.set_unit(quote_unit);
+                        Ok(v)
+                    })
+                    .unwrap_or_else(|| {
+                        Err(ValuationError::Undetermined(err!(
+                            "Unable to value {} in {}",
+                            amount,
+                            quote_unit
+                        )))
+                    })
+            }
+            Err(e) => Err(ValuationError::EvalFailure(
+                err!("Unable to revalue {} in {}", amount, quote_unit).with_source(e),
+            )),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
 pub enum ValuationError {
     /// Price could not be found with this valuer at this time with reason provided.
     Undetermined(JournError),
@@ -231,15 +359,40 @@ where
 pub trait Valuer<'h> {
     /// Values the specified `amount` in the `quote_unit`.
     ///
-    /// Returns `Ok(Valuation)` if the operation succeeded, with the inner `Amount` being `Some` if the valuation lookup was successful,
-    /// and `None` if the value could not be determined.
-    /// An `Err(e)` is returned if a non-system error occurred while determining the value (user error).
-    ///
-    /// Returned values should never be rounded. It is the responsibility of the caller to round the value if necessary.
-    ///
-    /// It is allowed for the function to return a `Valuation` in a unit other than the `quote_unit`, but implementors should
-    /// note this behaviour up front.
+    /// # Returns
+    /// The unrounded value of the `amount` in terms of the `quote_unit` passed in, or an error if the valuation
+    /// could not be determined.
     fn value(&mut self, quote_unit: &'h Unit<'h>, amount: Amount<'h>) -> ValuationResult<'h>;
+
+    /// Values the specified `amount` in the `quote_unit` via a third unit `via`. This is useful for
+    /// valuing an amount in a unit that is not directly supported by the valuer, but can be valued via
+    /// another unit. For example, units A and B may not value well against each other, but both can
+    /// be valued in USD.
+    ///
+    /// The `via` valuation should be in a unit that is neither the `quote_unit` nor the unit of the `amount`,
+    /// with the `via` valuation chain being searched for such a unit.
+    ///
+    /// # Panics
+    /// If no valid unit third unit is found.
+    fn value_via(
+        &mut self,
+        quote_unit: &'h Unit<'h>,
+        amount: Amount<'h>,
+        mut via: Valuation<'h>,
+    ) -> ValuationResult<'h> {
+        let via_unit = via
+            .values()
+            .find(|v| v.unit() != quote_unit && v.unit() != amount.unit())
+            .map(|a| a.unit())
+            .unwrap_or_else(|| panic!("Unable to value {} in {} via {}", amount, quote_unit, via));
+
+        // The `via` may already be able to value, saving a potentially more  expensive valuation call.
+        let intermediate_val =
+            Valuer::value(&mut via, via_unit, amount).or_else(|_| self.value(via_unit, amount))?;
+        let mut v = self.value(quote_unit, *intermediate_val)?;
+        v.set_via(intermediate_val);
+        Ok(v)
+    }
 
     fn or(self, other: impl Valuer<'h>) -> OrValuer<'h, Self, impl Valuer<'h>>
     where
@@ -264,11 +417,30 @@ impl<'h, T: Valuer<'h>> Valuer<'h> for LazyCell<T> {
     }
 }
 
+pub enum ValueError<'h> {
+    Err(JournError),
+    ValuationNeeded(&'h Unit<'h>, Amount<'h>),
+}
+pub type ValueResult<'h, O> = Result<O, ValueError<'h>>;
+
+impl fmt::Debug for ValueError<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ValueError::Err(e) => write!(f, "Err({:?})", e),
+            ValueError::ValuationNeeded(u, a) => {
+                write!(f, "ValuationNeeded({}, {})", u, a)
+            }
+        }
+    }
+}
+
+/*
 pub enum ValueResult<'h, O> {
     Ok(O),
     Err(JournError),
     ValuationNeeded(&'h Unit<'h>, Amount<'h>),
-}
+}*/
+/*
 pub enum ValueResidual<'h> {
     Err(JournError),
     ValuationNeeded(&'h Unit<'h>, Amount<'h>),
@@ -308,6 +480,12 @@ impl<'h, O> FromResidual<Result<Infallible, JournError>> for ValueResult<'h, O> 
             Ok(infallible) => match infallible {}, // This will never happen
         }
     }
+}*/
+
+impl From<JournError> for ValueError<'_> {
+    fn from(e: JournError) -> Self {
+        ValueError::Err(e)
+    }
 }
 
 /// Executes a function that may return a `ValuationNeeded` result during its processing.
@@ -322,9 +500,9 @@ where
 {
     loop {
         match f(entry.as_ref()) {
-            ValueResult::Ok(o) => return Ok(o),
-            ValueResult::Err(e) => return Err(e),
-            ValueResult::ValuationNeeded(quote_unit, amount) => {
+            Ok(o) => return Ok(o),
+            Err(ValueError::Err(e)) => return Err(e),
+            Err(ValueError::ValuationNeeded(quote_unit, amount)) => {
                 match SystemValuer::from(entry.as_ref()).value(quote_unit, amount) {
                     Ok(val) => {
                         let price = val.value() * (dec!(1) / amount.quantity());
@@ -356,4 +534,30 @@ where
     }
 }
 #[cfg(test)]
-mod test {}
+mod test {
+    use crate::valuer::{Valuation, Valuer};
+    use crate::{amount, unit};
+
+    #[test]
+    fn test_revalue() {
+        let mut v = Valuation::unary(amount!("$1"));
+        assert!(v.revalue(amount!("$2")).is_ok());
+        assert!(v.revalue(amount!("€1")).is_err());
+
+        // Doubling B, should double A in the valuation chain.
+        let mut via = Valuation::binary(amount!("10 A"), amount!("1 B"));
+        assert!(via.revalue(amount!("2 B")).is_ok());
+        assert_eq!(via.value(), amount!("20 A"));
+    }
+
+    #[test]
+    fn test_value() {
+        let mut via = Valuation::binary(amount!("10 A"), amount!("1 B"));
+        assert_eq!(
+            Valuer::value(&mut via, unit!("B"), amount!("1 A"))
+                .map(|v| v.value())
+                .map_err(|e| e.to_string()),
+            Ok(amount!("0.1 B"))
+        );
+    }
+}

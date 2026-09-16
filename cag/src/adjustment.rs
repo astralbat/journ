@@ -5,15 +5,16 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
+use crate::adjusted_value::AdjustedValue;
 use journ_core::alloc::HerdAllocator;
 use journ_core::amount::{Amount, Quantity};
 use journ_core::datetime::JDateTimeRange;
+use journ_core::err;
 use journ_core::error::JournResult;
-use journ_core::journal_entry::EntryId;
 use journ_core::journal_entry::JournalEntry;
 use journ_core::metadata::Metadata;
+use journ_core::tree_id::TreeId;
 use journ_core::unit::Unit;
-use journ_core::valued_amount::{PostingValuation, ValuedAmount};
 use log::trace;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::One;
@@ -23,17 +24,7 @@ use std::fmt::Formatter;
 use yaml_rust2::Yaml;
 use yaml_rust2::yaml::Hash;
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct AdjustmentId {
-    entry_id: EntryId,
-    position: u32,
-}
-
-impl AdjustmentId {
-    pub(crate) fn new(entry_id: &EntryId, position: u32) -> Self {
-        Self { entry_id: entry_id.clone(), position }
-    }
-}
+pub type AdjustmentId = TreeId;
 
 #[derive(Clone)]
 pub enum AmountAdjustment<'h> {
@@ -167,7 +158,7 @@ impl From<&AmountAdjustment<'_>> for Yaml {
 /// unless they are applied to a specific pool (CAG-AdjustPool) instead.
 #[derive(Clone)]
 pub struct Adjustment<'h> {
-    id: AdjustmentId,
+    id: TreeId,
     /// If set, only apply the adjustment to the specified pool
     pool: Option<&'h str>,
     entry: &'h JournalEntry<'h>,
@@ -180,7 +171,7 @@ pub struct Adjustment<'h> {
 
 impl<'h> Adjustment<'h> {
     pub fn new(
-        position: u32,
+        position: usize,
         entry: &'h JournalEntry<'h>,
         metadata: SmallVec<[Metadata<'h>; 4]>,
         pool: Option<&'h str>,
@@ -195,7 +186,6 @@ impl<'h> Adjustment<'h> {
             assert!(pool.is_some(), "Additive adjustments must be applied to a specific pool");
         }
 
-        let entry_id = entry.id();
         let datetime = entry.datetime_range();
         Adjustment {
             datetime,
@@ -203,7 +193,7 @@ impl<'h> Adjustment<'h> {
             metadata,
             pool,
             amount_adjustments,
-            id: AdjustmentId::new(entry_id, position),
+            id: entry.id().branch(position + 1),
             properties: vec![],
             allocator: entry.config().allocator(),
         }
@@ -270,19 +260,19 @@ impl<'h> Adjustment<'h> {
 
     /// Convert `AmountAdjustment::Set` to `AmountAdjustment::Add` by calculating the difference between the set amount and the amount within the `balance` provided.
     /// If the balance does not have a value in the same unit as the set amount, the set amount is converted to an add adjustment with the whole set amount.
-    pub fn convert_set_to_add(&mut self, balance: &ValuedAmount<'h>) {
+    pub fn convert_set_to_add(&mut self, adj_value: &AdjustedValue<'h>) {
         self.make_canonical();
 
         for amnt_adj in &mut self.amount_adjustments {
             if let AmountAdjustment::Set(set_amount) = amnt_adj {
-                match balance.value_in(set_amount.unit()) {
-                    Some(bal_amount) => {
-                        let diff = *set_amount - bal_amount;
-                        *amnt_adj = AmountAdjustment::Add(diff);
-                    }
-                    None => {
-                        *amnt_adj = AmountAdjustment::Add(*set_amount);
-                    }
+                if set_amount.unit() == adj_value.amount().unit() {
+                    let diff = *set_amount - adj_value.amount();
+                    *amnt_adj = AmountAdjustment::Add(diff);
+                } else if set_amount.unit() == adj_value.value().unit() {
+                    let diff = *set_amount - adj_value.value();
+                    *amnt_adj = AmountAdjustment::Add(diff);
+                } else {
+                    *amnt_adj = AmountAdjustment::Add(*set_amount);
                 }
             }
         }
@@ -320,6 +310,7 @@ impl<'h> Adjustment<'h> {
         trace!("Canonical adjustment is {}", self);
     }
 
+    /*
     /// Splits the adjustment into two parts.
     /// The `amount_percent` can be more than 1, or less than 0.
     pub fn split(self, amount_percent: Decimal) -> (Self, Self) {
@@ -359,7 +350,7 @@ impl<'h> Adjustment<'h> {
                 allocator: self.allocator,
             },
         )
-    }
+    }*/
 
     /// Applies the adjustment to the given valued amount.
     /// The adjustment components are applied in turn to the relevant amount/valuation of the given `valued_amount`.
@@ -367,42 +358,35 @@ impl<'h> Adjustment<'h> {
     /// Return an error if the adjustment would make the considered value negative.
     /// # Panics
     /// If any of the amount adjustments are `SetQuantity`. These should be converted to `AddAmount` before applying.
-    pub fn apply(&self, valued_amount: &mut ValuedAmount<'h>) -> JournResult<()> {
-        assert_eq!(valued_amount.unit(), self.unit());
-        debug_assert!(valued_amount.posting_valuations().all(PostingValuation::is_total));
+    pub fn apply(&self, adj_value: &mut AdjustedValue<'h>) -> JournResult<()> {
+        assert_eq!(adj_value.amount().unit(), self.unit());
 
-        trace!("Applying adjustment {} to {}", self, valued_amount);
+        trace!("Applying adjustment {} to {}", self, adj_value);
 
         // Make canonical first to ensure the logic proceeds correctly
         let mut canonical_self = self.clone();
         canonical_self.make_canonical();
 
-        let originally_positive = valued_amount.amount().is_positive();
-        valued_amount
-            .set_amount(canonical_self.amount_adjustments[0].apply(valued_amount.amount()));
+        adj_value.set_amount(canonical_self.amount_adjustments[0].apply(adj_value.amount()));
 
-        for amnt_adj in &canonical_self.amount_adjustments[1..] {
-            let mut existing_amount =
-                valued_amount.value_in(amnt_adj.amount().unit()).unwrap_or(Amount::nil());
-            // If the sign got flipped during the primary amount adjustment, the value_in() function is now going to return the inverse
-            // of what we want. So flip it back.
-            if valued_amount.amount() != 0
-                && valued_amount.amount().is_positive() != originally_positive
-            {
-                existing_amount = -existing_amount;
-            }
-
-            let new_amount = amnt_adj.apply(existing_amount);
-
-            // The signs need to match. It does not make sense to have an adjustment that causes the
-            // valued amount to have conflicting signs. E.g. "10 Units @@ -$5" implies that each unit
-            // has a negative value which, even if it makes sense in some situations, cannot be modelled currently.
-            //if new_amount.is_positive() != valued_amount.amount().is_positive() {
-            //    return Err(err!("Adjustment would change the sign of the considered value")
-            //        .with_source(err!("{} on {}", amnt_adj, existing_amount.format_precise())));
-            //}
-            valued_amount.set_valuation(PostingValuation::new_total(new_amount, false));
-        }
+        // Only apply the adjustment component that matches the unit of account of the adjusted value.
+        canonical_self
+            .amount_adjustments
+            .iter()
+            .find(|amnt_adj| amnt_adj.amount().unit() == adj_value.unit_of_account())
+            .map(|amnt_adj| {
+                let new_value = amnt_adj.apply(adj_value.value());
+                if new_value < 0 {
+                    return Err(err!(
+                        "Adjustment {} would make value negative: {}",
+                        amnt_adj,
+                        new_value.format_precise()
+                    ));
+                }
+                adj_value.set_value(new_value);
+                Ok(())
+            })
+            .transpose()?;
         Ok(())
     }
 }

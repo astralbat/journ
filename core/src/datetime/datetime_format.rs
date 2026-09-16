@@ -75,7 +75,7 @@ impl<'h> DateTimeFormat<'h> {
                     "Invalid time format",
                     map(Self::time_items_parser(false), |items| {
                         let time_range = 0u8..items.len() as u8;
-                        (items, time_range, Range::default())
+                        (items, Range::default(), time_range)
                     }),
                 )(input.clone())?,
                 DateFormatMode::DateTime => {

@@ -34,6 +34,10 @@ pub struct PolicyWrappingCell<'c> {
     ease: WrapEase,
 }
 impl<'c> PolicyWrappingCell<'c> {
+    const fn wrap_word_pattern(c: char) -> bool {
+        c == ' ' || c == '\t'
+    }
+
     pub fn new<C: Into<CellRef<'c>>>(inner: C, wrapping_policy: WrapPolicy) -> Self {
         Self {
             modifiable_cell: ModifiableCell::new(inner),
@@ -63,22 +67,19 @@ impl<'c> PolicyWrappingCell<'c> {
         if best_pos == haystack.len() { None } else { Some(best_pos) }
     }
 
-    fn try_wrap_word(this: &PolicyWrappingCell, current_column_width: usize) -> bool {
-        Self::try_wrap(this, current_column_width, |c| c == ' ' || c == '\t', 1, true)
+    fn try_wrap_word(this: &PolicyWrappingCell) -> usize {
+        Self::try_wrap(this, Self::wrap_word_pattern, 1, true)
     }
 
-    fn try_wrap_after_str(this: &PolicyWrappingCell, current_column_width: usize, s: &str) -> bool {
-        Self::try_wrap(this, current_column_width, s, s.len(), false)
+    fn try_wrap_after_str(this: &PolicyWrappingCell, s: &str) -> usize {
+        Self::try_wrap(this, s, s.len(), false)
     }
 
-    /// Tries to wrap by splitting the relevant line(s) nearest the middle at (or after, using `split_offset`) the given `pattern`.
-    fn try_wrap<P: Pattern + Copy>(
+    fn wrap_pos<'s, P: Pattern + Copy>(
         this: &PolicyWrappingCell,
-        current_column_width: usize,
         pattern: P,
         split_offset: usize,
-        truncate: bool,
-    ) -> bool
+    ) -> Option<(usize, usize)>
     where
         for<'a> P::Searcher<'a>: ReverseSearcher<'a>,
     {
@@ -87,28 +88,47 @@ impl<'c> PolicyWrappingCell<'c> {
         match max_line_width {
             Some(max_line_width) => {
                 let mut lines = this.modifiable_cell.lines_mut();
-                for (line_num, line) in
-                    lines.iter_mut().enumerate().filter(|(_, l)| match this.ease {
-                        WrapEase::Eager => l.chars().count() == max_line_width,
-                        WrapEase::Reluctant => l.chars().count() == current_column_width,
-                    })
+                for (line_num, line) in lines
+                    .iter_mut()
+                    .enumerate()
+                    .filter(|(_, l)| l.chars().count() == max_line_width)
                 {
-                    let found_pos = Self::find_closest_to_middle(line, pattern);
-                    if let Some(pos) = found_pos
+                    if let Some(pos) = Self::find_closest_to_middle(line, pattern)
                         && pos + split_offset < line.len()
                     {
-                        let new_line = line.split_off(pos + split_offset);
-                        if truncate {
-                            line.truncate(line.len() - split_offset);
-                        }
-                        lines.insert(line_num + 1, new_line);
-                        return true;
+                        return Some((line_num, pos));
                     }
                 }
-                false
+                None
             }
-            None => false,
+            None => None,
         }
+    }
+
+    /// Tries to wrap by splitting the relevant line(s) nearest the middle at (or after, using `split_offset`) the given `pattern`.
+    fn try_wrap<P: Pattern + Copy>(
+        this: &PolicyWrappingCell,
+        pattern: P,
+        split_offset: usize,
+        truncate: bool,
+    ) -> usize
+    where
+        for<'a> P::Searcher<'a>: ReverseSearcher<'a>,
+    {
+        if let Some((line_num, pos)) = Self::wrap_pos(this, pattern, split_offset) {
+            let width_before = this.width().sum();
+            {
+                let mut lines = this.modifiable_cell.lines_mut();
+                let line = lines.get_mut(line_num).unwrap();
+                let new_line = line.split_off(pos + split_offset);
+                if truncate {
+                    line.truncate(line.len() - split_offset);
+                }
+                lines.insert(line_num + 1, new_line);
+            }
+            return width_before - this.width().sum();
+        }
+        0
     }
 }
 impl Cell for PolicyWrappingCell<'_> {
@@ -144,17 +164,33 @@ impl Cell for PolicyWrappingCell<'_> {
     }
 
     fn as_shrinkable(&self) -> Option<&dyn ShrinkableCell> {
+        match self.wrapping_policy {
+            WrapPolicy::Word => Self::wrap_pos(self, Self::wrap_word_pattern, 1),
+            WrapPolicy::AfterStr(s) => Self::wrap_pos(self, s, s.len()),
+        }?;
         Some(self)
     }
 }
 impl ShrinkableCell for PolicyWrappingCell<'_> {
-    fn try_shrink(&self, max_width: usize) -> bool {
-        if self.ease == WrapEase::Reluctant && self.width() < max_width {
-            return false;
-        }
+    fn try_shrink(&self, _target_width: &CellWidth) -> usize {
         match self.wrapping_policy {
-            WrapPolicy::Word => Self::try_wrap_word(self, max_width),
-            WrapPolicy::AfterStr(s) => Self::try_wrap_after_str(self, max_width, s),
+            WrapPolicy::Word => Self::try_wrap_word(self),
+            WrapPolicy::AfterStr(s) => Self::try_wrap_after_str(self, s),
         }
+    }
+
+    fn is_lossy(&self) -> bool {
+        false
+    }
+}
+impl<'c> From<PolicyWrappingCell<'c>> for CellRef<'c> {
+    fn from(pwc: PolicyWrappingCell<'c>) -> Self {
+        CellRef::Owned(Box::new(pwc))
+    }
+}
+
+impl fmt::Debug for PolicyWrappingCell<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Wrapping({:?})", self.modifiable_cell)
     }
 }

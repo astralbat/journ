@@ -68,6 +68,15 @@ def datetime_summary(value, internal_dict):
     timezone_s = value.GetChildMemberWithName("offset").GetChildMemberWithName("tz").GetValue()
     return f"{naive_datetime_s} {timezone_s}"
 
+def jdatetime_summary(value, internal_dict):
+    naive_datetime_s = value.GetChildMemberWithName("datetime").GetSummary()
+    return f"{naive_datetime_s}"
+
+def jdatetimerange_summary(value, internal_dict):
+    start_s = value.GetChildMemberWithName("start").GetSummary()
+    end_s = value.GetChildMemberWithName("end").GetSummary()
+    return f"{start_s}..{end_s}"
+
 def unit_summary(value, internal_dict):
     code = value.GetChildMemberWithName("code")
     return code.GetSummary()
@@ -85,48 +94,32 @@ def amount_summary(value, internal_dict):
         return f"{quantity_summary} {unit_code}"
     
 def valued_amount_summary(value, internal_dict):
-    amount = amount_summary(value.GetChildMemberWithName("amount_expr").GetChildMemberWithName("amount"), internal_dict)
+    amount = value.GetChildMemberWithName("amount").GetSummary()
 
     valuation_str = ""
-    some_valuations = value.GetChildMemberWithName("valuations").GetChildAtIndex(0)
+    some_valuations = value.GetChildMemberWithName("valuations")
+    # Only show the first 5 valuations in case of uninitialized struct
+    count = 0
     for valuation in some_valuations.GetChildAtIndex(0):
-        valuation = valuation.GetChildMemberWithName("value")
-        if "Total" in valuation.GetType().GetName():
+        if count == 5:
+            break
+        inner = valuation.GetChildMemberWithName("inner")
+        if "Total" in inner.GetType().GetName():
           valuation_str += " @@ "
-          valuation_str += amount_summary(valuation.GetChildAtIndex(0).GetChildMemberWithName("amount"), internal_dict)
+          valuation_str += inner.GetChildAtIndex(0).GetSummary()
+        elif "Unit" in inner.GetType().GetName():
+          valuation_str += " @ "
+          valuation_str += inner.GetChildAtIndex(0).GetSummary()
+        count += 1
     return f"{amount}{valuation_str}"
 
-def pool_balance_summary(value, internal_dict):
-    return value.GetChildAtIndex(0).GetSummary()
-
-def amount_adj_summary(value, internal_dict):
-    #value = value.GetChildMemberWithName("value")
-    return value.GetChildAtIndex(0).GetSummary()
-
-def adjustment_summary(value, internal_dict):
-    amount_adj = value.GetChildMemberWithName("amount_adj").GetSummary()
-    cons_adj = value.GetChildMemberWithName("consideration_adj").GetSummary()
-    return f"{amount_adj}, {cons_adj}"
-
-def deal_summary(value, internal_dict):
-    va = value.GetChildMemberWithName("valued_amount").GetSummary()
-    expenses = value.GetChildMemberWithName("expenses").GetSummary()
-    return f"{va}, {expenses}"
-
-def deal_group_summary(value, internal_dict):
-    return value.GetChildMemberWithName("holding").GetChildMemberWithName("0").GetChildMemberWithName("pointer").GetChildMemberWithName("pointer").GetSummary()
-
-def balance_deal_holding_summary(value, internal_dict):
-    value = value.GetChildMemberWithName("0")
-    if value.GetChildMemberWithName("balance").IsValid():
-        return value.GetChildMemberWithName("balance").GetSummary()
-    else:
-        return value.GetSummary()
-def balance2_deal_holding_summary(value, internal_dict):
-    return value.GetChildMemberWithName("balance").GetSummary()
-
-def deal_holding_summary(value, internal_dict):
-    return value.GetChildAtIndex(0).GetSummary()
+def flow_summary(value, internal_dict):
+    account_name = "None"
+    account_root = value.GetChildMemberWithName("account_root")
+    if account_root:
+        account_name = account_root.GetChildAtIndex(0).GetChildAtIndex(0).GetChildMemberWithName("name").GetSummary()
+    amount = value.GetChildMemberWithName("net_amount").GetSummary()
+    return f"{account_name} {amount}"
 
 def __lldb_init_module(debugger, internal_dict):
     #debugger.HandleCommand(
@@ -155,48 +148,14 @@ def __lldb_init_module(debugger, internal_dict):
         'type summary add -F type_summaries.amount_summary journ_core::amount::Amount'
     )
     debugger.HandleCommand(
+        'type summary add -F type_summaries.jdatetime_summary journ_core::datetime::jdatetime::JDateTime'
+    )
+    debugger.HandleCommand(
+        'type summary add -F type_summaries.jdatetimerange_summary journ_core::datetime::jdatetime_range::JDateTimeRange'
+    )
+    debugger.HandleCommand(
         'type summary add -F type_summaries.valued_amount_summary journ_core::valued_amount::ValuedAmount'
     )
     debugger.HandleCommand(
-        'type summary add -F type_summaries.pool_balance_summary journ_tax::pool::PoolBalance'
+        'type summary add -F type_summaries.flow_summary journ_core::journal_entry_flow::Flow'
     )
-    debugger.HandleCommand(
-        'type summary add -F type_summaries.amount_adj_summary journ_tax::adjustment::AmountAdjustment'
-    )
-    debugger.HandleCommand(
-        'type summary add -F type_summaries.adjustment_summary journ_tax::adjustment::Adjustment'
-    )
-    debugger.HandleCommand(
-        'type summary add -F type_summaries.deal_summary journ_tax::deal::Deal'
-    )
-    debugger.HandleCommand(
-        'type summary add -F type_summaries.deal_group_summary journ_tax::deal_group::DealGroup'
-    )
-    debugger.HandleCommand(
-        'type summary add -F type_summaries.balance_deal_holding_summary journ_tax::deal_holding::DealHolding::Sequence'
-    )
-    debugger.HandleCommand(
-        'type summary add -F type_summaries.balance_deal_holding_summary journ_tax::deal_holding::DealHolding::Single'
-    )
-    debugger.HandleCommand(
-        'type summary add -F type_summaries.balance_deal_holding_summary journ_tax::deal_holding::DealHolding::Group:64'
-    )
-    debugger.HandleCommand(
-        'type summary add -F type_summaries.balance_deal_holding_summary journ_tax::deal_holding::DealHolding::Average'
-    )
-    debugger.HandleCommand(
-        'type summary add -F type_summaries.balance_deal_holding_summary journ_tax::deal_holding::DealHolding::Adjusted'
-    )
-    debugger.HandleCommand(
-        'type summary add -F type_summaries.balance2_deal_holding_summary journ_tax::deal_holding::AdjustedDealHolding'
-    )
-    debugger.HandleCommand(
-        'type summary add -F type_summaries.balance2_deal_holding_summary journ_tax::deal_holding::AverageDealHolding'
-    )
-    debugger.HandleCommand(
-        'type summary add -F type_summaries.balance2_deal_holding_summary journ_tax::deal_holding::SequenceDealHolding'
-    )
-    debugger.HandleCommand(
-        'type summary add -F type_summaries.deal_holding_summary journ_tax::deal_holding::DealHolding'
-    )
-

@@ -1,18 +1,21 @@
 /*
- * Copyright (c) 2017-2024. Mark Barrett
+ * Copyright (c) 2017-2026. Mark Barrett
  * This file is part of Journ.
  * Journ is free software: you can redistribute it and/or modify it under the terms of the GNU Affero General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
+use crate::ext::NumExt;
 use crate::report::table2;
-use crate::report::table2::{AlignedCell, Alignment, BlankCell, SpaceDistribution, StyledCell};
+use crate::report::table2::{
+    AlignedCell, Alignment, BlankCell, EllipsisCell, SpaceDistribution, StyledCell,
+};
 use crate::report::term_style::{Colour, Style};
 use crate::unit;
 use crate::unit::{NegativeStyle, RoundingStrategy, Unit, UnitFormat};
 use fmt::Write;
 use rust_decimal::Decimal;
-use rust_decimal::prelude::Zero;
+use rust_decimal::prelude::{One, Zero};
 use smartstring::alias::String as SS;
 use std::hash::Hash;
 use std::iter::Sum;
@@ -95,8 +98,13 @@ impl<'h> Amount<'h> {
     }
 
     /// Gets the scale (number of decimal places) of the amount's quantity.
-    pub fn scale(&self) -> u32 {
-        self.quantity.normalize().scale()
+    pub fn scale(&self) -> u8 {
+        self.quantity.normalize().scale() as u8
+    }
+
+    /// Gets the maximum scale under the unit's number format.
+    pub fn max_scale(&self) -> u8 {
+        self.unit.format().number_format().max_scale().unwrap_or(0u8)
     }
 
     /// Rounds to the specified number of decimal places using the unit's rounding strategy.
@@ -145,26 +153,37 @@ impl<'h> Amount<'h> {
     /// unrounded amount value could be depending on the rounding strategy used.
     /// Returns the range (min, max) of the possible values.
     pub fn rounding_error(&self) -> (Bound<Amount<'h>>, Bound<Amount<'h>>) {
+        let plus_minus_error = self.epsilon();
         match self.unit.rounding_strategy() {
             RoundingStrategy::HalfUp => {
-                let plus_minus_error = Decimal::new(5, self.quantity.scale() + 1);
                 (Bound::Included(self - plus_minus_error), Bound::Excluded(self + plus_minus_error))
             }
             RoundingStrategy::HalfDown => {
-                let plus_minus_error = Decimal::new(5, self.quantity.scale() + 1);
                 (Bound::Excluded(self - plus_minus_error), Bound::Included(self + plus_minus_error))
             }
             RoundingStrategy::HalfEven => {
-                let plus_minus_error = Decimal::new(5, self.quantity.scale() + 1);
                 (Bound::Included(self - plus_minus_error), Bound::Included(self + plus_minus_error))
             }
             RoundingStrategy::AwayFromZero => {
-                let plus_minus_error = Decimal::new(1, self.quantity.scale());
                 (Bound::Excluded(self - plus_minus_error), Bound::Included(*self))
             }
             RoundingStrategy::ToZero => {
-                let plus_minus_error = Decimal::new(1, self.quantity.scale());
                 (Bound::Included(*self), Bound::Excluded(self + plus_minus_error))
+            }
+        }
+    }
+
+    /// The largest possible rounding error for this amount, based on the unit's rounding strategy.
+    ///
+    /// Not to be confused with [Unit::epsilon()] which takes into account the unit's maximum scale and rounding strategy.
+    pub fn epsilon(&self) -> Decimal {
+        const DEC_MAX_SCALE: u32 = 28;
+        match self.unit.rounding_strategy() {
+            RoundingStrategy::HalfUp | RoundingStrategy::HalfDown | RoundingStrategy::HalfEven => {
+                Decimal::new(5, DEC_MAX_SCALE.min(self.quantity.scale() + 1))
+            }
+            RoundingStrategy::AwayFromZero | RoundingStrategy::ToZero => {
+                Decimal::new(1, DEC_MAX_SCALE.min(self.quantity.scale()))
             }
         }
     }
@@ -226,18 +245,28 @@ impl<'h> Amount<'h> {
         self.unit.format().format_precise(self.quantity, self.unit.code())
     }
 
+    pub fn split(self, amount: Quantity) -> (Self, Self) {
+        let l_amount = self.with_quantity(amount);
+        let r_amount = self - l_amount;
+        (l_amount, r_amount)
+    }
+
     /// Splits the amount at `percent`, returning left and right (remainder) parts.
     /// The `percent` may be > 1 or < 0 if necessary.
     ///
-    /// The amount is rounded to the scale of self, or the unit's max scale (if it has one), whichever is greater.
-    pub fn split_percent(self, percent: Quantity) -> (Self, Self) {
-        // In this simple implementation, the scale must be at least the precision of `self` to ensure no stray remainder can be created.
-        // For example, if `self` is 100.6, we round up with a scale of 0 and `percent` is 1, then we would have (101, -0.4) rather than (100.6, 0).
-        let rounding_scale =
-            self.scale().max(self.unit.format().number_format().max_scale().unwrap_or(0) as u32)
-                as u8;
-
-        let l_amount = (self * percent).rounded_dec_places(rounding_scale);
+    /// The amount may be `rounded` to the specified number of decimal places. If `rounding_scale` is `None`, then no rounding is performed.
+    pub fn split_percent(self, percent: Quantity, rounding_scale: Option<u8>) -> (Self, Self) {
+        let l_amount = if let Some(scale) = rounding_scale {
+            let mut l = (self * percent).rounded_dec_places(scale);
+            // Sometimes, rounding causes the left amount to exceed the original amount
+            // E.g. 0.009 * 60% = 0.01 when rounded to 2 decimal places.
+            if percent <= Decimal::one() {
+                l = l.min_abs(self);
+            }
+            l
+        } else {
+            self * percent
+        };
         let r_amount = self - l_amount;
         (l_amount, r_amount)
     }
@@ -254,6 +283,7 @@ impl<'h> Amount<'h> {
     pub fn add_precise(&self, rhs: Amount<'h>) -> Option<Amount<'h>> {
         let scale = self.quantity.scale().max(rhs.quantity.scale());
         let result = self.quantity.checked_add(rhs.quantity)?;
+
         if result.scale() <= scale { Some(Amount::new(self.unit, result)) } else { None }
     }
 
@@ -376,8 +406,11 @@ impl<'h> Amount<'h> {
                         self.code_before_amount.push(c);
                         return;
                     }
-                    AmountPart::Code(c) | AmountPart::Quote(c) if self.reached_integer_part => {
+                    AmountPart::Code(c) if self.reached_integer_part => {
                         self.code_after_amount.push(c);
+                        return;
+                    }
+                    AmountPart::Quote(_) if self.reached_integer_part => {
                         return;
                     }
                     _ if self.reached_integer_part => self.reached_decimal = true,
@@ -416,22 +449,24 @@ impl<'h> Amount<'h> {
         };
         let right = if !handler.code_after_amount.is_empty() {
             let left = Box::new(handler.part_after_decimal) as Box<dyn table2::Cell>;
-            let right = Box::new(AlignedCell::new(handler.code_after_amount, Alignment::Right))
-                as Box<dyn table2::Cell>;
+            let right = Box::new(EllipsisCell::new(AlignedCell::new(
+                handler.code_after_amount,
+                Alignment::Right,
+            ))) as Box<dyn table2::Cell>;
             let mut cell = table2::BinaryCell::new(left, right);
             cell.set_space_distribution(SpaceDistribution::Left);
             Box::new(cell)
         } else {
             Box::new(handler.part_after_decimal) as Box<dyn table2::Cell>
         };
-        let mut cell = table2::BinaryCell::new(left, right);
+        let mut amount_cell = table2::BinaryCell::new(left, right);
         // The left integer part is right aligned, so give it all the extra space - looks better.
-        cell.set_space_distribution(SpaceDistribution::Left);
+        amount_cell.set_space_distribution(SpaceDistribution::Left);
 
         if !self.is_positive() {
-            Box::new(StyledCell::new(Box::new(cell), Style::default().with_fg(Colour::Red)))
+            Box::new(StyledCell::new(Box::new(amount_cell), Style::default().with_fg(Colour::Red)))
         } else {
-            Box::new(cell)
+            Box::new(amount_cell)
         }
     }
 }
@@ -755,106 +790,6 @@ impl<'h> Neg for Amount<'h> {
         Amount::new(self.unit, self.quantity.neg())
     }
 }
-
-/*
-/// An arithmetic expression of `Amounts`.
-/// These are parsed from the journal files and stored so that they can be rewritten later.
-#[derive(Clone)]
-pub struct AmountExpr<'h> {
-    amount: Amount<'h>,
-    /// Preceding space and symbols
-    pretext: &'h str,
-    /// The parsed amount, excluding any surrounding space which may be an arithmetic expression.
-    parsed: Option<&'h str>,
-}
-
-impl<'h> AmountExpr<'h> {
-    pub fn new(amount: Amount<'h>, pretext: &'h str, parsed: Option<&'h str>) -> Self {
-        Self { amount, pretext, parsed }
-    }
-
-    pub fn amount(&self) -> Amount<'h> {
-        self.amount
-    }
-
-    /// Preceding space and symbols
-    pub fn pretext(&self) -> &str {
-        self.pretext
-    }
-
-    pub fn with_pretext(&self, pretext: &'h str) -> AmountExpr<'h> {
-        AmountExpr::new(self.amount, pretext, self.parsed)
-    }
-
-    /// Once the amount is changed, it can no longer be written back as the expression it was. It will be an expression
-    /// of a single Amount.
-    pub fn set_amount(&mut self, amount: Amount<'h>) {
-        if self.amount != amount {
-            self.amount = amount;
-            self.parsed = None;
-        }
-    }
-
-    pub fn with_amount(&self, amount: Amount<'h>) -> Self {
-        let mut expr = self.clone();
-        expr.set_amount(amount);
-        expr
-    }
-
-    pub fn map<F>(self, f: F) -> AmountExpr<'h>
-    where
-        F: FnOnce(Amount<'h>) -> Amount<'h>,
-    {
-        Self { amount: f(self.amount), ..self }
-    }
-
-    pub fn write<W: fmt::Write>(&self, w: &mut W, precise: bool) -> fmt::Result {
-        match self.parsed.as_ref() {
-            Some(expr) => write!(w, "{}{}", self.pretext, expr),
-            None => write!(
-                w,
-                "{}{}",
-                self.pretext,
-                if precise { self.amount.format_precise() } else { self.amount.format() }
-            ),
-        }
-    }
-}
-
-impl fmt::Debug for AmountExpr<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.parsed.as_ref() {
-            Some(expr) => write!(f, "{}{}", self.pretext, expr),
-            None => write!(f, "{}{:?}", self.pretext, self.amount),
-        }
-    }
-}
-
-impl<'h> Deref for AmountExpr<'h> {
-    type Target = Amount<'h>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.amount
-    }
-}
-
-impl<'h> From<Amount<'h>> for AmountExpr<'h> {
-    fn from(amount: Amount<'h>) -> Self {
-        AmountExpr::new(amount, "", None)
-    }
-}
-
-impl<'h> PartialEq<Amount<'h>> for AmountExpr<'h> {
-    fn eq(&self, other: &Amount<'h>) -> bool {
-        self.amount == *other
-    }
-}
-
-impl Hash for AmountExpr<'_> {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.amount.hash(state);
-    }
-}*/
 
 #[cfg(test)]
 mod tests {

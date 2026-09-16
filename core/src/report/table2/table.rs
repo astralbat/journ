@@ -5,16 +5,21 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
+use crate::report::command::table_format_args::TableFormatCommand;
 use crate::report::table2::fmt::RowFormatter;
 use crate::report::table2::fmt::TableCellFormatter;
-use crate::report::table2::row::Row;
-use crate::report::table2::{CellRef, SeparatorCell, SpannedCell, StyledCell};
+use crate::report::table2::row::{Row, RowKind};
+use crate::report::table2::{CellRef, Rows, SeparatorCell, SpannedCell, StyledCell};
 use crate::report::term_style::{Style, Weight};
 use std::fmt;
 
 pub struct Table<'cell> {
     rows: Vec<Row<'cell>>,
     stripe: bool,
+    title_separator: char,
+    chain_separator: char,
+    total_separator: char,
+    grand_total_separator: char,
     column_preferences: Vec<ColumnPreferences>,
 }
 
@@ -23,37 +28,87 @@ impl<'cell> Table<'cell> {
         self.stripe = striped;
     }
 
-    pub fn append_heading_row<C: Into<CellRef<'cell>>>(
-        &mut self,
+    pub fn create_heading_row<C: Into<CellRef<'cell>>>(
+        &self,
         headings: impl IntoIterator<Item = C>,
-    ) {
+    ) -> Row<'cell> {
         let mut row: Row<'cell> = Row::default();
         for heading in headings {
             row.append(heading.into());
         }
-        row.set_header(true);
-        self.push_row(row);
+        row.set_kind(RowKind::Heading);
+        row
     }
 
-    pub fn append_chain_separator(&mut self) {
-        self.push_separator_row('-', self.column_count())
+    pub fn create_chain_separator(&self) -> Row<'cell> {
+        self.create_separator_row(
+            RowKind::ChainSeparator,
+            self.chain_separator,
+            self.rows.column_count(),
+        )
     }
 
-    pub fn append_title_row<C: Into<CellRef<'cell>>>(&mut self, title: C, column_count: usize) {
+    pub fn create_total_separator(&self) -> Row<'cell> {
+        self.create_separator_row(
+            RowKind::TotalSeparator,
+            self.total_separator,
+            self.rows.column_count(),
+        )
+    }
+
+    pub fn create_grand_total_separator(&self) -> Row<'cell> {
+        self.create_separator_row(
+            RowKind::GrandTotalSeparator,
+            self.grand_total_separator,
+            self.rows.column_count(),
+        )
+    }
+
+    pub fn create_title_row<C: Into<CellRef<'cell>>>(
+        &self,
+        title: C,
+        column_count: usize,
+    ) -> (Row<'cell>, Row<'cell>) {
         let mut row: Row<'cell> = Row::default();
+        row.set_kind(RowKind::Title);
         let style = Style::default().with_weight(Weight::Bold);
         let spanned = SpannedCell::new(StyledCell::new(title, style), column_count);
         row.append(spanned);
-        self.push_row(row);
-        self.push_separator_row('-', column_count);
+        (
+            row,
+            self.create_separator_row(RowKind::TitleSeparator, self.title_separator, column_count),
+        )
     }
 
-    pub fn push_separator_row(&mut self, separator: char, span: usize) {
-        self.push_row(Row::new([Box::new(SeparatorCell::new(separator, span.max(1)))]));
+    pub fn set_title_separator(&mut self, separator: char) {
+        self.title_separator = separator;
     }
 
-    pub fn column_count(&self) -> usize {
-        self.rows.get(0).map(|r| r.column_count()).unwrap_or(0)
+    pub fn set_chain_separator(&mut self, separator: char) {
+        self.chain_separator = separator;
+    }
+
+    pub fn total_separator(&self) -> char {
+        self.total_separator
+    }
+
+    pub fn set_total_separator(&mut self, separator: char) {
+        self.total_separator = separator;
+    }
+
+    pub fn set_grand_total_separator(&mut self, separator: char) {
+        self.grand_total_separator = separator;
+    }
+
+    pub fn create_separator_row(
+        &self,
+        row_type: RowKind,
+        separator: char,
+        span: usize,
+    ) -> Row<'cell> {
+        let mut row = Row::new([Box::new(SeparatorCell::new(separator, span.max(1)))]);
+        row.set_kind(row_type);
+        row
     }
 
     pub fn rows(&self) -> &[Row<'cell>] {
@@ -89,7 +144,7 @@ impl<'cell> Table<'cell> {
     }
 
     pub fn print<W: fmt::Write>(&self, writer: &mut W) -> fmt::Result {
-        if self.rows.iter().all(Row::is_header) {
+        if self.rows.iter().map(Row::kind).all(|k| k == RowKind::Heading) {
             return Ok(());
         }
         let mut formatter = TableCellFormatter::new(writer);
@@ -103,7 +158,26 @@ impl<'cell> Table<'cell> {
 
 impl Default for Table<'_> {
     fn default() -> Self {
-        Self { rows: vec![], column_preferences: vec![], stripe: true }
+        Self {
+            rows: vec![],
+            title_separator: '-',
+            chain_separator: '-',
+            total_separator: '-',
+            grand_total_separator: '=',
+            column_preferences: vec![],
+            stripe: true,
+        }
+    }
+}
+
+impl From<&TableFormatCommand> for Table<'_> {
+    fn from(cmd: &TableFormatCommand) -> Self {
+        let mut table = Table::default();
+        table.set_title_separator(cmd.title_separator());
+        table.set_chain_separator(cmd.chain_separator());
+        table.set_total_separator(cmd.total_separator());
+        table.set_grand_total_separator(cmd.grand_total_separator());
+        table
     }
 }
 

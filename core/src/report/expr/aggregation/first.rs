@@ -13,11 +13,11 @@ use crate::report::expr::{ColumnValue, Expr, IdentifierContext};
 /// Always the first defined value.
 #[derive(Debug, PartialEq)]
 pub struct First<'h> {
-    arg: Expr<'h>,
+    arg: Expr,
     first: ColumnValue<'h>,
 }
 impl<'h> First<'h> {
-    pub fn new(args: Vec<Expr<'h>>) -> JournResult<Self> {
+    pub fn new(args: Vec<Expr>) -> JournResult<Self> {
         if args.len() != 1 {
             return Err(err!("Function 'first' requires one argument"));
         }
@@ -25,8 +25,11 @@ impl<'h> First<'h> {
         Ok(Self { arg: args.into_iter().next().unwrap(), first: ColumnValue::Undefined })
     }
 }
-impl<'h> AggState<'h> for First<'h> {
-    fn add(&mut self, context: &mut dyn IdentifierContext<'h>) -> JournResult<()> {
+impl<'h, 'a> AggState<'h, 'a> for First<'h>
+where
+    'h: 'a,
+{
+    fn add(&mut self, context: &mut dyn IdentifierContext<'h, 'a>) -> JournResult<()> {
         let val = self.arg.eval(context)?;
 
         if self.first.is_undefined() {

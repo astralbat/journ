@@ -5,6 +5,7 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
+use crate::configuration::{AccountFilter, Filter};
 use crate::metadata::Metadata;
 use crate::report::table2::fmt::CellFormatter;
 use crate::report::table2::{
@@ -15,7 +16,7 @@ use crate::unit::Unit;
 use smallvec::{SmallVec, smallvec};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
-use std::{cmp, fmt};
+use std::{cmp, fmt, iter};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum AccountType {
@@ -26,7 +27,7 @@ pub enum AccountType {
     Equity,
 }
 
-#[derive(Debug, Clone, Eq)]
+#[derive(Clone, Eq)]
 pub struct Account<'h> {
     /// The full name of the account, including any parents
     name: String,
@@ -100,6 +101,18 @@ impl<'h> Account<'h> {
         if self.is_virtual() { &self.name[1..self.name.len() - 1] } else { &self.name }
     }
 
+    /// Gets the last, non-parent part of the account name.
+    pub fn last_part(&self) -> &str {
+        match &self.parent {
+            Some(parent) => &self.name[parent.name.len() + 1..],
+            None => self.name.as_str(),
+        }
+    }
+
+    pub fn matches(&self, pattern: &str) -> bool {
+        AccountFilter::new(iter::once(pattern)).is_included(self)
+    }
+
     pub fn parent(&self) -> Option<&Arc<Account<'h>>> {
         self.parent.as_ref()
     }
@@ -169,8 +182,19 @@ impl<'h> Account<'h> {
         &self.metadata
     }
 
-    pub fn metadata(&self) -> impl Iterator<Item = &Metadata<'h>> {
-        self.metadata.iter() //.map(|m| m.get_or_init())
+    /// Gets an iterator over the parents of this account, starting with the top-most parent.
+    fn parents_from_root(&self) -> impl Iterator<Item = &Arc<Account<'h>>> {
+        let parents_to_root: SmallVec<[&Arc<Account<'h>>; 8]> =
+            iter::successors(self.parent.as_ref(), |parent| parent.parent.as_ref()).collect();
+        parents_to_root.into_iter().rev()
+    }
+
+    /// Gets an iterator over all metadata for this account and its parents, starting with the top-most parent
+    /// and working down.
+    pub fn metadata<'a>(&'a self) -> impl Iterator<Item = &'a Metadata<'h>> + 'a {
+        self.parents_from_root()
+            .flat_map(|parent| parent.metadata.iter())
+            .chain(self.metadata.iter())
     }
 
     /// Gets whether this account or a parent has the specified metadata key.
@@ -255,6 +279,12 @@ impl fmt::Display for Account<'_> {
     }
 }
 
+impl fmt::Debug for Account<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        f.pad(&self.name)
+    }
+}
+
 impl PartialEq for Account<'_> {
     fn eq(&self, other: &Self) -> bool {
         self.name() == other.name()
@@ -302,7 +332,12 @@ macro_rules! cell_from_account {
             }
 
             fn width(&self) -> CellWidth {
-                CellWidth::Unary(self.name().chars().count())
+                CellWidth::Leaf(self.name().chars().count())
+            }
+
+            fn height(&self) -> usize {
+                // An account cannot have a newline.
+                1
             }
         }
     };

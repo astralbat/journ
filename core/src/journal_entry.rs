@@ -21,6 +21,7 @@ use crate::posting::{Posting, PostingId};
 use crate::tree_id::TreeId;
 use crate::unit::Unit;
 use crate::{err, match_map};
+use itertools::Itertools;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::Zero;
 use rust_decimal_macros::*;
@@ -34,7 +35,8 @@ pub type EntryId = TreeId;
 /// An entry identifier that identifies entries in time order.
 #[derive(Debug, Clone, PartialEq, Eq, Ord, PartialOrd)]
 pub struct EntryDateId {
-    timestamp: i64,
+    timestamp_start: i64,
+    timestamp_end: i64,
     // Fall back to comparing the entry in node/parsed order
     id: TreeId,
 }
@@ -43,30 +45,37 @@ impl EntryDateId {
     pub fn date_range<R: RangeBounds<JDateTime>>(
         range: R,
     ) -> (Bound<EntryDateId>, Bound<EntryDateId>) {
-        let start = range
-            .start_bound()
-            .map(|d| EntryDateId { timestamp: d.datetime().timestamp(), id: TreeId::MIN });
-        let end = range
-            .end_bound()
-            .map(|d| EntryDateId { timestamp: d.datetime().timestamp(), id: TreeId::MAX_INLINE });
+        let start = range.start_bound().map(|d| EntryDateId {
+            timestamp_start: d.datetime().timestamp(),
+            timestamp_end: d.datetime().timestamp(),
+            id: TreeId::MIN,
+        });
+        let end = range.end_bound().map(|d| EntryDateId {
+            timestamp_start: d.datetime().timestamp(),
+            timestamp_end: d.datetime().timestamp(),
+            id: TreeId::MAX_INLINE,
+        });
         (start, end)
     }
 
-    pub fn timestamp(&self) -> i64 {
-        self.timestamp
+    pub fn timestamp_start(&self) -> i64 {
+        self.timestamp_start
+    }
+
+    pub fn timestamp_end(&self) -> i64 {
+        self.timestamp_end
     }
 
     pub fn with_id(&self, id: TreeId) -> Self {
-        Self { timestamp: self.timestamp, id }
+        Self { id, ..*self }
     }
 }
 
 impl<'h> From<&JournalEntry<'h>> for EntryDateId {
     fn from(entry: &JournalEntry<'h>) -> Self {
-        // We use the end date of the entry to signify the fact that it is by this date that the entries
-        // actions have taken effect.
         EntryDateId {
-            timestamp: entry.datetime_range.end().datetime().timestamp(),
+            timestamp_start: entry.datetime_range.start().datetime().timestamp(),
+            timestamp_end: entry.datetime_range.end().datetime().timestamp(),
             id: entry.id.clone(),
         }
     }
@@ -113,7 +122,7 @@ impl<'h> JournalEntry<'h> {
 
     /// Attaches this entry to the node specified by `node`.
     pub(super) fn attach(&mut self, node: &JournalNode) {
-        let id = node.id().branch();
+        let id = node.id().next_id();
         for pst in self.postings_mut() {
             pst.attach(&id);
         }
@@ -121,12 +130,13 @@ impl<'h> JournalEntry<'h> {
         self.id = id;
     }
 
+    /*
     fn detach(&mut self) {
         self.id = TreeId::new_root();
         for pst in self.postings_mut() {
             pst.detach();
         }
-    }
+    }*/
 
     pub fn datetime_range(&self) -> JDateTimeRange {
         self.datetime_range
@@ -146,7 +156,7 @@ impl<'h> JournalEntry<'h> {
 
     /// Gets the description trimmed
     pub fn description(&self) -> &'h str {
-        self.description.trim()
+        self.description.trim_start()
     }
 
     pub fn objects(&self) -> &Vec<EntryObject<'h>, &'h HerdAllocator<'h>> {
@@ -173,7 +183,7 @@ impl<'h> JournalEntry<'h> {
         match_map!(self.objects.last().unwrap(), EntryObject::Posting(p, _) => p).unwrap()
     }
 
-    pub fn postings(&self) -> impl DoubleEndedIterator<Item = &Posting<'h>> + '_ {
+    pub fn postings(&self) -> impl DoubleEndedIterator<Item = &Posting<'h>> + Clone + '_ {
         self.objects
             .iter()
             .filter_map(|obj| if let EntryObject::Posting(pst, _) = obj { Some(pst) } else { None })
@@ -206,11 +216,13 @@ impl<'h> JournalEntry<'h> {
             .any(|p| **p.account() == *account)
     }
 
-    /// Gets a unique list of all units (within postings) in this entry in order of occurrence.
-    pub fn units(&self) -> SmallVec<[&'h Unit<'h>; 2]> {
+    /// Gets a unique list of all account units used in the postings of this entry.
+    ///
+    /// This excludes units used in valuations.
+    pub fn units(&self) -> SmallVec<[&'h Unit<'h>; 4]> {
         let mut units = smallvec!();
 
-        for unit in self.postings().flat_map(|pst| pst.valued_amount().units()) {
+        for unit in self.postings().map(|pst| pst.unit()) {
             if !units.contains(&unit) {
                 units.push(unit);
             }
@@ -364,33 +376,25 @@ impl<'h> JournalEntry<'h> {
         self.description.contains(filter)
     }
 
-    pub fn matches_account_filter(&self, filter: &str) -> bool {
-        for pst in self.postings() {
-            if pst.matches_account_filter(filter) {
-                return true;
-            }
-        }
-        false
+    pub fn flows(&self) -> impl Flows<'h> {
+        self.filtered_flows(|_pst| Ok(true)).unwrap()
     }
 
-    pub fn flows(&self) -> impl Flows<'h> {
+    pub fn filtered_flows<'a, F>(&'a self, mut filter: F) -> JournResult<impl Flows<'h>>
+    where
+        F: FnMut(&'a Posting<'h>) -> JournResult<bool>,
+    {
         let mut flows: SmallVec<[Flow<'h>; 4]> = smallvec![];
         for pst in self.postings() {
-            // Create a new flow for the posting without any pretext.
+            if !filter(pst)? {
+                continue;
+            }
             let va = pst.valued_amount().clone();
             flows.push(Flow::new(Some(pst.account().clone()), va));
-
-            /*
-            match flows.iter_mut().find(|f| {
-                f.account_type() == pst.account().account_type() && f.unit() == pst.unit()
-            }) {
-                Some(flow) => *flow = (&*flow + new_flow).unwrap(),
-                None => flows.push(new_flow),
-            }*/
         }
         // A flow of net 0 isn't a flow.
-        flows.retain(|f| f.amount() != 0);
-        flows
+        //flows.retain(|f| f.amount() != 0);
+        Ok(flows)
     }
 
     /// Checks and creates a new modified entry with derived entries and elided postings.
@@ -679,43 +683,58 @@ impl<'h> JournalEntry<'h> {
         err!(BlockContextError::new(context, msg))
     }
 
-    /// Gets whether the two entries are considered the same.
+    /// Gets whether the two entries are considered duplicates. During reporting, duplicate entries
+    /// are by default, skipped.
     ///
     /// At present, two entries are considered the same when they have:
-    /// * the same date and time
+    /// * this date range contains the other date range
     /// * different parent nodes
-    /// * the same postings/metadata
+    /// * overlapping postings, metadata where one is a subset of another (must be consitent with date).
     ///
     /// This should give a good compromise in being:
     /// * `false` for identical entries in the same file (repeated transactions on the same day).
     /// * `true` for identical entries in different files (allowing separate files for separate accounts,
-    /// and each file to be complete).
+    ///   and each file to be complete).
     ///
     /// Possible future behaviour could allow the user to configure duplicate behaviour:
     /// * No duplicate detection - all entries are unique
     /// * Exact (ignoring desc) for differing nodes (current behaviour)
     /// * Always exact everywhere (including desc).
     /// * Metadata Value equality (the two entries may need merging for postings/metadata).
+    ///
     /// Also, if duplicate behaviour is being configured, this may need to be set before any entries
     /// are parsed to avoid contradictions in branches.
-    pub fn is_duplicate_of(&self, other: &Self) -> bool {
-        if self.datetime_range() != other.datetime_range() {
-            return false;
-        }
+    pub fn is_super_duplicate_of(&self, other: &Self) -> bool {
         if self.id.parent() == other.id.parent() {
             return false;
         }
-
-        let mut self_objs: SmallVec<[&EntryObject; 2]> =
-            self.objects.iter().filter(|obj| !matches!(obj, EntryObject::Comment(_))).collect();
-        let mut other_objs: SmallVec<[&EntryObject; 2]> =
-            other.objects.iter().filter(|obj| !matches!(obj, EntryObject::Comment(_))).collect();
-        self_objs.sort();
-        other_objs.sort();
-        if self_objs == other_objs {
-            return true;
+        if !self.datetime_range.contains(&other.datetime_range) {
+            return false;
         }
-        false
+
+        let self_objs: SmallVec<[&EntryObject; 2]> =
+            self.objects.iter().filter(|obj| !matches!(obj, EntryObject::Comment(_))).collect();
+        let other_objs: SmallVec<[&EntryObject; 2]> =
+            other.objects.iter().filter(|obj| !matches!(obj, EntryObject::Comment(_))).collect();
+        // If there are no postings in other, we don't say we are a super duplicate.
+        if self_objs.len() < other_objs.len() || other_objs.is_empty() {
+            return false;
+        }
+        other_objs.iter().all(|oth_obj| {
+            for self_obj in &self_objs {
+                let found = match (self_obj, oth_obj) {
+                    (EntryObject::Metadata(s_m), EntryObject::Metadata(o_m)) => s_m == o_m,
+                    (EntryObject::Posting(self_pst, _), EntryObject::Posting(oth_pst, _)) => {
+                        self_pst.contains(oth_pst)
+                    }
+                    _ => false,
+                };
+                if found {
+                    return true;
+                }
+            }
+            false
+        })
     }
 
     #[cfg(test)]
@@ -726,16 +745,15 @@ impl<'h> JournalEntry<'h> {
 
 impl Clone for JournalEntry<'_> {
     fn clone(&self) -> Self {
-        let mut cloned = Self {
+        Self {
+            // The id remains intact so that it can be used to replace self later.
             id: self.id.clone(),
             text_block: None,
             datetime_range: self.datetime_range,
             objects: self.objects.clone(),
             description: self.description,
             config: self.config.clone(),
-        };
-        cloned.detach();
-        cloned
+        }
     }
 }
 
@@ -812,7 +830,10 @@ impl fmt::Debug for JournalEntry<'_> {
 impl BlockObject for JournalEntry<'_> {
     fn write(&self, buf: &mut TextBlockBuf, config: Option<&Configuration>) {
         self.datetime_range.write_for_entry(buf, &self.config).unwrap();
-        write!(buf, "{}", self.description).unwrap();
+        // Description is optional
+        if !self.description.is_empty() {
+            write!(buf, "  {}", self.description).unwrap();
+        }
         for obj in self.objects.iter() {
             match obj {
                 EntryObject::Comment(s) => {
