@@ -35,7 +35,7 @@ impl<'h> LinearSystemValuer<'h> {
     /// Only the first of X = Y pair shall be added to the system to prevent price contradictions
     /// later.
     pub fn new(
-        valued_amounts: impl Iterator<Item = (Amount<'h>, Amount<'h>)>,
+        valued_amounts: impl Iterator<Item=(Amount<'h>, Amount<'h>)>,
     ) -> LinearSystemValuer<'h> {
         // Add valuations, with equations rearranged to be Amount - Value = 0.
         let data = Vec::with_capacity(8);
@@ -64,14 +64,14 @@ impl<'h> LinearSystemValuer<'h> {
                     Ok(_) => {}
                     Err(ve) => match ve {
                         ValuationError::Undetermined(err)
-                            if err.contains_msg(&err!(VALUATION_NOT_WITHIN_TOLERANCE)) =>
-                        {
-                            return Err(err!(
+                        if err.contains_msg(&err!(VALUATION_NOT_WITHIN_TOLERANCE)) =>
+                            {
+                                return Err(err!(
                                 "Inconsistent valuations between {} and {}",
                                 pst.unit(),
                                 value_unit
                             ));
-                        }
+                            }
                         ValuationError::EvalFailure(err) => return Err(err),
                         _ => {}
                     },
@@ -126,6 +126,10 @@ impl<'h> LinearSystemValuer<'h> {
     /// Adds an amount/value mapping to the system. If the mapping already exists
     /// it is added to.
     pub fn add_value(&mut self, value: (Amount<'h>, Amount<'h>)) {
+        self.add_value_with_epsilon(value, value.1.epsilon());
+    }
+
+    fn add_value_with_epsilon(&mut self, value: (Amount<'h>, Amount<'h>), value_epsilon: Decimal) {
         // Don't add zeros
         if value.0.is_zero() && value.1.is_zero() {
             return;
@@ -146,7 +150,7 @@ impl<'h> LinearSystemValuer<'h> {
                     // rounding uncertainty in this equation comes from the stated valuation,
                     // whose rounding errors are additive when summing independently-rounded
                     // valuations.
-                    self.epsilon[val_idx] += value.1.epsilon();
+                    self.epsilon[val_idx] += value_epsilon;
                 }
             }
             None => {
@@ -167,7 +171,7 @@ impl<'h> LinearSystemValuer<'h> {
                 self.data[last_row + val_col] = value.1.quantity() * dec!(-1);
                 // The posted amount is an exact, transacted quantity; only the stated valuation
                 // carries rounding uncertainty (see the merge branch above for more detail).
-                self.epsilon[last_row + val_col] = value.1.epsilon();
+                self.epsilon[last_row + val_col] = value_epsilon;
 
                 // Keep the last row available for the Valuer impl.
                 self.data.extend((0..self.units.len()).map(|_| Decimal::zero()));
@@ -180,7 +184,7 @@ impl<'h> LinearSystemValuer<'h> {
     /// Adds a zero sum constraint to the valuer. This extra information can be useful in solving the linear system.
     /// the `amounts` should either sum to zero or the total considered value of them are zero if they are in more
     /// than one kind of unit.
-    pub fn add_zero_sum(&mut self, amounts: impl Iterator<Item = Amount<'h>> + Clone) {
+    pub fn add_zero_sum(&mut self, amounts: impl Iterator<Item=Amount<'h>> + Clone) {
         // Pre-total the amounts in Decimal to make more accurate
         let mut total_amounts = SmallVec::<[Amount<'h>; 4]>::new();
         for amount in amounts.clone() {
@@ -215,8 +219,8 @@ impl<'h> LinearSystemValuer<'h> {
             self.connectivity.union(a, b);
         }
 
-        // We still iterate via `amounts` rather than `total_amounts` because we want to increase epsilon values
-        // for each amount. Rounding errors are additive.
+        // Posted quantities are exact transactions. Rounding uncertainty for primary amounts that
+        // represent a quoted value is added by `From<&JournalEntry>` below.
         for (unit_col, amount) in total_amounts
             .iter()
             .filter(|a| !a.is_zero())
@@ -231,7 +235,6 @@ impl<'h> LinearSystemValuer<'h> {
             for (j, i) in self.row_indices(self.row_count).enumerate() {
                 if j == unit_col {
                     self.data[i] += amount.quantity();
-                    self.epsilon[i] += amount.epsilon();
                 }
             }
         }
@@ -254,17 +257,33 @@ impl<'h> LinearSystemValuer<'h> {
 
 impl<'h> From<&JournalEntry<'h>> for LinearSystemValuer<'h> {
     fn from(entry: &JournalEntry<'h>) -> Self {
-        // Iterator of all the valuations we are using.
-        let total_valuations = move || {
-            entry.balanced_postings().flat_map(move |p| {
-                p.valuations().filter_map(move |v| {
-                    if v.is_zero() { None } else { Some((p.amount(), v.value())) }
-                })
-            })
-        };
-
-        let mut vav = LinearSystemValuer::new(total_valuations());
+        let mut vav = LinearSystemValuer::default();
+        for posting in entry.balanced_postings() {
+            for valuation in
+                posting.posting_valuations().filter(|valuation| !valuation.value().is_zero())
+            {
+                let value = valuation.value_with_primary(posting.amount());
+                let value_epsilon = if valuation.is_unit() {
+                    valuation.expr().epsilon() * posting.amount().quantity().abs()
+                } else {
+                    value.epsilon()
+                };
+                vav.add_value_with_epsilon((posting.amount(), value), value_epsilon);
+            }
+        }
         vav.add_zero_sum(entry.balanced_postings().map(|p| p.amount()));
+        if let Some(zero_sum_row) = vav.zero_sum_row {
+            for posting in entry.balanced_postings() {
+                let is_quoted_elsewhere = entry
+                    .balanced_postings()
+                    .flat_map(|posting| posting.posting_valuations())
+                    .any(|valuation| valuation.unit() == posting.amount().unit());
+                if is_quoted_elsewhere {
+                    let i = zero_sum_row * vav.units.len() + vav.unit_col(posting.amount().unit());
+                    vav.epsilon[i] += posting.amount().epsilon();
+                }
+            }
+        }
         vav
     }
 }
@@ -293,6 +312,11 @@ impl<'h> Valuer<'h> for LinearSystemValuer<'h> {
         }
 
         let base_unit = amount.unit();
+        if self.zero_sum_row.is_none()
+            && !self.connectivity.connected(self.unit_col(base_unit), self.unit_col(quote_unit))
+        {
+            return Err(ValuationError::Undetermined(err!(NOT_DERIVABLE)));
+        }
 
         // The last row is special in that 1.0 is set against the column of the base_curr and
         // 0 for all others. This matches the 1.0 in the b vector and defines the system's solution to be in terms of
@@ -340,7 +364,7 @@ impl<'h> Valuer<'h> for LinearSystemValuer<'h> {
 
         // If the system is not full rank, we'll have to remove some columns below.
         // This means the zero sum row is no longer valid and will have to be removed.
-        let res = analyze_and_solve(&mut A, &mut b, &epsilon)?;
+        let res = analyze_and_solve(&mut A, &mut b, &epsilon, self.zero_sum_row)?;
 
         if let Some(solution) = res.solution {
             // The original row positons may have been reordered during solving so
@@ -536,6 +560,7 @@ fn analyze_and_solve(
     b: &mut [Decimal],
     //epsilon: &[SmallVec<[Decimal; 4]>],
     epsilon: &[Vec<Decimal>],
+    zero_sum_row: Option<usize>,
 ) -> Result<MatrixResult, ValuationError> {
     // Keep track of the original row indices so we can validate accuracy later.
     let original_a = a.iter().cloned().collect::<SmallVec<[_; 8]>>();
@@ -560,13 +585,14 @@ fn analyze_and_solve(
         // variable, so we seed it as the starting error for that row and propagate it through
         // the identical sequence of eliminations used to derive `x`.
         //
-        // Rows that never became a pivot (redundant/check rows, such as a zero-sum/debits-equal-
-        // credits constraint) are seeded with zero so their local uncertainty is not propagated
-        // through the eliminations. Their local uncertainty is added back after propagation when
-        // checking their residual, alongside the uncertainty inherited from the pivot rows.
+        // The zero-sum row has its own rounding budget. Seed it even when redundant so the
+        // tolerance survives the same eliminations as the solution.
         let is_pivot_row: SmallVec<[bool; 8]> = {
             let mut flags = smallvec![false; original_a.len()];
             for &row_id in row_ids.iter().take(rank) {
+                flags[row_id] = true;
+            }
+            if let Some(row_id) = zero_sum_row {
                 flags[row_id] = true;
             }
             flags
@@ -600,8 +626,8 @@ fn analyze_and_solve(
         // identically), giving each original row's propagated tolerance in its final position.
         let mut tolerance = vec![Decimal::ZERO; original_a.len()];
         for (pos, &row_id) in prop_row_ids.iter().enumerate() {
-            tolerance[row_id] = prop_rhs[pos]
-                + if is_pivot_row[row_id] { Decimal::ZERO } else { local_tolerance[row_id] };
+            tolerance[row_id] =
+                prop_rhs[pos] + if is_pivot_row[row_id] { Decimal::ZERO } else { local_tolerance[row_id] };
         }
 
         check_tolerance(
@@ -634,7 +660,6 @@ fn check_tolerance(
         // Decimal still has to round during calculations, so we need to set a minimum tolerance to avoid false positives.
         let min_abs_tolerance = Decimal::new(1, 12);
         let tolerance = tolerance[row_id].max(min_abs_tolerance);
-
         if residual.abs() > tolerance {
             return Err(ValuationError::Undetermined(err!(VALUATION_NOT_WITHIN_TOLERANCE)));
         }
@@ -734,8 +759,34 @@ mod test {
         // The unit value is rounded.
         let res = entry(indoc! {r#"
             2000-01-01  Entry 1
-                ACC_A  -100 A @ £1.12345
+                ACC_A  -100 A @ £1.23345
                 ACC_B  £123.35
+            "#});
+        assert!(res.is_ok());
+
+        // These two outside the rounding tolerance
+        let res = entry(indoc! {r#"
+            2000-01-01  Entry 1
+                ACC_A  -100 A @ £1.23345
+                ACC_B  £123.33
+            "#});
+        assert!(res.is_err());
+        let res = entry(indoc! {r#"
+            2000-01-01  Entry 1
+                ACC_A  -100 A @ £1.23345
+                ACC_B  £123.36
+            "#});
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_tolerance_with_multiple_vals() {
+        // The unit value is rounded.
+        let res = entry(indoc! {r#"
+            2000-01-01  Entry 1
+                ACC_A  -100 A @ £1.23345 @@ $100.00
+                ACC_B  £30.84 @@ $25.00
+                ACC_C  £92.51 @@ $75.00
             "#});
         assert!(res.is_ok());
     }
