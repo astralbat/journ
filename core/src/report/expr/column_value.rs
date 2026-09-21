@@ -506,28 +506,15 @@ impl PartialOrd for ColumnValue<'_> {
     }
 }
 
-/*
-impl<'a> From<ColumnValue<'a>> for Cell<'a> {
-    fn from(value: ColumnValue<'a>) -> Self {
-        match value {
-            ColumnValue::Undefined => Cell::from("UNDEFINED"),
-            ColumnValue::Boolean(b) => Cell::from(b.to_string()),
-            ColumnValue::String(s) => Cell::from(s.to_string()),
-            ColumnValue::StringRef(s) => Cell::from(s),
-            ColumnValue::Description(s) => Cell::from(s),
-            ColumnValue::Date(date) => Cell::from(date),
-            ColumnValue::Datetime(dt) => Cell::from(dt),
-            ColumnValue::Account(acc) => Cell::from(acc.to_string()),
-            ColumnValue::Unit(unit) => Cell::from(unit.to_string()),
-            ColumnValue::Amount(amount) => Cell::from(amount),
-            ColumnValue::ValuedAmount(va) => Cell::from(va),
-            ColumnValue::List(values) => Cell::from(format!(
-                "[{}]",
-                values.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(", ")
-            )),
-        }
+impl<'h, C> FromIterator<C> for ColumnValue<'h>
+where
+    C: Into<ColumnValue<'h>>,
+{
+    fn from_iter<T: IntoIterator<Item = C>>(iter: T) -> Self {
+        let vec: Vec<ColumnValue> = iter.into_iter().map(|c| c.into()).collect();
+        ColumnValue::List(vec)
     }
-}*/
+}
 
 impl<'h, A: Amounts<'h>> From<A> for ColumnValue<'h> {
     fn from(amounts: A) -> Self {
@@ -664,13 +651,6 @@ impl<'h> IntoIterator for ColumnValue<'h> {
             ColumnValue::List(v) => v.into_iter(),
             other => vec![other].into_iter(),
         }
-    }
-}
-
-impl<'h, V: Into<ColumnValue<'h>>> FromIterator<V> for ColumnValue<'h> {
-    fn from_iter<T: IntoIterator<Item = V>>(iter: T) -> Self {
-        let vec: Vec<ColumnValue> = iter.into_iter().map(|v| v.into()).collect();
-        if vec.len() == 1 { vec.into_iter().next().unwrap() } else { ColumnValue::List(vec) }
     }
 }
 

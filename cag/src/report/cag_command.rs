@@ -39,7 +39,6 @@ pub struct CagCommand {
     pub(super) head: Option<usize>,
     pub(super) tail: Option<usize>,
     pub(super) group_by: Option<String>,
-    pub(super) group_deals_by_date: bool,
     pub(super) order_by_spec: Option<String>,
     pub(super) order_descending: bool,
     pub(super) output_yaml: bool,
@@ -69,10 +68,6 @@ impl CagCommand {
     pub fn column_spec(&self) -> &str {
         self.column_spec.as_deref().unwrap_or(
             "DealDate.Start.Date as Date, Sum(PooledAmount) as Amount, Sum(netProceeds) as \"Net Proceeds\", Sum(Expenses) as \"Expenses\", sum(actualCost) as \"Actual Cost\", sum(match.gain) as Gain/-Loss")
-    }
-
-    pub fn group_deals_by_date(&self) -> bool {
-        self.group_deals_by_date
     }
 
     pub fn create_table<'cell>(&self) -> Table<'cell> {
@@ -326,11 +321,6 @@ impl CagCommand {
             },
             head: self.head.or(other.head),
             tail: self.tail.or(other.tail),
-            group_deals_by_date: if self.group_deals_by_date {
-                !other.group_deals_by_date
-            } else {
-                other.group_deals_by_date
-            },
             order_descending: if self.order_descending {
                 !other.order_descending
             } else {

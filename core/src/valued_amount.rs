@@ -655,6 +655,14 @@ impl<'h> ValuedAmount<'h> {
         self
     }
 
+    /// Gets whether this valued amount is considered equal in value to another valued amount.
+    pub fn eq_abs_value(&self, other: &Self) -> bool {
+        ValuedAmount::common_units(&[self, other])
+            .next()
+            .map(|u| self.value_in(u).unwrap().abs() == other.value_in(u).unwrap().abs())
+            .unwrap_or(false)
+    }
+
     /// Gets an iterator of all the common units between multiple valued amounts, in order of [ValuedAmount::units()].
     /// # Examples
     /// ```

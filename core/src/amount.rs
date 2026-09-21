@@ -48,7 +48,7 @@ impl Sign {
 ///
 /// They are the 'money' values held by [Posting]s. Amounts within `Postings` are generally either credits
 /// or debits with positive `Amounts` being Debits and negative `Amounts` being credits.
-#[derive(Copy, Clone, PartialEq)]
+#[derive(Copy, Clone)]
 pub struct Amount<'h> {
     /// The unit of the amount. This is the currency or other unit of the amount.
     unit: &'h Unit<'h>,
@@ -60,8 +60,11 @@ impl<'h> Amount<'h> {
     pub const MAX_SCALE: u32 = 27;
 
     pub fn new<D: Into<Decimal>>(unit: &'h Unit<'h>, quantity: D) -> Amount<'h> {
-        let amount = quantity.into().normalize();
-        Amount { unit, quantity: amount }
+        // Deliberately not normalized: the scale as provided is preserved so that it can be used
+        // as a signal of the accuracy/precision the caller intended (see `Amount::epsilon()`).
+        // `Decimal`'s `PartialEq`/`Hash`/`Ord` are already scale-invariant, so this does not affect
+        // equality or ordering.
+        Amount { unit, quantity: quantity.into() }
     }
 
     /// Gets a special amount that has is always zero and has no unit.
@@ -492,7 +495,13 @@ impl<'h> Ord for Amount<'h> {
     }
 }
 
-impl<'h, T> PartialEq<T> for Amount<'h>
+impl<'a, 'b> PartialEq<Amount<'b>> for Amount<'a> {
+    fn eq(&self, other: &Amount<'b>) -> bool {
+        self.unit == other.unit && self.quantity == other.quantity
+    }
+}
+
+impl<'h, T> PartialEq<T> for Amount<'_>
 where
     T: Into<Decimal> + Copy,
 {
@@ -501,7 +510,7 @@ where
     }
 }
 
-impl<'h, T> PartialOrd<T> for Amount<'h>
+impl<'h, T> PartialOrd<T> for Amount<'_>
 where
     T: Into<Decimal> + Copy,
 {

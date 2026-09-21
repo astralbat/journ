@@ -291,6 +291,12 @@ impl PartialEq for Account<'_> {
     }
 }
 
+impl PartialEq<str> for Account<'_> {
+    fn eq(&self, other: &str) -> bool {
+        self.name() == other
+    }
+}
+
 impl Ord for Account<'_> {
     fn cmp(&self, other: &Self) -> cmp::Ordering {
         self.name().cmp(other.name())

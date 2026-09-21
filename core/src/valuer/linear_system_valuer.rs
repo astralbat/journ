@@ -39,7 +39,6 @@ impl<'h> LinearSystemValuer<'h> {
     ) -> LinearSystemValuer<'h> {
         // Add valuations, with equations rearranged to be Amount - Value = 0.
         let data = Vec::with_capacity(8);
-        //data.extend((0..units.len()).map(|_| 0.0));
         let mut vav = LinearSystemValuer {
             data,
             epsilon: SmallVec::<[Decimal; 16]>::new(),
@@ -55,18 +54,44 @@ impl<'h> LinearSystemValuer<'h> {
         vav
     }
 
+    /// Checks the entry for inconsistent valuations - valuations not within rounding tolerances of the precision of
+    /// the values provided.
+    pub fn check(entry: &JournalEntry<'h>) -> JournResult<()> {
+        let mut vav = LinearSystemValuer::from(entry);
+        for pst in entry.balanced_postings() {
+            for value_unit in pst.value_units() {
+                match vav.value(value_unit, pst.amount()) {
+                    Ok(_) => {}
+                    Err(ve) => match ve {
+                        ValuationError::Undetermined(err)
+                            if err.contains_msg(&err!(VALUATION_NOT_WITHIN_TOLERANCE)) =>
+                        {
+                            return Err(err!(
+                                "Inconsistent valuations between {} and {}",
+                                pst.unit(),
+                                value_unit
+                            ));
+                        }
+                        ValuationError::EvalFailure(err) => return Err(err),
+                        _ => {}
+                    },
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn ensure_has_unit(&mut self, unit: &'h Unit<'h>) -> usize {
         match self.units.iter().position(|u| u == &unit) {
             Some(pos) => pos,
             None => {
                 let units_len = self.units.len();
                 self.units.push(unit);
-                self.epsilon.push(Decimal::zero());
 
                 let mut i = units_len;
                 while i <= self.data.len() {
                     self.data.insert(i, Decimal::zero());
-                    //self.epsilon.insert(i, Decimal::zero());
+                    self.epsilon.insert(i, Decimal::zero());
                     i += units_len + 1;
                     if units_len == 0 {
                         break;
@@ -110,15 +135,18 @@ impl<'h> LinearSystemValuer<'h> {
 
         match self.find_mapping(value) {
             Some(row) => {
+                let amount_idx = row * self.units.len() + amount_col;
+                let val_idx = row * self.units.len() + val_col;
                 // Don't add if the addition would make the row zero. This makes it useless.
-                if self.data[row * self.units.len() + amount_col] + value.0.quantity() != dec!(0) {
-                    self.data[row * self.units.len() + amount_col] += value.0.quantity();
-                    self.data[row * self.units.len() + val_col] += value.1.quantity() * dec!(-1);
-                    /*
-                    self.epsilon[row * self.units.len() + amount_col] +=
-                        value.0.epsilon().max(value.0.unit().epsilon());
-                    self.epsilon[row * self.units.len() + val_col] +=
-                        value.1.epsilon().max(value.1.unit().epsilon());*/
+                if self.data[amount_idx] + value.0.quantity() != dec!(0) {
+                    self.data[amount_idx] += value.0.quantity();
+                    self.data[val_idx] += value.1.quantity() * dec!(-1);
+                    // The posted amount is treated as an exact, transacted quantity (not a
+                    // rounded measurement), so it contributes no epsilon of its own here. All
+                    // rounding uncertainty in this equation comes from the stated valuation,
+                    // whose rounding errors are additive when summing independently-rounded
+                    // valuations.
+                    self.epsilon[val_idx] += value.1.epsilon();
                 }
             }
             None => {
@@ -130,28 +158,23 @@ impl<'h> LinearSystemValuer<'h> {
                 self.data[last_row..last_row + self.units.len()]
                     .iter_mut()
                     .for_each(|c| *c = Decimal::zero());
-                /*
                 self.epsilon[last_row..last_row + self.units.len()]
                     .iter_mut()
-                    .for_each(|c| *c = Decimal::zero());*/
+                    .for_each(|c| *c = Decimal::zero());
 
                 // Make the value negative so that the equation is Amount + Value = 0.
                 self.data[last_row + amount_col] = value.0.quantity();
                 self.data[last_row + val_col] = value.1.quantity() * dec!(-1);
-                /*
-                self.epsilon[last_row + amount_col] =
-                    value.0.epsilon().max(value.0.unit().epsilon());
-                self.epsilon[last_row + val_col] = value.1.epsilon().max(value.1.unit().epsilon());
+                // The posted amount is an exact, transacted quantity; only the stated valuation
+                // carries rounding uncertainty (see the merge branch above for more detail).
+                self.epsilon[last_row + val_col] = value.1.epsilon();
 
-                 */
                 // Keep the last row available for the Valuer impl.
                 self.data.extend((0..self.units.len()).map(|_| Decimal::zero()));
-                //self.epsilon.extend((0..self.units.len()).map(|_| Decimal::zero()));
+                self.epsilon.extend((0..self.units.len()).map(|_| Decimal::zero()));
                 self.row_count += 1;
             }
         }
-        self.epsilon[amount_col] += value.0.epsilon().max(value.0.unit().epsilon());
-        self.epsilon[val_col] += value.1.epsilon().max(value.1.unit().epsilon());
     }
 
     /// Adds a zero sum constraint to the valuer. This extra information can be useful in solving the linear system.
@@ -208,14 +231,14 @@ impl<'h> LinearSystemValuer<'h> {
             for (j, i) in self.row_indices(self.row_count).enumerate() {
                 if j == unit_col {
                     self.data[i] += amount.quantity();
-                    self.epsilon[unit_col] += amount.epsilon().max(amount.unit().epsilon());
+                    self.epsilon[i] += amount.epsilon();
                 }
             }
         }
 
         // Keep the last row available for the Valuer impl.
         self.data.extend((0..self.units.len()).map(|_| Decimal::zero()));
-        //self.epsilon.extend((0..self.units.len()).map(|_| Decimal::zero()));
+        self.epsilon.extend((0..self.units.len()).map(|_| Decimal::zero()));
         self.zero_sum_row = Some(self.row_count);
         self.row_count += 1;
     }
@@ -259,7 +282,8 @@ impl Default for LinearSystemValuer<'_> {
     }
 }
 
-const NOT_DERIVABLE: &str = "Not derivable";
+static NOT_DERIVABLE: &str = "Not derivable";
+static VALUATION_NOT_WITHIN_TOLERANCE: &str = "Inconsistent values";
 
 impl<'h> Valuer<'h> for LinearSystemValuer<'h> {
     fn value(&mut self, quote_unit: &'h Unit<'h>, amount: Amount<'h>) -> ValuationResult<'h> {
@@ -270,100 +294,53 @@ impl<'h> Valuer<'h> for LinearSystemValuer<'h> {
 
         let base_unit = amount.unit();
 
-        // Ensure the quote unit is part of the system
-        let quote_col = self.unit_col(quote_unit);
-        let base_col = self.unit_col(base_unit);
-
-        /*
-        if !self.connectivity.connected(base_col, quote_col) {
-            return Err(ValuationError::Undetermined(err!(NOT_CONNECTED)));
-        }*/
-
         // The last row is special in that 1.0 is set against the column of the base_curr and
         // 0 for all others. This matches the 1.0 in the b vector and defines the system's solution to be in terms of
         // the base unit.
         for (j, i) in self.row_indices(self.row_count).enumerate() {
             self.data[i] = if self.unit_col(base_unit) == j { dec!(1.0) } else { dec!(0.0) };
-            //self.epsilon[i] = Decimal::zero();
+            self.epsilon[i] = Decimal::zero();
         }
 
         #[allow(non_snake_case)]
         let mut A = vec![];
-        //let mut epsilon: SmallVec<[SmallVec<[Decimal; 4]>; 4]> = smallvec![];
+        let mut epsilon = vec![];
         // Get the group id of the base_unit. We'll only include units that share
         // the same group in our linear system.
-        //let base_root = self.connectivity.find(base_col);
         let mut a_base_col = 0;
         let mut a_quote_col = 0;
         for i in 0..self.row_count + 1 {
             let mut row = vec![];
-            //let mut epsilon_row: SmallVec<[Decimal; 4]> = smallvec![];
-            for j in (0..self.units.len())
-            /*.filter(|&u| self.connectivity.find(u) == base_root)*/
-            {
+            let mut epsilon_row = vec![];
+            for j in (0..self.units.len()) {
                 if self.units[j] == base_unit {
                     a_base_col = row.len();
                 } else if self.units[j] == quote_unit {
                     a_quote_col = row.len();
                 }
                 row.push(self.data[i * self.units.len() + j]);
-                //epsilon_row.push(self.epsilon[i * self.units.len() + j]);
+                epsilon_row.push(self.epsilon[i * self.units.len() + j]);
             }
             A.push(row);
-            //epsilon.push(epsilon_row);
+            epsilon.push(epsilon_row);
         }
         let mut b = vec![Decimal::zero(); A.len()];
         b[A.len() - 1] = Decimal::one();
 
-        /*
-        let mut epsilon = self
-            .units
-            .iter()
-            .map(|u| {
-                let unit_col = self.unit_col(u);
-                let max_data_epsilon = A
-                    .split_last()
-                    .unwrap()
-                    .1
-                    .iter()
-                    .map(|row| {
-                        if row[unit_col] != Decimal::zero() {
-                            u.with_quantity(row[unit_col]).epsilon()
-                        } else {
-                            Decimal::MIN
-                        }
-                    })
-                    .max()
-                    .unwrap();
-                max_data_epsilon.max(u.epsilon())
-            })
-            .collect::<Vec<_>>();
-         */
-        let mut epsilon = self.epsilon.clone();
-
         // Reorder the columns of A so that the units of interest are first. This ensures they are retained
         // when we retain only those columns that are linearly independent.
         swap_columns(&mut A, a_base_col, 0);
-        epsilon.swap(a_base_col, 0);
+        swap_columns(&mut epsilon, a_base_col, 0);
         if a_quote_col == 0 {
             a_quote_col = a_base_col
         }
         swap_columns(&mut A, a_quote_col, 1);
-        epsilon.swap(a_quote_col, 1);
+        swap_columns(&mut epsilon, a_quote_col, 1);
         a_quote_col = 1;
 
         // If the system is not full rank, we'll have to remove some columns below.
         // This means the zero sum row is no longer valid and will have to be removed.
         let res = analyze_and_solve(&mut A, &mut b, &epsilon)?;
-        /*if res.rank < self.units.len()
-            && let Some(_zsr) = self.zero_sum_row
-        {
-            // Not sure if this can happen
-            unreachable!("Unexpected rank < units.len()");
-            /*
-            A.remove(zsr);
-            b.remove(0);*/
-        }*/
 
         if let Some(solution) = res.solution {
             // The original row positons may have been reordered during solving so
@@ -473,19 +450,29 @@ pub struct MatrixResult {
     pub rank: usize,
 }
 
+/// Performs Gauss-Jordan elimination (with partial pivoting) on `a`, reducing it to reduced row
+/// echelon form in place. `rhs` is carried alongside `a` and updated with the same linear
+/// combinations used to reduce `a`, so that `rhs[i]` for a pivot row ends up holding the solved
+/// value for the variable that row pivoted on. `row_ids` is permuted in lockstep with the rows
+/// so that callers can map reduced row positions back to their original row.
+///
+/// When `worst_case` is `true`, `rhs` is treated as a vector of worst-case error bounds rather
+/// than exact values: multiplications/accumulations that would normally allow errors of opposite
+/// sign to cancel are instead done with absolute values, since two independent measurement
+/// errors can't be assumed to offset each other. This lets the exact same elimination steps be
+/// replayed to propagate per-row error budgets through to the solved variables (and to any
+/// redundant/check rows), rather than just the nominal solution.
+///
+/// Returns the rank of `a`.
 #[allow(clippy::needless_range_loop)]
-fn analyze_and_solve(
+fn eliminate(
     a: &mut [Vec<Decimal>],
-    b: &mut [Decimal],
-    epsilon: &[Decimal],
-) -> Result<MatrixResult, ValuationError> {
-    // Keep track of the original row indices so we can validate accuracy later.
-    let original_a = a.iter().cloned().collect::<SmallVec<[_; 8]>>();
-    let original_b = b.iter().cloned().collect::<SmallVec<[_; 8]>>();
-    let mut row_ids: SmallVec<[usize; 8]> = (0..a.len()).collect();
-
+    rhs: &mut [Decimal],
+    row_ids: &mut [usize],
+    worst_case: bool,
+) -> usize {
     if a.is_empty() || a[0].is_empty() {
-        return Ok(MatrixResult { solution: None, rank: 0 });
+        return 0;
     }
 
     let rows = a.len();
@@ -510,7 +497,7 @@ fn analyze_and_solve(
         }
 
         a.swap(pivot_row, best);
-        b.swap(pivot_row, best);
+        rhs.swap(pivot_row, best);
         row_ids.swap(pivot_row, best);
 
         // Normalize pivot row (crucial for solution extraction)
@@ -518,14 +505,19 @@ fn analyze_and_solve(
         for k in j..cols {
             a[pivot_row][k] /= pivot;
         }
-        b[pivot_row] /= pivot;
+        rhs[pivot_row] =
+            if worst_case { rhs[pivot_row] / pivot.abs() } else { rhs[pivot_row] / pivot };
 
         // Eliminate column in all OTHER rows
         for i in 0..rows {
             if i != pivot_row {
                 let factor = a[i][j];
-                let b_pivot = b[pivot_row];
-                b[i] -= factor * b_pivot;
+                let rhs_pivot = rhs[pivot_row];
+                if worst_case {
+                    rhs[i] += factor.abs() * rhs_pivot;
+                } else {
+                    rhs[i] -= factor * rhs_pivot;
+                }
                 for k in j..cols {
                     let a_pivot = a[pivot_row][k];
                     a[i][k] -= factor * a_pivot;
@@ -535,20 +527,90 @@ fn analyze_and_solve(
         pivot_row += 1;
     }
 
-    let rank = pivot_row;
+    pivot_row
+}
+
+#[allow(clippy::needless_range_loop)]
+fn analyze_and_solve(
+    a: &mut [Vec<Decimal>],
+    b: &mut [Decimal],
+    //epsilon: &[SmallVec<[Decimal; 4]>],
+    epsilon: &[Vec<Decimal>],
+) -> Result<MatrixResult, ValuationError> {
+    // Keep track of the original row indices so we can validate accuracy later.
+    let original_a = a.iter().cloned().collect::<SmallVec<[_; 8]>>();
+    let original_b = b.iter().cloned().collect::<SmallVec<[_; 8]>>();
+    let mut row_ids: SmallVec<[usize; 8]> = (0..a.len()).collect();
+
+    if a.is_empty() || a[0].is_empty() {
+        return Ok(MatrixResult { solution: None, rank: 0 });
+    }
+
+    let rank = eliminate(a, b, &mut row_ids, false);
 
     let mut solution = None;
     if rank >= 2 {
-        if a[0][1..].iter().any(|&x| !x.is_zero()) || a[1][2..].iter().any(|&x| !x.is_zero()) {
-            return Err(ValuationError::Undetermined(err!(NOT_DERIVABLE)));
-        }
         let mut x = vec![Decimal::ZERO; rank];
         x.copy_from_slice(&b[..rank]);
-        if x.iter().all(|&x| x.is_zero()) {
-            return Err(ValuationError::Undetermined(err!(NOT_DERIVABLE)));
+
+        // Each row that was actually used to *pivot* (i.e. solve for one of the variables in `x`)
+        // has its own local error budget: the worst-case change to its residual if its own
+        // coefficients were off by their recorded epsilon, holding the solution `x` fixed. That
+        // budget is exactly the uncertainty that got baked into the corresponding solved
+        // variable, so we seed it as the starting error for that row and propagate it through
+        // the identical sequence of eliminations used to derive `x`.
+        //
+        // Rows that never became a pivot (redundant/check rows, such as a zero-sum/debits-equal-
+        // credits constraint) are seeded with zero so their local uncertainty is not propagated
+        // through the eliminations. Their local uncertainty is added back after propagation when
+        // checking their residual, alongside the uncertainty inherited from the pivot rows.
+        let is_pivot_row: SmallVec<[bool; 8]> = {
+            let mut flags = smallvec![false; original_a.len()];
+            for &row_id in row_ids.iter().take(rank) {
+                flags[row_id] = true;
+            }
+            flags
+        };
+        let local_tolerance: Vec<Decimal> = original_a
+            .iter()
+            .zip(epsilon.iter())
+            .map(|(a_row, eps_row)| {
+                x.iter()
+                    .zip(a_row.iter().zip(eps_row.iter()))
+                    .map(|(x_j, (_, &eps_ij))| x_j.abs() * eps_ij)
+                    .sum()
+            })
+            .collect();
+        let mut prop_row_ids: SmallVec<[usize; 8]> = (0..original_a.len()).collect();
+        let mut prop_a: Vec<Vec<Decimal>> = original_a.iter().cloned().collect();
+        let mut prop_rhs: Vec<Decimal> = local_tolerance
+            .iter()
+            .enumerate()
+            .map(|(row_id, &tolerance)| {
+                if !is_pivot_row[row_id] {
+                    return Decimal::ZERO;
+                }
+                tolerance
+            })
+            .collect();
+        eliminate(&mut prop_a, &mut prop_rhs, &mut prop_row_ids, true);
+
+        // `prop_rhs` is now indexed the same way `row_ids`/`b` ended up after the main
+        // elimination (since it was derived from an identical copy of `a` and so pivots
+        // identically), giving each original row's propagated tolerance in its final position.
+        let mut tolerance = vec![Decimal::ZERO; original_a.len()];
+        for (pos, &row_id) in prop_row_ids.iter().enumerate() {
+            tolerance[row_id] = prop_rhs[pos]
+                + if is_pivot_row[row_id] { Decimal::ZERO } else { local_tolerance[row_id] };
         }
 
-        check_tolerance(original_a.as_ref(), row_ids.as_ref(), &x, original_b.as_ref(), epsilon)?;
+        check_tolerance(
+            original_a.as_ref(),
+            row_ids.as_ref(),
+            &x,
+            original_b.as_ref(),
+            &tolerance,
+        )?;
         solution = Some(x);
     }
 
@@ -562,263 +624,49 @@ fn check_tolerance(
     row_ids: &[usize],
     x: &[Decimal],
     original_b: &[Decimal],
-    epsilon: &[Decimal],
+    tolerance: &[Decimal],
 ) -> Result<(), ValuationError> {
-    for (i, &row_id) in row_ids.iter().enumerate() {
+    for &row_id in row_ids.iter() {
         let residual: Decimal =
             original_a[row_id].iter().zip(x.iter()).map(|(a_ij, &x_j)| a_ij * x_j).sum::<Decimal>()
                 - original_b[row_id];
 
-        let tolerance: Decimal =
-            x.iter().zip(epsilon.iter()).map(|(x_i, &eps_ij)| x_i.abs() * eps_ij).sum();
         // Decimal still has to round during calculations, so we need to set a minimum tolerance to avoid false positives.
         let min_abs_tolerance = Decimal::new(1, 12);
-        let tolerance = tolerance.max(min_abs_tolerance);
+        let tolerance = tolerance[row_id].max(min_abs_tolerance);
 
         if residual.abs() > tolerance {
-            return Err(ValuationError::Undetermined(err!(
-                "Valuation not within tolerance due to inconsistent values"
-            )));
+            return Err(ValuationError::Undetermined(err!(VALUATION_NOT_WITHIN_TOLERANCE)));
         }
     }
     Ok(())
 }
-/*
-#[derive(Debug)]
-pub struct Valuation<'h> {
-    /// The valuation
-    amount: Amount<'h>,
-    /// The sources of the valuation
-    sources: SmallVec<[SS; 2]>,
-}
-impl<'h> Valuation<'h> {
-    pub fn new(amount: Amount<'h>) -> Self {
-        Self { amount, sources: smallvec![] }
-    }
-
-    pub fn value(&self) -> Amount<'h> {
-        self.amount
-    }
-
-    pub fn rounded(&mut self) {
-        self.amount = self.amount.rounded();
-    }
-
-    pub fn with_value(&self, amount: Amount<'h>) -> Self {
-        Self { amount, sources: self.sources.clone() }
-    }
-
-    pub fn clear_sources(&mut self) {
-        self.sources.clear();
-    }
-
-    pub fn sources(&self) -> &[SS] {
-        &self.sources
-    }
-
-    pub fn into_sources(self) -> SmallVec<[SS; 2]> {
-        self.sources
-    }
-
-    pub fn add_source<S: Into<SS>>(&mut self, source: S) {
-        self.sources.push(source.into());
-    }
-}
-impl<'h> Deref for Valuation<'h> {
-    type Target = Amount<'h>;
-    fn deref(&self) -> &Self::Target {
-        &self.amount
-    }
-}
-
-#[derive(Debug)]
-pub enum ValuationError {
-    /// Price could not be found with this valuer at this time with reason provided.
-    Undetermined(JournError),
-    /// An error occurred during evaluation of the valuer
-    EvalFailure(JournError),
-}
-impl std::error::Error for ValuationError {}
-impl fmt::Display for ValuationError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ValuationError::Undetermined(reason) => write!(f, "{}", reason),
-            ValuationError::EvalFailure(e) => write!(f, "{}", e),
-        }
-    }
-}
-impl From<ValuationError> for JournError {
-    fn from(e: ValuationError) -> Self {
-        match e {
-            ValuationError::Undetermined(reason) => err!("{}", reason),
-            ValuationError::EvalFailure(e) => e,
-        }
-    }
-}
-
-pub type ValuationResult<'h> = Result<Valuation<'h>, ValuationError>;
-
-pub struct OrValuer<'h, V1, V2>
-where
-    V1: Valuer<'h>,
-    V2: Valuer<'h>,
-{
-    first: V1,
-    second: V2,
-    _marker: std::marker::PhantomData<&'h ()>,
-}
-impl<'h, V1, V2> OrValuer<'h, V1, V2>
-where
-    V1: Valuer<'h>,
-    V2: Valuer<'h>,
-{
-    pub fn new(first: V1, second: V2) -> Self {
-        Self { first, second, _marker: std::marker::PhantomData }
-    }
-}
-impl<'h, V1, V2> Valuer<'h> for OrValuer<'h, V1, V2>
-where
-    V1: Valuer<'h>,
-    V2: Valuer<'h>,
-{
-    fn value(&mut self, quote_unit: &'h Unit<'h>, amount: Amount<'h>) -> ValuationResult<'h> {
-        match self.first.value(quote_unit, amount) {
-            Ok(v) => Ok(v),
-            Err(ValuationError::Undetermined(_)) => self.second.value(quote_unit, amount),
-            Err(e) => Err(e),
-        }
-    }
-}
-
-/// A trait for valuing amounts in different units.
-pub trait Valuer<'h> {
-    /// Values the specified `amount` in the `quote_unit`.
-    ///
-    /// Returns `Ok(Valuation)` if the operation succeeded, with the inner `Amount` being `Some` if the valuation lookup was successful,
-    /// and `None` if the value could not be determined.
-    /// An `Err(e)` is returned if a non-system error occurred while determining the value (user error).
-    ///
-    /// Returned values should never be rounded. It is the responsibility of the caller to round the value if necessary.
-    ///
-    /// It is allowed for the function to return a `Valuation` in a unit other than the `quote_unit`, but implementors should
-    /// note this behaviour up front.
-    fn value(&mut self, quote_unit: &'h Unit<'h>, amount: Amount<'h>) -> ValuationResult<'h>;
-
-    fn or(self, other: impl Valuer<'h>) -> OrValuer<'h, Self, impl Valuer<'h>>
-    where
-        Self: Sized,
-    {
-        OrValuer::new(self, other)
-    }
-}
-
-impl<'h, F> Valuer<'h> for F
-where
-    F: FnMut(&'h Unit<'h>, Amount<'h>) -> ValuationResult<'h>,
-{
-    fn value(&mut self, unit: &'h Unit<'h>, amount: Amount<'h>) -> ValuationResult<'h> {
-        self(unit, amount)
-    }
-}*/
-
-/*
-pub enum ValueResult<'h, O> {
-    Ok(O),
-    Err(JournError),
-    ValuationNeeded(&'h Unit<'h>, &'h Unit<'h>),
-}
-pub enum ValueResidual<'h> {
-    Err(JournError),
-    ValuationNeeded(&'h Unit<'h>, &'h Unit<'h>),
-}
-
-impl<'h, O> Try for ValueResult<'h, O> {
-    type Output = O;
-    type Residual = ValueResidual<'h>;
-
-    fn from_output(output: Self::Output) -> Self {
-        ValueResult::Ok(output)
-    }
-
-    fn branch(self) -> ControlFlow<Self::Residual, Self::Output> {
-        match self {
-            ValueResult::Ok(output) => ControlFlow::Continue(output),
-            ValueResult::Err(e) => ControlFlow::Break(ValueResidual::Err(e)),
-            ValueResult::ValuationNeeded(u1, u2) => {
-                ControlFlow::Break(ValueResidual::ValuationNeeded(u1, u2))
-            }
-        }
-    }
-}
-impl<'h, O> FromResidual<ValueResidual<'h>> for ValueResult<'h, O> {
-    fn from_residual(residual: ValueResidual<'h>) -> Self {
-        match residual {
-            ValueResidual::Err(e) => ValueResult::Err(e),
-            ValueResidual::ValuationNeeded(u1, u2) => ValueResult::ValuationNeeded(u1, u2),
-        }
-    }
-}
-
-impl<'h, O> FromResidual<Result<Infallible, JournError>> for ValueResult<'h, O> {
-    fn from_residual(residual: Result<Infallible, JournError>) -> Self {
-        match residual {
-            Err(e) => ValueResult::Err(e),
-            Ok(infallible) => match infallible {}, // This will never happen
-        }
-    }
-}
-/// Executes a function that may return a `ValuationNeeded` result during its processing.
-/// This will cause the valuation to be performed on the entry before retrying.
-pub fn exec_optimistic<'h, F, O>(
-    entry: &mut Cow<JournalEntry<'h>>,
-    round_valuations: bool,
-    f: F,
-) -> JournResult<O>
-where
-    F: Fn(&JournalEntry<'h>) -> ValueResult<'h, O>,
-{
-    loop {
-        match f(entry.as_ref()) {
-            ValueResult::Ok(o) => return Ok(o),
-            ValueResult::Err(e) => return Err(e),
-            ValueResult::ValuationNeeded(base, quote) => {
-                match SystemValuer::from(entry.as_ref()).value(quote, base.with_quantity(1)) {
-                    Ok(val) => {
-                        let price = val.amount;
-                        let entry = entry.to_mut();
-                        for pst in entry.postings_mut().filter(|pst| pst.unit() != val.unit()) {
-                            if let Some(amount) = pst.amount_in(base) {
-                                // When the amount is small, use unit valuations for increased accuracy. This matters when using the LinearSystemValuer.
-                                // We round in case the entry gets written out later.
-                                let val = if round_valuations && amount.abs() < 1 {
-                                    valued_amount::PostingValuation::new_unit(price.rounded())
-                                } else {
-                                    let mut total = val.amount * amount.quantity();
-                                    if round_valuations {
-                                        total = total.rounded();
-                                    }
-                                    valued_amount::PostingValuation::new_total(total, false)
-                                };
-                                pst.set_valuation(val);
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        return Err(
-                            err!("Unable to value {} in {} on entry", base, quote).with_source(e)
-                        );
-                    }
-                }
-            }
-        }
-    e
-}*/
 
 #[cfg(test)]
 mod test {
-
     use super::*;
-    use crate::{amount, unit};
+    use crate::test_util::{entry, with_entry};
+    use crate::{amount, entry, unit};
+    use indoc::indoc;
+
+    #[test]
+    fn test_zero_value() {
+        with_entry(
+            indoc! {r#"
+            2000-01-01  Entry 1
+                A  100 ABC
+                B  100 XYZ @@ $0
+                C  -100 DEF @@ $100
+            "#},
+            |entry| {
+                let mut valuer = LinearSystemValuer::from(entry);
+                assert_eq!(
+                    valuer.value(unit!("ABC"), amount!("100 DEF")),
+                    Ok(amount!("100 ABC").into())
+                );
+            },
+        );
+    }
 
     #[test]
     fn test_multiple_groups() {
@@ -840,5 +688,55 @@ mod test {
         let mut lsv = LinearSystemValuer::new(vec![(amount!("1 A"), amount!("10 B"))].into_iter());
         lsv.add_zero_sum(vec![amount!("1 A"), amount!("10 B"), amount!("100 C")].into_iter());
         assert_eq!(lsv.value(unit!("B"), amount!("0.5 A")), Ok(Valuation::unary(amount!("5 B"))));
+    }
+
+    #[test]
+    fn test_tolerance1() {
+        let res = entry(indoc! {r#"
+            2000-01-01  Entry 1
+                ACC_A  -100 B @@ $1.00
+                ACC_B  100 A @@ $0.99
+            "#});
+        assert!(res.is_err());
+
+        let res = entry(indoc! {r#"
+            2000-01-01  Entry 1
+                ACC_A  -100 B @@ $1.00
+                ACC_B  100 A @@ $0.995
+            "#});
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn test_tolerance2() {
+        // This looks like it should fail as $100.00 != $90.00 + $9.99, but the rounding error assumes
+        // worst case and so is additive for $90.00 and $9.99, which is enough to cover the $0.01 difference.
+        let res = entry(indoc! {r#"
+            2000-01-01  Entry 1
+                ACC_A  -100 A @@ $100.00
+                ACC_B  90 B @@ $90.00
+                ACC_C  10 B @@ $9.99
+            "#});
+        assert!(res.is_ok());
+
+        // This then, should be the failure boundary.
+        let res = entry(indoc! {r#"
+            2000-01-01  Entry 1
+                ACC_A  -100 A @@ $100.00
+                ACC_B  90 B @@ $90.00
+                ACC_C  10 B @@ $9.98
+            "#});
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_tolerance_with_unit_vals() {
+        // The unit value is rounded.
+        let res = entry(indoc! {r#"
+            2000-01-01  Entry 1
+                ACC_A  -100 A @ £1.12345
+                ACC_B  £123.35
+            "#});
+        assert!(res.is_ok());
     }
 }

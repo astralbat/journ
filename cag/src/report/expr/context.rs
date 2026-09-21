@@ -224,6 +224,7 @@ impl<'h, 'e> EventObj<'h, 'e> {
             Match(details) if "source" => DealHolding(details.originator()),
             Match(details) if "target" => DealHolding(details.target()),
             Match(details) if "gain" => Value(Amount(details.gain(), false)),
+            Match(details) if "notes" => Value(List(details.notes().into_iter().map(|note| String(note.into())).collect())),
             DealHoldingSummary(summary) if "parent" => {
                     match summary.parent() {
                         Some(parent) => DealHoldingSummary(parent),

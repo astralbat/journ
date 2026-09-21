@@ -301,10 +301,10 @@ impl<'t> Hash for Unit<'t> {
     }
 }
 
-impl<'t> PartialEq for Unit<'t> {
+impl<'a, 'b> PartialEq<Unit<'b>> for Unit<'a> {
     /// Two units are always equal if they have the same code (ignoring case), since codes are expected to be unique.
     /// If the units do not share the same code, then perhaps they share the same name.
-    fn eq(&self, other: &Self) -> bool {
+    fn eq(&self, other: &Unit<'b>) -> bool {
         self.primary_code().eq_ignore_ascii_case(other.primary_code())
     }
 }

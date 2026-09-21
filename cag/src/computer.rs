@@ -6,12 +6,12 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::cag_configuration::CagConfiguration;
-use crate::cag_journal_entry::CapitalGainsMetadataAccess;
 use crate::capital_gains::CapitalGains;
 use crate::deal::Deal;
 use crate::dealing_event::DealingEvent;
 use crate::expenses::EntryExpenses;
 use crate::holding::{DealHolding, SingleDealHolding};
+use crate::metadata::{CAG_INCLUDE, CAG_ZERO_PROCEEDS, CapitalGainsMetadataAccess};
 use crate::mod_cgt;
 use crate::module_init::MODULE_NAME;
 use crate::pool_manager::PoolManager;
@@ -25,12 +25,13 @@ use journ_core::error::{BlockContextError, JournError};
 use journ_core::journal::Journal;
 use journ_core::journal_context::JContext;
 use journ_core::journal_entry::JournalEntry;
-use journ_core::journal_entry_flow::{Flow, Flows};
+use journ_core::journal_entry_flow::{Flow, Flows, LinkedFlow};
 use journ_core::parsing::text_block::TextBlockBuf;
 use journ_core::report::command::arguments::Command;
 use journ_core::report::expr::{LinkedFlowContext, ScalarExpr};
 use journ_core::tree_id::BranchCountingTreeId;
 use journ_core::unit::Unit;
+use journ_core::valued_amount::PostingValuation;
 use journ_core::valuer::{SystemValuer, ValueResult};
 use journ_core::{err, valuer};
 use log::info;
@@ -155,7 +156,7 @@ impl<'h> CapitalGainsComputer {
     where
         'h: 'u,
     {
-        let cg_metadata = entry.cg_metadata(unit_of_account)?;
+        let cg_metadata = entry.cg_metadata()?;
 
         // Assume entries that are adjustments to have no deals.
         // This allows adjustments entries to manage Asset accounts as part of that reorganisation.
@@ -175,16 +176,13 @@ impl<'h> CapitalGainsComputer {
             .unwrap()
             .round_deal_values();
         valuer::exec_optimistic(&mut writeable_entry, round_values, |valued_entry| {
-            let (mut implicit_flows, explicit_deals) =
-                Self::scan_net_equity_flows(valued_entry, entry, unit_of_account, &unit_filter)?;
-
-            /*
-            // Ensure included deals are valued in the uoa
-            for deal in deals.iter_mut().filter(|d| unit_filter.is_included(d.unit())) {
-                if let Err(e) = deal.ensure_valued(unit_of_account) {
-                    return ValueResult::Err(e.into());
-                }
-            }*/
+            let (implicit_flows, explicit_deals) = Self::scan_net_equity_flows(
+                valued_entry,
+                entry,
+                unit_of_account,
+                &unit_filter,
+                round_values,
+            )?;
 
             let mut all_deals = explicit_deals;
             if implicit_flows.iter().any(|f| unit_filter.is_included(f.unit())) {
@@ -200,7 +198,7 @@ impl<'h> CapitalGainsComputer {
                 let deal_id_branch =
                     BranchCountingTreeId::new(entry.id().clone(), cg_metadata.md_count() + 1);
                 for (i, flow) in implicit_flows
-                    .iter_mut()
+                    .into_iter()
                     .filter(|d| d.unit() != unit_of_account)
                     .enumerate()
                     .filter(|(_, d)| unit_filter.is_included(d.unit()))
@@ -208,11 +206,31 @@ impl<'h> CapitalGainsComputer {
                     let mut expenses = expenses_division.get_expenses(i);
                     expenses = expenses.without_unit(flow.unit());
 
+                    let mut valued_amount = flow.valued_amount().clone();
+                    if round_values {
+                        valued_amount.make_all_valuations_total();
+                        valued_amount.round_total_valuations();
+                    }
+
+                    // Set the consideration to zero if the flow or its linked flow has the CAG-Zero-Proceeds metadata key.
+                    if flow.account_root().unwrap().has_metadata_key(&CAG_ZERO_PROCEEDS)
+                        || flow
+                            .linked()
+                            .account_root()
+                            .unwrap()
+                            .has_metadata_key(&CAG_ZERO_PROCEEDS)
+                    {
+                        valued_amount.set_valuation(PostingValuation::new_total(
+                            unit_of_account.with_quantity(0),
+                            false,
+                        ));
+                    }
+
                     all_deals.push(Deal::new(
-                        deal_id_branch.next_id(),
                         entry,
-                        flow.valued_amount().clone(),
+                        valued_amount,
                         expenses,
+                        Some(flow),
                         None,
                         unit_of_account,
                     )?);
@@ -234,20 +252,28 @@ impl<'h> CapitalGainsComputer {
         existing_entry: &'h JournalEntry<'h>,
         unit_of_account: &'h Unit<'h>,
         unit_filter: &impl Filter<Unit<'h>>,
-    ) -> ValueResult<'h, (SmallVec<[Flow<'h>; 4]>, SmallVec<[Deal<'h>; 4]>)>
+        round_values: bool,
+    ) -> ValueResult<'h, (SmallVec<[LinkedFlow<'h>; 4]>, SmallVec<[Deal<'h>; 4]>)>
     where
         'h: 'a,
     {
         // Add explicit deals
-        let cg_metadata = existing_entry.cg_metadata(unit_of_account)?;
-        let mut explicit_deals = smallvec![];
-        for (va, expenses, taxable_gain, md_position) in cg_metadata.into_deal_metadata() {
-            if unit_filter.is_included(va.unit()) {
+        let cg_metadata = existing_entry.cg_metadata()?;
+        let mut explicit_deals: SmallVec<[Deal<'h>; 4]> = smallvec![];
+        for (mut valued_amount, expenses, taxable_gain, md_position) in
+            cg_metadata.into_deal_metadata()
+        {
+            if unit_filter.is_included(valued_amount.unit()) {
+                if round_values {
+                    valued_amount.make_all_valuations_total();
+                    valued_amount.round_total_valuations();
+                }
+
                 let deal = Deal::new(
-                    existing_entry.id().branch(md_position + 1),
                     existing_entry,
-                    va,
+                    valued_amount,
                     expenses,
+                    None,
                     taxable_gain,
                     unit_of_account,
                 )?;
@@ -257,35 +283,17 @@ impl<'h> CapitalGainsComputer {
 
         // If the entry doesn't contain any units we're interested in (aside from explicit deals/adjustments), we
         // can save some effort.
-        if valued_entry.units().iter().all(|unit| !unit_filter.is_included(unit)) {
+        if valued_entry.units().iter().all(|unit| {
+            !unit_filter.is_included(unit)
+                || explicit_deals.iter().map(|deal| deal.unit()).any(|d_unit| d_unit == *unit)
+        }) {
             return Ok((smallvec![], explicit_deals));
         }
 
         let flows = valued_entry.flows();
         let linked_flows = flows.linked(&mut SystemValuer::from(valued_entry))?;
 
-        let implicit_units = || {
-            flows
-                .units()
-                .filter(|unit| !explicit_deals.iter().any(|deal: &Deal| deal.unit() == *unit))
-        };
-
-        /*
-        // Explicit deals override implicit for a particular unit
-        units.retain(|unit| {
-            cg_metadata.deals(unit).is_empty()
-            /*let explicit_deals = cg_metadata.deals(unit);
-            if !explicit_deals.is_empty() {
-                for deal in explicit_deals.into_iter().filter(|d| !d.adjusted_value().is_zero()) {
-                    deals.push(deal);
-                }
-                false
-            } else {
-                true
-            }*/
-        });*/
-
-        let mut included_flows: SmallVec<[Flow<'h>; 4]> = smallvec![];
+        let mut included_flows: SmallVec<[LinkedFlow<'h>; 4]> = smallvec![];
         let config =
             existing_entry.config().module_config::<CagConfiguration>(MODULE_NAME).unwrap();
         for mut linked_flow in linked_flows.into_iter() {
@@ -300,7 +308,7 @@ impl<'h> CapitalGainsComputer {
 
                 let include = {
                     let include_override =
-                        linked_flow.flow().account_root().unwrap().metadata_by_key("CAG-Include");
+                        linked_flow.flow().account_root().unwrap().metadata_by_key(CAG_INCLUDE);
                     if !include_override.is_empty() {
                         let mut include = true;
                         for md in include_override {
@@ -321,7 +329,7 @@ impl<'h> CapitalGainsComputer {
                 };
 
                 if include {
-                    included_flows.push(linked_flow.flow().clone());
+                    included_flows.push(linked_flow.clone());
                 }
                 linked_flow = linked_flow.invert();
             }
@@ -522,10 +530,10 @@ impl<'h> DealsByDateAggregation<'h> {
 
 #[cfg(test)]
 mod tests {
-    use crate::cag_journal_entry::CapitalGainsMetadataAccess;
     use crate::computer::CapitalGainsComputer;
     use crate::deal;
     use crate::dealing_event::DealingEvent;
+    use crate::metadata::CapitalGainsMetadataAccess;
     use crate::report::cag_command::CagCommand;
     use indoc::indoc;
     use journ_core::configuration::{AccountFilter, UnitFilter};

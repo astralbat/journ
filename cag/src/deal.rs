@@ -9,6 +9,7 @@ use crate::adjusted_value::AdjustedValue;
 use crate::adjustment::Adjustment;
 use crate::cag_configuration::CagConfiguration;
 use crate::holding::Split;
+use crate::metadata::CAG_NOTE;
 use crate::module_init::MODULE_NAME;
 use chrono::DateTime;
 use chrono_tz::Tz;
@@ -18,11 +19,13 @@ use journ_core::datetime::{DateTimePrecision, JDateTime, JDateTimeRange};
 use journ_core::error::JournResult;
 use journ_core::journal_context::JContext;
 use journ_core::journal_entry::JournalEntry;
-use journ_core::journal_entry_flow::Flow;
-use journ_core::tree_id::{BranchCountingTreeId, TreeId};
+use journ_core::journal_entry_flow::{Flow, LinkedFlow};
+use journ_core::metadata::Metadata;
+use journ_core::tree_id::TreeId;
 use journ_core::unit::Unit;
 use journ_core::valued_amount::ValuedAmount;
 use journ_core::valuer::{SystemValuer, ValuationError, ValueError, ValueResult, Valuer};
+use linked_hash_set::LinkedHashSet;
 use std::fmt;
 use std::fmt::Formatter;
 use std::rc::Rc;
@@ -46,21 +49,17 @@ impl<'h> DealOrigin<'h> {
     }
 }
 
-//#[derive(Clone)]
 pub struct Deal<'h> {
-    /// The deal id. Sorting deals by their id will allow them to written to a `JournalEntry` in the
-    /// correct order.
-    id: BranchCountingTreeId,
     /// The entry from which the deal or belongs to.
     entry: &'h JournalEntry<'h>,
+    /// The original flow from which the deal was originally derived.
+    /// This will be `None` for explicitly created deals.
+    linked_flow: Option<Rc<LinkedFlow<'h>>>,
+    /// The amount transacted along with its total cost and expenses.
+    adjusted_value: AdjustedValue<'h>,
     /// Sets the gain explicitly, rather than allowing the gain to be calculated. There are usually exceptional reasons
     /// within a tax code that may allow this.
     taxable_gain: Option<Amount<'h>>,
-    /// When split operations are performed on deals, this is set to the original deal before the split.
-    /// This is useful to allow for report whether a deal has been split up, and the amount it was split from.
-    split_parent: Option<Rc<Deal<'h>>>,
-    /// The amount transacted along with its total cost and expenses.
-    adjusted_value: AdjustedValue<'h>,
 }
 
 impl<'h> Deal<'h> {
@@ -70,24 +69,14 @@ impl<'h> Deal<'h> {
     /// `Ok(Deal)` unless the `valued_amount` or `expenses` cannot be valued in the specified `uoa`, in which case a `ValueError::ValuationNeeded` is returned.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        id: DealId,
         entry: &'h JournalEntry<'h>,
-        mut valued_amount: ValuedAmount<'h>,
+        valued_amount: ValuedAmount<'h>,
         expenses: ValuedAmount<'h>,
+        linked_flow: Option<LinkedFlow<'h>>,
         taxable_gain: Option<ValuedAmount<'h>>,
         uoa: &'h Unit<'h>,
     ) -> ValueResult<'h, Self> {
         assert!(!valued_amount.is_nil());
-
-        let round_deals = entry
-            .config()
-            .module_config::<CagConfiguration>(MODULE_NAME)
-            .unwrap()
-            .round_deal_values();
-        if round_deals {
-            valued_amount.make_all_valuations_total();
-            valued_amount.round_total_valuations();
-        }
 
         let amount = valued_amount.amount();
         let valuation =
@@ -106,35 +95,20 @@ impl<'h> Deal<'h> {
             .map(|tg| tg.value_in(uoa).ok_or_else(|| ValueError::ValuationNeeded(uoa, tg.amount())))
             .transpose()?;
 
-        Ok(Self {
-            id: BranchCountingTreeId::from(id),
-            entry,
-            taxable_gain,
-            split_parent: None,
-            adjusted_value,
-        })
+        Ok(Self { entry, linked_flow: linked_flow.map(Rc::new), taxable_gain, adjusted_value })
     }
 
-    pub fn zero(
-        id: DealId,
-        unit: &'h Unit<'h>,
-        entry: &'h JournalEntry<'h>,
-        uoa: &'h Unit<'h>,
-    ) -> Self {
+    pub fn zero(unit: &'h Unit<'h>, entry: &'h JournalEntry<'h>, uoa: &'h Unit<'h>) -> Self {
         let allocator = JContext::get().allocator();
         Self::new(
-            id,
             entry,
             ValuedAmount::new_in(unit.with_quantity(0), allocator),
             ValuedAmount::nil(),
             None,
+            None,
             uoa,
         )
         .unwrap()
-    }
-
-    pub fn id(&self) -> &BranchCountingTreeId {
-        &self.id
     }
 
     pub fn datetime(&self) -> JDateTimeRange {
@@ -238,19 +212,6 @@ impl<'h> Deal<'h> {
 
     pub fn taxable_gain(&self) -> Option<Amount<'h>> {
         self.taxable_gain
-    }
-
-    /// Gets the parent deal that this deal was split from using [Deal::split_max()], if any.
-    pub fn split_parent(&self) -> Option<&Rc<Deal<'h>>> {
-        self.split_parent.as_ref()
-    }
-
-    /// Gets whether the deal has been split up from a bigger deal.
-    pub fn is_remainder(&self) -> bool {
-        match self.split_parent() {
-            Some(parent) => self.adjusted_value.amount().quantity() < parent.amount().quantity(),
-            None => false,
-        }
     }
 
     /// Split on the amount. Other components are split proportionally and rounded.
@@ -359,29 +320,51 @@ impl<'h> Deal<'h> {
         (tg_left, tg_right): (Option<Amount<'h>>, Option<Amount<'h>>),
     ) -> (Deal<'h>, Option<Deal<'h>>) {
         // Create an Rc of self so that we can set the split_parent of the new deals to it.
-        let self_rc = Rc::new(self);
+        //let self_rc = Rc::new(self);
 
-        // Get the original root deal so that we can continue to generate ids on its branch.
-        let mut orig_deal = &self_rc;
-        while let Some(parent) = orig_deal.split_parent.as_ref() {
-            orig_deal = parent;
-        }
+        //let mut orig_deal = &self_rc;
 
         let left_deal = Deal {
-            id: BranchCountingTreeId::from(orig_deal.id().next_id()),
-            entry: self_rc.entry,
+            entry: self.entry,
+            linked_flow: self.linked_flow.clone(),
             taxable_gain: tg_left,
-            split_parent: Some(Rc::clone(&self_rc)),
             adjusted_value: left,
         };
         let right_deal = right.map(|r| Deal {
-            id: BranchCountingTreeId::from(orig_deal.id().next_id()),
-            entry: self_rc.entry,
+            entry: self.entry,
+            linked_flow: self.linked_flow.clone(),
             taxable_gain: tg_right,
-            split_parent: Some(Rc::clone(&self_rc)),
             adjusted_value: r,
         });
         (left_deal, right_deal)
+    }
+
+    /// Gets all notes associated with the deal which includes:
+    /// * Notes on the deal's entry
+    /// * Notes on the flow's accounts
+    pub fn notes(&self) -> LinkedHashSet<&str> {
+        let mut notes = LinkedHashSet::new();
+        notes.extend(self.entry.metadata_by_key(CAG_NOTE).into_iter().filter_map(Metadata::value));
+        if let Some(linked_flow) = &self.linked_flow {
+            notes.extend(
+                linked_flow
+                    .account_root()
+                    .unwrap()
+                    .metadata_by_key(CAG_NOTE)
+                    .into_iter()
+                    .filter_map(Metadata::value),
+            );
+            notes.extend(
+                linked_flow
+                    .linked()
+                    .account_root()
+                    .unwrap()
+                    .metadata_by_key(CAG_NOTE)
+                    .into_iter()
+                    .filter_map(Metadata::value),
+            );
+        }
+        notes
     }
 }
 
@@ -401,14 +384,16 @@ impl fmt::Debug for Deal<'_> {
     }
 }
 
+/*
 impl PartialEq for Deal<'_> {
     fn eq(&self, other: &Self) -> bool {
         self.id == other.id
     }
 }
 
-impl Eq for Deal<'_> {}
+impl Eq for Deal<'_> {}*/
 
+/*
 impl PartialOrd for Deal<'_> {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
@@ -419,7 +404,7 @@ impl Ord for Deal<'_> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.id.cmp(&other.id)
     }
-}
+}*/
 
 /*
 /// Tries to add a deal to another deal. If the deals cannot be added, `None` is returned.

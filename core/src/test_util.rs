@@ -7,21 +7,44 @@
  */
 use crate::alloc::HerdAllocator;
 use crate::configuration::Configuration;
+use crate::error::JournResult;
 use crate::journal::Journal;
+use crate::journal_entry::JournalEntry;
 use crate::parsing::text_block::TextBlock;
 use bumpalo_herd::Herd;
 
 #[macro_export]
 /// Parses a journal.
 macro_rules! journ {
-    ($text:expr) => {{ $crate::test_util::journ($text) }};
+    ($text:expr) => {{
+        match $crate::test_util::journ($text) {
+            Ok(journ) => journ,
+            Err(err) => {
+                eprintln!("{}", err);
+                panic!("Parsing errors encountered. See above")
+            }
+        }
+    }};
 }
 
-pub fn journ<'h>(text: &'h str) -> Journal<'h> {
+pub fn journ(text: &str) -> JournResult<Journal<'_>> {
     let herd = Box::leak(Box::new(Herd::new()));
     let allocator = herd.get().alloc(HerdAllocator::new(herd));
     match Journal::parse(None, TextBlock::from(text), allocator) {
-        Ok(jc) => jc.into_journal(),
+        Ok(jc) => Ok(jc.into_journal()),
+        Err(err) => Err(err),
+    }
+}
+
+/// Parses an entry and executes the closure within a JContext.
+pub fn with_entry(text: &str, f: impl FnOnce(&JournalEntry)) {
+    let herd = Box::leak(Box::new(Herd::new()));
+    let allocator = herd.get().alloc(HerdAllocator::new(herd));
+    match Journal::parse(None, TextBlock::from(text), allocator) {
+        Ok(jc) => jc.with(|| {
+            let entry = jc.journal().entry_range(..).next().expect("No entry found");
+            f(entry)
+        }),
         Err(err) => {
             eprintln!("{}", err);
             panic!("Parsing errors encountered. See above")
@@ -35,7 +58,7 @@ macro_rules! config {
     ($text:expr) => {{ $crate::test_util::config($text) }};
 }
 
-pub fn config<'h>(text: &'h str) -> Configuration<'h> {
+pub fn config(text: &str) -> Configuration<'_> {
     let journ = journ!(text);
     Configuration::clone(journ.config())
 }
@@ -55,36 +78,18 @@ macro_rules! amount {
 #[macro_export]
 macro_rules! entry {
     ($text:expr) => {{
-        use crate::journal_entry::JournalEntry;
+        use $crate::journ;
+        use $crate::journal_entry::JournalEntry;
 
         let journ = journ!($text);
         let entry: JournalEntry = journ.entry_range(..).next().expect("No entry found").clone();
         entry
-    }}; /*
-        ($text:expr, $config:expr) => {{
-            journ!()
+    }};
+}
 
-            use crate::parsing::directive::entry_file_directives;
-            use $crate::parse_node;
-            use $crate::parsing::text_block::TextBlock;
-
-            std::thread::scope(|scope| {
-                //let parse_node =
-                //    parse_node!($text, scope, $config, $crate::journal_node::JournalNodeKind::Entry);
-                //let text_block: &TextBlock<'_> = parse_node.node().block();
-                //let input = text_block.as_input($config.allocator());
-
-                let (_rem, dirs) =
-                    $crate::parsing::parse_block_with_config_mut($text, entry_file_directives, $config);
-                //let (_rem, dirs) = entry_file_directives(input).unwrap();
-                for dir in dirs {
-                    if let $crate::directive::DirectiveKind::Entry(entry) = dir.kind() {
-                        return entry;
-                    }
-                }
-                panic!("No entry found")
-            })
-        }};*/
+pub fn entry(text: &str) -> JournResult<JournalEntry<'_>> {
+    let journ = journ(text)?;
+    Ok(journ.entry_range(..).next().expect("No entry found").clone())
 }
 
 #[macro_export]

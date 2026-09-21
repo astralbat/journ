@@ -31,34 +31,6 @@ use std::fmt::Debug;
 use std::rc::Rc;
 use std::{fmt, iter};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HoldingHandle<'h> {
-    holding: Rc<RefCell<Option<DealHolding<'h>>>>,
-}
-impl<'h> HoldingHandle<'h> {
-    pub fn new(holding: DealHolding<'h>) -> Self {
-        Self { holding: Rc::new(RefCell::new(Some(holding))) }
-    }
-
-    pub fn borrow(&self) -> Ref<DealHolding<'h>> {
-        Ref::map(self.holding.borrow(), |h| h.as_ref().unwrap())
-    }
-
-    pub fn borrow_mut(&self) -> RefMut<DealHolding<'h>> {
-        RefMut::map(self.holding.borrow_mut(), |h| h.as_mut().unwrap())
-    }
-
-    pub fn take_with<F: FnOnce(DealHolding<'h>) -> DealHolding<'h>>(&self, f: F) {
-        let taken = self.holding.borrow_mut().take().unwrap();
-        let new_holding = f(taken);
-        *self.holding.borrow_mut() = Some(new_holding);
-    }
-
-    pub fn take(self) -> DealHolding<'h> {
-        self.holding.borrow_mut().take().unwrap()
-    }
-}
-
 pub(super) static DEAL_HOLDING_ID_COUNTER: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(1);
 
@@ -67,7 +39,7 @@ pub(super) static DEAL_HOLDING_ID_COUNTER: std::sync::atomic::AtomicUsize =
 /// Thus, separate DealHoldings are required for each asset unit.
 ///
 /// A DealHolding can never be empty; it will always have at least one deal, which itself may be zero.
-#[derive(PartialEq, Eq)]
+//#[derive(PartialEq, Eq)]
 pub enum DealHolding<'h> {
     Single(SingleDealHolding<'h>),
     Sequence(SequenceDealHolding<'h>),
@@ -340,6 +312,22 @@ impl<'h> DealHolding<'h> {
             Sequence(seq) => seq.entries(),
             Average(avg) => Box::new(avg.deal_iter().map(|d| d.entry())),
         }
+    }
+
+    pub fn notes(&self) -> LinkedHashSet<&str> {
+        let mut notes = LinkedHashSet::new();
+        match self {
+            Single(single) => notes.extend(single.deal().notes()),
+            Sequence(seq) => {
+                for dh in seq.iter() {
+                    notes.extend(dh.notes());
+                }
+            }
+            // Don't take notes from average holding. This may end up causing too many notes of little
+            // value in the report.
+            Average(_) => {}
+        }
+        notes
     }
 
     /// Looks up metadata values on the associated entries.

@@ -38,11 +38,6 @@ pub struct CagArguments {
     head: Option<usize>,
     #[arg(long, help = "Show only the last `tail` results")]
     tail: Option<usize>,
-    #[arg(
-        long = "group-deals-by-date",
-        help = "Aggregate journal entry deals that occur on the same day before further processing. This is useful when you have multiple deals on the same day and you want to see the totals for the day."
-    )]
-    group_deals_by_date: bool,
     #[arg(long = "group-by", value_name = "GROUP_BY", help = "Group events together")]
     group_by: Option<String>,
     #[arg(
@@ -98,7 +93,6 @@ impl CagArguments {
             filter: self.filter.into_iter().flat_map(|l| l.0).collect(),
             head: self.head,
             tail: self.tail,
-            group_deals_by_date: self.group_deals_by_date,
             group_by: self.group_by,
             order_by_spec: self.order_by,
             order_descending: self.order_descending,

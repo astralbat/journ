@@ -36,6 +36,7 @@ clap = { version = "4.5.53", features = ["derive"] }
 [profile.dev]
 debug = true
 opt-level = 0
+lto = false
 
 [profile.release]
 debug = true

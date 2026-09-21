@@ -24,7 +24,8 @@ use journ_core::unit::Unit;
 use journ_core::valuer::{SystemValuer, Valuer};
 use std::rc::Rc;
 
-#[derive(Debug, PartialEq, Eq)]
+//#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct SingleDealHolding<'h> {
     id: usize,
     deal: Deal<'h>,

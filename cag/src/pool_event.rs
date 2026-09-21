@@ -21,7 +21,7 @@ use std::fmt::Write;
 use std::sync::atomic;
 use std::sync::atomic::AtomicUsize;
 
-#[derive(PartialEq, Eq)]
+//#[derive(PartialEq, Eq)]
 pub struct MatchDetails<'h> {
     /// If `None`, this indicates an aggregation of multiple matches where the methods were not all the same.
     match_method: Option<MatchMethod>,
@@ -121,6 +121,13 @@ impl<'h> MatchDetails<'h> {
             .sum::<Amount<'h>>()
             .rounded()
     }
+
+    pub fn notes(&self) -> LinkedHashSet<&str> {
+        let mut notes = LinkedHashSet::new();
+        notes.extend(self.originator.notes());
+        notes.extend(self.target.notes());
+        notes
+    }
 }
 
 /*
@@ -151,7 +158,7 @@ impl<'h> Add for MatchDetails<'h> {
     }
 }*/
 
-#[derive(PartialEq, Eq)]
+//#[derive(PartialEq, Eq)]
 pub enum PoolEventKind<'h> {
     /// A change to the pool amount and/or value has taken place
     Adjustment(Adjustment<'h>),
@@ -190,6 +197,7 @@ impl fmt::Display for PoolEventKind<'_> {
     }
 }
 
+/*
 impl PartialOrd for PoolEventKind<'_> {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
@@ -210,7 +218,7 @@ impl Ord for PoolEventKind<'_> {
         }
         ordinal(self).cmp(&ordinal(other))
     }
-}
+}*/
 
 pub struct PoolEvent<'h> {
     /// A unique, incrementing sequence number to be able to correctly determine order when comparing events.

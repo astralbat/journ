@@ -30,7 +30,7 @@ use std::fmt::Debug;
 use std::rc::Rc;
 
 /// A sequence of deal holdings. The sequence will never be empty.
-#[derive(PartialEq, Eq)]
+//#[derive(PartialEq, Eq)]
 pub struct SequenceDealHolding<'h> {
     id: usize,
     sequence: VecDeque<DealHolding<'h>, &'h HerdAllocator<'h>>,

@@ -67,6 +67,7 @@ impl<'h> Journal<'h> {
 
             Ok::<_, JournError>(journal)
         })?;
+        context.set_config(journal.config().clone());
         context.set_journal(journal);
         Ok(context)
     }

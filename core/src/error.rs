@@ -14,7 +14,7 @@ use pyo3::{DowncastError, DowncastIntoError, PyErr};
 use smartstring::alias::String as SS;
 use std::error::Error;
 use std::ops::Range;
-use std::{fmt, mem};
+use std::{fmt, iter, mem};
 
 pub type JournResult<T> = Result<T, JournError>;
 
@@ -42,7 +42,7 @@ impl JournError {
     pub fn downcast_msg<T: Error + 'static>(&self) -> Option<&T> {
         match self.msg.downcast_ref::<Box<T>>() {
             Some(s) => Some(s.as_ref()),
-            None => None,
+            None => self.msg.downcast_ref::<T>(),
         }
     }
 
@@ -62,6 +62,15 @@ impl JournError {
             Ok(errors) => Box::new(errors.flatten()),
             Err(msg) => msg,
         };
+    }
+
+    /// Iterates over the error chain, starting with this error and following the sources.
+    pub fn iter(&self) -> impl Iterator<Item = &(dyn Error + 'static)> {
+        iter::successors(Some(self as &(dyn Error + 'static)), |e| (*e).source())
+    }
+
+    pub fn contains_msg<E: Error + PartialEq + 'static>(&self, msg: &E) -> bool {
+        self.iter().any(|e| e.downcast_ref::<E>().map_or(false, |e| e == msg))
     }
 
     /// Gets whether the error has a block context down the chain.

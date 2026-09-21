@@ -383,7 +383,7 @@ impl<'h> Pool<'h> {
                     let new_holding_key = -actual_holding_key;
                     let holding = self.holdings.remove(&actual_holding_key).unwrap();
                     let replaced_holding = self.holdings.insert(new_holding_key, holding);
-                    debug_assert_eq!(replaced_holding, None, "holding overwritten");
+                    debug_assert!(replaced_holding.is_none(), "holding overwritten");
                     new_holding_key
                 } else {
                     actual_holding_key
@@ -399,7 +399,6 @@ impl<'h> Pool<'h> {
                 self.holdings.insert(
                     ideal_holding_key,
                     DealHolding::Single(SingleDealHolding::new(Deal::zero(
-                        adj.id().clone(),
                         unit,
                         adj.entry(),
                         self.unit_of_account,

@@ -26,7 +26,7 @@ use std::fmt;
 use std::fmt::Debug;
 use std::rc::Rc;
 
-#[derive(PartialEq, Eq)]
+//#[derive(PartialEq, Eq)]
 pub struct AverageDealHolding<'h> {
     pub(super) id: usize,
     deals: Vec<Deal<'h>>,

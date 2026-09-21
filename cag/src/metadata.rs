@@ -14,7 +14,6 @@ use journ_core::parsing::entry::valued_amount;
 use journ_core::parsing::input::{BlockInput, ConfigInput, TextInput};
 use journ_core::parsing::text_block::block_leading_whitespace;
 use journ_core::parsing::{IParseResult, amount, entry};
-use journ_core::unit::Unit;
 use journ_core::valued_amount::ValuedAmount;
 use nom::Err as NomErr;
 use nom::branch::alt;
@@ -25,25 +24,39 @@ use nom::sequence::{preceded, terminated, tuple};
 use smallvec::{SmallVec, smallvec};
 use std::fmt::Debug;
 
+/// Manual inclusion of deals on entries that overrides the implied deal detection for a particular unit.
+pub static CAG_DEAL: &str = "CAG-Deal";
+/// An adjustment to all holdings of a particular unit.
+pub static CAG_ADJUST: &str = "CAG-Adjust";
+/// An adjustment to a particular holding of a unit.
+pub static CAG_ADJUST_POOL: &str = "CAG-AdjustPool";
+/// Account tag which is recognised by all linked flows on the credit or debit side
+/// and applied to credit-side deals to force the capital gain to be such that the effective proceeds are zero.
+pub static CAG_ZERO_PROCEEDS: &str = "CAG-ZeroProceeds";
+/// Account tag which overrides the default capital gains include flow expression for the entry.
+pub static CAG_INCLUDE: &str = "CAG-Include";
+/// Notes about the deals to be included in reports.
+pub static CAG_NOTE: &str = "CAG-Note";
+
 pub trait CapitalGainsMetadataAccess<'h> {
-    fn cg_metadata(&self, uoa: &'h Unit<'h>) -> JournResult<CapitalGainsEntryMetadata<'h>>;
+    fn cg_metadata(&self) -> JournResult<CapitalGainsEntryMetadata<'h>>;
 }
 
 impl<'h> CapitalGainsMetadataAccess<'h> for &'h JournalEntry<'h> {
-    fn cg_metadata(&self, uoa: &'h Unit<'h>) -> JournResult<CapitalGainsEntryMetadata<'h>> {
+    fn cg_metadata(&self) -> JournResult<CapitalGainsEntryMetadata<'h>> {
         let mut deal_metadata = vec![];
         let mut adjustment_metadata = vec![];
         let mut position = 0;
 
         for metadata in self.metadata() {
-            if metadata.key() == "CAG-Deal" || metadata.key() == "CAG-Deal!" {
+            if metadata.key() == CAG_DEAL {
                 let (valued_amount, expenses, taxable_gain) =
                     CapitalGainsEntryMetadata::parse_deal(metadata)?;
                 deal_metadata.push((valued_amount, expenses, taxable_gain, position));
-            } else if metadata.key() == "CAG-Adjust" {
+            } else if metadata.key() == CAG_ADJUST {
                 adjustment_metadata
                     .push(CapitalGainsEntryMetadata::parse_adjustment(metadata, self, position)?)
-            } else if metadata.key() == "CAG-AdjustPool" {
+            } else if metadata.key() == CAG_ADJUST_POOL {
                 adjustment_metadata.push(CapitalGainsEntryMetadata::parse_pool_adjustment(
                     metadata, self, position,
                 )?)
@@ -53,7 +66,6 @@ impl<'h> CapitalGainsMetadataAccess<'h> for &'h JournalEntry<'h> {
 
         Ok(CapitalGainsEntryMetadata {
             entry: self,
-            uoa,
             deal_metadata,
             adjustment_metadata,
             md_count: position + 1,
@@ -64,18 +76,12 @@ impl<'h> CapitalGainsMetadataAccess<'h> for &'h JournalEntry<'h> {
 #[derive(Debug, Clone)]
 pub struct CapitalGainsEntryMetadata<'h> {
     entry: &'h JournalEntry<'h>,
-    uoa: &'h Unit<'h>,
     deal_metadata: Vec<(ValuedAmount<'h>, ValuedAmount<'h>, Option<ValuedAmount<'h>>, usize)>,
     adjustment_metadata: Vec<Adjustment<'h>>,
     md_count: usize,
 }
 
 impl<'h> CapitalGainsEntryMetadata<'h> {
-    /*
-    pub fn deals(&self, unit: &'h Unit<'h>) -> SmallVec<[Deal<'h>; 2]> {
-        self.deal_metadata.iter().filter(|a| a.unit() == unit).cloned().collect()
-    }*/
-
     pub fn into_deal_metadata(
         self,
     ) -> Vec<(ValuedAmount<'h>, ValuedAmount<'h>, Option<ValuedAmount<'h>>, usize)> {
@@ -246,11 +252,7 @@ impl<'h> CapitalGainsEntryMetadata<'h> {
         let mut all_md = smallvec![metadata.clone()];
         // Add entry metadata
         all_md.append(
-            &mut entry
-                .metadata_by_key("CAG-Note")
-                .into_iter()
-                .cloned()
-                .collect::<SmallVec<[_; 2]>>(),
+            &mut entry.metadata_by_key(CAG_NOTE).into_iter().cloned().collect::<SmallVec<[_; 2]>>(),
         );
         // Append nested metadata under this CAG-Deal
         all_md.append(&mut metadata.value_as_metadata_lines());
@@ -338,7 +340,7 @@ impl<'h> CapitalGainsEntryMetadata<'h> {
             // Add entry metadata
             all_md.append(
                 &mut entry
-                    .metadata_by_key("CAG-Note")
+                    .metadata_by_key(CAG_NOTE)
                     .into_iter()
                     .cloned()
                     .collect::<SmallVec<[_; 2]>>(),
@@ -361,6 +363,6 @@ impl<'h> CapitalGainsEntryMetadata<'h> {
 
     /// Removes all Deal metadata except keys ending with a '!' whose values are determined by the user.
     pub fn clear_deals(entry: &mut JournalEntry) {
-        entry.remove_metadata_tags_by_key("CAG-Deal");
+        entry.remove_metadata_tags_by_key(CAG_DEAL);
     }
 }

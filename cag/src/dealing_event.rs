@@ -11,7 +11,7 @@ use journ_core::datetime::JDateTimeRange;
 use journ_core::unit::Unit;
 use std::cmp::Ordering;
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum DealingEvent<'h> {
     Deal(Deal<'h>),
     //Group(DealGroup<'h>),
@@ -44,6 +44,7 @@ impl<'h> DealingEvent<'h> {
     }*/
 }
 
+/*
 impl Ord for DealingEvent<'_> {
     fn cmp(&self, other: &Self) -> Ordering {
         let self_dt = self.datetime();
@@ -56,7 +57,7 @@ impl PartialOrd for DealingEvent<'_> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
-}
+}*/
 
 /*
 impl fmt::Display for DealingEvent<'_> {

@@ -243,7 +243,7 @@ impl<'h> MetadataInner<'h> {
     }
 
     pub fn value(&self) -> Option<&str> {
-        self.value.as_deref().map(|s| s.trim())
+        self.value.as_deref().map(move |s| s.trim())
     }
 }
 

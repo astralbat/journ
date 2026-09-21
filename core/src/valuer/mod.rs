@@ -237,6 +237,18 @@ impl PartialEq for Valuation<'_> {
     }
 }
 
+impl<'a, 'b> PartialEq<Amount<'a>> for Valuation<'b> {
+    fn eq(&self, other: &Amount<'a>) -> bool {
+        &self.amount == other
+    }
+}
+
+impl<'h> From<Amount<'h>> for Valuation<'h> {
+    fn from(amount: Amount<'h>) -> Self {
+        Valuation::unary(amount)
+    }
+}
+
 impl<'h> Add for &Valuation<'h> {
     type Output = Option<Valuation<'h>>;
 

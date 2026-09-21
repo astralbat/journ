@@ -20,6 +20,7 @@ use crate::parsing::text_block::{BlockObject, TextBlock, TextBlockBuf};
 use crate::posting::{Posting, PostingId};
 use crate::tree_id::TreeId;
 use crate::unit::Unit;
+use crate::valuer::LinearSystemValuer;
 use crate::{err, match_map};
 use itertools::Itertools;
 use rust_decimal::Decimal;
@@ -402,8 +403,11 @@ impl<'h> JournalEntry<'h> {
         self.create_elided_postings()
             .and_then(|_| self.derive_posting_amount())
             .and_then(|_| self.check_amounts_balanced())
-            .and_then(|_| self.check_valuations_balanced())
-            .and_then(|_| self.check_valuations_consistent())
+            .and_then(|_| LinearSystemValuer::check(self))
+        // Commented out whilst linear system valuer improvements are made. This valuer
+        // could perhaps do the job better.
+        //.and_then(|_| self.check_valuations_balanced())
+        //.and_then(|_| self.check_valuations_consistent())
     }
 
     /// Create additional postings on the entry in situations with more than once unit
