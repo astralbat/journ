@@ -11,7 +11,9 @@ use chrono::{DateTime, Datelike, TimeZone, Timelike};
 use chrono_tz::Tz;
 use pyo3::prelude::PyAnyMethods;
 use pyo3::types::{PyDateTime, PyTzInfo};
-use pyo3::{Bound, BoundObject, FromPyObject, IntoPyObject, PyAny, PyErr, PyResult, Python};
+use pyo3::{
+    Borrowed, Bound, BoundObject, FromPyObject, IntoPyObject, PyAny, PyErr, PyResult, Python,
+};
 
 #[derive(Copy, Clone)]
 pub struct DateTimeWrapper(pub DateTime<Tz>);
@@ -29,7 +31,7 @@ impl<'py> IntoPyObject<'py> for DateTimeWrapper {
         let tz_info = zone_info_cls
             .call1((self.0.timezone().name(),))
             .expect("Failed to create ZoneInfo instance")
-            .downcast_into::<PyTzInfo>()
+            .cast_into::<PyTzInfo>()
             .expect("Failed to downcast to PyTzInfo");
 
         /*
@@ -58,8 +60,10 @@ impl<'py> IntoPyObject<'py> for DateTimeWrapper {
     }
 }
 
-impl<'source> FromPyObject<'source> for DateTimeWrapper {
-    fn extract_bound(ob: &Bound<'source, PyAny>) -> PyResult<Self> {
+impl<'source, 'py> FromPyObject<'source, 'py> for DateTimeWrapper {
+    type Error = PyErr;
+
+    fn extract(ob: Borrowed<'source, 'py, PyAny>) -> PyResult<Self> {
         let timestamp: f64 = ob.call_method0("timestamp")?.extract()?;
         Ok(DateTimeWrapper(Tz::UTC.timestamp_opt(timestamp as i64, 0).unwrap()))
     }

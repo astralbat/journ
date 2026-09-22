@@ -26,7 +26,6 @@ use journ_core::journal_entry::JournalEntry;
 use journ_core::metadata::Metadata;
 use journ_core::unit::Unit;
 use linked_hash_set::LinkedHashSet;
-use std::cell::{Ref, RefCell, RefMut};
 use std::fmt::Debug;
 use std::rc::Rc;
 use std::{fmt, iter};

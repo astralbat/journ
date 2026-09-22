@@ -20,7 +20,7 @@ use crate::valuer::{
     LinearSystemValuer, PriceDatabaseValuer, Valuation, ValuationError, ValuationResult, Valuer,
 };
 use crate::{err, parsing};
-use pyo3::{PyObject, Python};
+use pyo3::{Py, PyAny, Python};
 use rust_decimal::Decimal;
 use smallvec::SmallVec;
 use std::sync::Arc;
@@ -54,9 +54,9 @@ impl<'h> LambdaValuer<'h> {
         base_unit: &'h Unit<'h>,
         quote_unit: &'h Unit<'h>,
         datetime: JDateTime,
-        result: PyObject,
+        result: Py<PyAny>,
     ) -> Result<Vec<Arc<Price<'h>>>, ValuationError> {
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             if let Ok(list) = result.extract::<Vec<_>>(py) {
                 let mut main_list = vec![];
                 for l in list {

@@ -25,11 +25,10 @@ use journ_core::error::{BlockContextError, JournError};
 use journ_core::journal::Journal;
 use journ_core::journal_context::JContext;
 use journ_core::journal_entry::JournalEntry;
-use journ_core::journal_entry_flow::{Flow, Flows, LinkedFlow};
+use journ_core::journal_entry_flow::{Flows, LinkedFlow};
 use journ_core::parsing::text_block::TextBlockBuf;
 use journ_core::report::command::arguments::Command;
 use journ_core::report::expr::{LinkedFlowContext, ScalarExpr};
-use journ_core::tree_id::BranchCountingTreeId;
 use journ_core::unit::Unit;
 use journ_core::valued_amount::PostingValuation;
 use journ_core::valuer::{SystemValuer, ValueResult};
@@ -195,8 +194,6 @@ impl<'h> CapitalGainsComputer {
                         .map(|f| f.valued_amount()),
                 )?;
 
-                let deal_id_branch =
-                    BranchCountingTreeId::new(entry.id().clone(), cg_metadata.md_count() + 1);
                 for (i, flow) in implicit_flows
                     .into_iter()
                     .filter(|d| d.unit() != unit_of_account)
@@ -260,7 +257,7 @@ impl<'h> CapitalGainsComputer {
         // Add explicit deals
         let cg_metadata = existing_entry.cg_metadata()?;
         let mut explicit_deals: SmallVec<[Deal<'h>; 4]> = smallvec![];
-        for (mut valued_amount, expenses, taxable_gain, md_position) in
+        for (mut valued_amount, expenses, taxable_gain, _md_position) in
             cg_metadata.into_deal_metadata()
         {
             if unit_filter.is_included(valued_amount.unit()) {

@@ -11,7 +11,7 @@ use journ_core::error::JournResult;
 use journ_core::python::conversion::DateTimeWrapper;
 use pyo3::IntoPyObject;
 use pyo3::prelude::PyModule;
-use pyo3::types::{PyAnyMethods, PyDict, PyDictMethods, PyModuleMethods};
+use pyo3::types::{PyDict, PyDictMethods, PyModuleMethods};
 use pyo3::{Bound, PyResult, Python, pyclass, pymethods, pymodule, wrap_pymodule};
 use std::convert::Infallible;
 
@@ -39,10 +39,10 @@ fn cgt<'py>(_py: Python, _m: Bound<'py, PyModule>) -> PyResult<()> {
 
 pub fn register() -> JournResult<()> {
     //PythonEnvironment::wait_for();
-    Python::with_gil(|py| {
+    Python::attach(|py| {
         match py.import("sys") {
             Ok(mod_sys) => match mod_sys.dict().get_item("modules").unwrap() {
-                Some(dict) => match dict.downcast_into::<PyDict>() {
+                Some(dict) => match dict.cast_into::<PyDict>() {
                     Ok(dict) => match dict.set_item("cgt".to_string(), wrap_pymodule!(cgt)(py)) {
                         Ok(()) => Ok(()),
                         Err(_) => Err(err!("Failed to set module as an item on sys.modules")),
@@ -61,7 +61,7 @@ pub fn register() -> JournResult<()> {
 
 /// Represents the 'Deal' class in the python environment.
 #[derive(Clone)]
-#[pyclass(unsendable)]
+#[pyclass(from_py_object, unsendable)]
 pub struct PyDeal {
     #[pyo3(get)]
     date_from: DateTimeWrapper,

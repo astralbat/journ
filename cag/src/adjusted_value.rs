@@ -146,7 +146,7 @@ impl<'h> AdjustedValue<'h> {
 
         let split_ratio = split_amount / self.amount.quantity();
 
-        let (mut l_amount, mut r_amount) = self.amount.split(split_amount);
+        let (l_amount, r_amount) = self.amount.split(split_amount);
         //if rounded {
         //    l_amount = l_amount.rounded();
         //    r_amount = r_amount.rounded();

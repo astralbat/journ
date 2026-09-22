@@ -228,8 +228,7 @@ impl<'h> AverageDealHolding<'h> {
         //let mut split_ratio =
         //    adj_value_togo.amount().quantity() / adj_value_rem.amount().quantity();
 
-        let last_i = self.deals.len() - 1;
-        for (i, deal) in self.deals.into_iter().enumerate() {
+        for deal in self.deals.into_iter() {
             let (left, right) = deal.split_with_split(&mut split);
 
             //split_ratio = adj_value_togo.amount().quantity() / adj_value_rem.amount().quantity();

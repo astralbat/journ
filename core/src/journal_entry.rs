@@ -22,7 +22,6 @@ use crate::tree_id::TreeId;
 use crate::unit::Unit;
 use crate::valuer::LinearSystemValuer;
 use crate::{err, match_map};
-use itertools::Itertools;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::Zero;
 use rust_decimal_macros::*;

@@ -11,7 +11,7 @@ use crate::err;
 use crate::error::JournResult;
 use crate::unit::Unit;
 use crate::valued_amount::{PostingValuation, ValuedAmount};
-use crate::valuer::{ValuationError, Valuer};
+use crate::valuer::Valuer;
 use rust_decimal::prelude::Zero;
 use smallvec::{SmallVec, smallvec};
 use std::cmp::Ordering;

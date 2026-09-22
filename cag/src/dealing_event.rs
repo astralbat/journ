@@ -9,7 +9,6 @@ use crate::adjustment::Adjustment;
 use crate::deal::Deal;
 use journ_core::datetime::JDateTimeRange;
 use journ_core::unit::Unit;
-use std::cmp::Ordering;
 
 #[derive(Debug)]
 pub enum DealingEvent<'h> {

@@ -8,13 +8,15 @@
 use crate::error::{BlockContext, BlockContextError, JournError, JournResult};
 use crate::journal_context::JContext;
 use crate::parsing::text_block::TextBlock;
-use crate::python::conversion::{DateTimeWrapper, DeferredArg};
+use crate::python::conversion::DeferredArg;
 use crate::{err, pyerr};
 use nom::bytes::complete::take_while1;
+use pyo3::conversion::FromPyObjectOwned;
 use pyo3::prelude::{PyAnyMethods, PyDictMethods, PyModuleMethods, PyTracebackMethods};
 use pyo3::types::PyDict;
-use pyo3::{Bound, Py, PyErr, PyObject, PyResult, Python, intern};
+use pyo3::{Bound, FromPyObject, Py, PyAny, PyErr, Python, intern};
 use std::collections::HashMap;
+use std::error::Error;
 use std::ffi::{CStr, CString};
 use std::path::Path;
 use std::sync::{Arc, Condvar, LazyLock, Mutex};
@@ -25,13 +27,15 @@ pub struct PythonEnvironment;
 
 //pub trait PyObjectArgKey: ToPyObject + Hash {}
 
+/*
 /// Like Py03's FromPyObject except that it is not parametised by a lifetime and thus can only extract
 /// fully owned objects. E.g. String, but not &str. This permits our eval() to return a generic return type, which
 /// is not possible using FromPyObject since it may return a type whose lifetime is bound to the lifetime of the GIL which is dropped
 /// at the end of eval().
 pub trait FromPyObjectOwned: Sized + 'static {
     fn extract(ob: PyObject, py: Python) -> PyResult<Self>;
-}
+}*/
+/*
 macro_rules! from_py_object_owned {
     ($type:ty) => {
         impl FromPyObjectOwned for $type {
@@ -52,14 +56,14 @@ where
     T: FromPyObjectOwned,
 {
     fn extract(ob: PyObject, py: Python) -> PyResult<Self> {
-        let l = ob.extract::<Vec<PyObject>>(py)?;
+        let l = ob.borrow().extract::<Vec<PyObject>>(py)?;
         let mut ret = Vec::with_capacity(l.len());
         for o in l {
             ret.push(FromPyObjectOwned::extract(o, py)?)
         }
         Ok(ret)
     }
-}
+}*/
 
 static PYTHON_STARTING: Mutex<bool> = Mutex::new(false);
 static PYTHON_STARTED: LazyLock<Arc<(Mutex<bool>, Condvar)>> =
@@ -91,7 +95,7 @@ impl PythonEnvironment {
                 //#[cfg(not(feature = "python-embedded"))]
                 Self::startup_external();
 
-                Python::with_gil(|py| {
+                Python::attach(|py| {
                     let startup_code = c"
                     # Import datetime in to the system namespace. This is called from `valuer`.\n\
                     from datetime import datetime\n\
@@ -155,7 +159,6 @@ impl PythonEnvironment {
     //#[cfg(not(feature = "python-embedded"))]
     fn startup_external() {
         use crate::python::mod_ledger::ledger;
-        use pyo3::prepare_freethreaded_python;
 
         debug!("External Python: initialising");
 
@@ -163,12 +166,12 @@ impl PythonEnvironment {
         // This has to be done before the interpreter is initialised.
         pyo3::append_to_inittab!(ledger);
 
-        prepare_freethreaded_python();
+        Python::initialize();
     }
 
     pub fn run_code(code: &str) -> JournResult<()> {
         Self::wait_for();
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let globals = PythonEnvironment::journal_dict(py, None);
             py.run(
                 &CString::new(code).map_err(|_| err!("Error converting code to CStr: {}", code))?,
@@ -184,22 +187,25 @@ impl PythonEnvironment {
         args: Option<HashMap<String, Box<dyn DeferredArg>>>,
     ) -> JournResult<T>
     where
-        T: FromPyObjectOwned,
+        T: for<'py> FromPyObjectOwned<'py>,
+        for<'py, 'a> <T as FromPyObject<'a, 'py>>::Error: Error,
     {
         let expr =
             CString::new(expr).map_err(|_| err!("Error converting code to CStr: {}", expr))?;
 
-        Python::with_gil(|py| {
-            let convert_err = |e: PyErr| {
-                err!("Python error evaluating: '{}'", expr.to_str().unwrap())
-                    .with_source(pyerr!(py, e))
-            };
+        Python::attach(|py| {
+            let convert_err = || err!("Python error evaluating: '{}'", expr.to_str().unwrap());
 
             let locals = match args {
                 Some(args) => {
                     let locals = PyDict::new(py);
                     for (k, v) in args {
-                        locals.set_item(k, v.to_pyobject(py).map_err(convert_err)?).unwrap();
+                        locals
+                            .set_item(
+                                k,
+                                v.to_pyobject(py).map_err(|e| convert_err().with_source(e))?,
+                            )
+                            .unwrap();
                     }
                     Some(locals)
                 }
@@ -207,9 +213,9 @@ impl PythonEnvironment {
             };
             PythonEnvironment::set_active_journal(py);
             py.eval(&expr, Some(&PythonEnvironment::journal_dict(py, None)), locals.as_ref())
-                .map_err(convert_err)
-                .and_then(move |res| {
-                    FromPyObjectOwned::extract(res.unbind(), py).map_err(convert_err)
+                .map_err(|e| convert_err().with_source(e))
+                .and_then(move |res: Bound<PyAny>| {
+                    res.extract::<T>().map_err(|e| convert_err().with_source(e.to_string()))
                 })
         })
     }
@@ -233,7 +239,7 @@ impl PythonEnvironment {
     where
         F: Fn(Python, Option<Py<PyDict>>) -> JournResult<R>,
     {
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let locals = match args {
                 Some(args) => {
                     let locals = PyDict::new(py);
@@ -337,13 +343,13 @@ impl PythonEnvironment {
             .get_item(intern!(py, "__journals"))
             .ok()
             .flatten()
-            .map(|j| j.downcast_into::<PyDict>().unwrap())
+            .map(|j| j.cast_into::<PyDict>().unwrap())
         {
             Some(journals) => match journals
                 .get_item(jid)
                 .ok()
                 .flatten()
-                .map(|j| j.downcast_into::<PyDict>().unwrap())
+                .map(|j| j.cast_into::<PyDict>().unwrap())
             {
                 Some(journal) => journal,
                 None => {
@@ -352,7 +358,7 @@ impl PythonEnvironment {
                         .get_item(jid)
                         .ok()
                         .flatten()
-                        .map(|j| j.downcast_into::<PyDict>().unwrap())
+                        .map(|j| j.cast_into::<PyDict>().unwrap())
                         .unwrap()
                 }
             },
@@ -362,7 +368,7 @@ impl PythonEnvironment {
                     .get_item(intern!(py, "__journals"))
                     .unwrap()
                     .unwrap()
-                    .downcast_into::<PyDict>()
+                    .cast_into::<PyDict>()
                     .unwrap();
                 journals.set_item(jid, PyDict::new(py)).unwrap();
 
@@ -372,7 +378,7 @@ impl PythonEnvironment {
                     .get_item(jid)
                     .ok()
                     .flatten()
-                    .map(|j| j.downcast_into::<PyDict>().unwrap())
+                    .map(|j| j.cast_into::<PyDict>().unwrap())
                     .unwrap();
                 let builtins = py.import(intern!(py, "builtins")).unwrap();
                 journal_dict.set_item(intern!(py, "__builtins__"), builtins).unwrap();

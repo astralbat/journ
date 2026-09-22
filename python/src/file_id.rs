@@ -7,7 +7,7 @@
  */
 use journ_core::tree_id::TreeId;
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone)]
 pub struct FileId(pub TreeId);
 

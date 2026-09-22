@@ -92,12 +92,7 @@ impl<'h> PoolManager<'h> {
             Some(pos) => &mut pools[pos],
             None => {
                 let allocated_name = config.allocator().alloc(name.to_string());
-                let pool = Pool::new(
-                    pool_config.id().unwrap(),
-                    allocated_name.as_str(),
-                    pool_uoa,
-                    config.allocator(),
-                );
+                let pool = Pool::new(pool_config.id().unwrap(), allocated_name.as_str(), pool_uoa);
                 pools.push(pool);
                 pools.last_mut().unwrap()
             }
@@ -207,8 +202,8 @@ impl<'h> PoolManager<'h> {
                         if let Some(pool) = self.get_pool_by_name_mut(pool_name) {
                             match pool.try_match(holding, event_datetime)? {
                                 Ok((match_events, remainder)) => {
-                                    if let Some((from_pool, bal_before, _)) = from_pool {
-                                        let bal_after = match remainder.as_ref() {
+                                    if let Some((_from_pool, bal_before, _)) = from_pool {
+                                        let _bal_after = match remainder.as_ref() {
                                             Some(remainder) => {
                                                 bal_before
                                                     - (adjusted_value - remainder.adjusted_value())

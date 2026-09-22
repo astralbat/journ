@@ -138,7 +138,7 @@ impl Journal {
             MODULES.lock().unwrap().push(journ_cag::module_init::initialize());
         }
 
-        let parse_result = Python::with_gil(|py| {
+        let parse_result = Python::attach(|py| {
             let python = py;
 
             // Create the ledger module if it doesn't exist.
@@ -162,14 +162,14 @@ impl Journal {
                 if let Ok(parent) = parent.canonicalize()
                     && parent.is_dir()
                 {
-                    let path = sys.getattr("path")?.downcast_into::<PyList>()?;
+                    let path = sys.getattr("path")?.cast_into::<PyList>()?;
                     path.insert(0, parent.display().to_string())?;
                 }
             }
 
             // The parser works with Python in another thread so we need to release the gil
             // temporarily.
-            python.allow_threads(|| {
+            python.detach(|| {
                 TextBlock::from_file(filename, &ALLOCATOR, None).and_then(|block| {
                     journ_core::journal::Journal::parse(Some(filename), block, &ALLOCATOR)
                 })

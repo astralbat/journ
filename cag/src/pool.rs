@@ -76,32 +76,21 @@ pub struct Pool<'h> {
     holdings: BTreeMap<HoldingKey<'h>, DealHolding<'h>>,
     /// The match methods to use when the holding's balance is >= 0 and < 0 respectively.
     methods: (MatchMethod, MatchMethod),
-    allocator: &'h HerdAllocator<'h>,
 }
 
 impl<'h> Pool<'h> {
-    pub fn new(
-        id: usize,
-        name: &'h str,
-        unit_of_account: &'h Unit<'h>,
-        allocator: &'h HerdAllocator<'h>,
-    ) -> Pool<'h> {
+    pub fn new(id: usize, name: &'h str, unit_of_account: &'h Unit<'h>) -> Pool<'h> {
         Pool {
             id,
             name,
             unit_of_account,
             holdings: Default::default(),
             methods: Default::default(),
-            allocator,
         }
     }
 
     pub fn id(&self) -> usize {
         self.id
-    }
-
-    pub(super) fn holdings(&self) -> &BTreeMap<HoldingKey<'h>, DealHolding<'h>> {
-        &self.holdings
     }
 
     pub fn name(&self) -> &'h str {
@@ -120,7 +109,7 @@ impl<'h> Pool<'h> {
 
     /// Gets whether the pool is completely empty for the given `unit`;
     /// there are no deals in its holding.
-    pub fn key(&self, unit: &'h Unit<'h>, check_pos_first: bool) -> Option<HoldingKey<'h>> {
+    pub(super) fn key(&self, unit: &'h Unit<'h>, check_pos_first: bool) -> Option<HoldingKey<'h>> {
         if self.holdings.contains_key(&HoldingKey::new(unit, check_pos_first)) {
             Some(HoldingKey::new(unit, true))
         } else if self.holdings.contains_key(&HoldingKey::new(unit, !check_pos_first)) {

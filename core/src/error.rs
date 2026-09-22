@@ -10,7 +10,7 @@ use crate::parsing::util::interim_space;
 use crate::report::table2;
 use crate::report::table2::{AlignedCell, Alignment, CellRef, MultiCell, Row, StyledCell};
 use crate::report::term_style::{Colour, Style};
-use pyo3::{DowncastError, DowncastIntoError, PyErr};
+use pyo3::{CastError, CastIntoError, PyErr};
 use smartstring::alias::String as SS;
 use std::error::Error;
 use std::ops::Range;
@@ -285,14 +285,14 @@ impl From<PyErr> for JournError {
     }
 }
 
-impl From<DowncastError<'_, '_>> for JournError {
-    fn from(err: DowncastError) -> Self {
+impl From<CastError<'_, '_>> for JournError {
+    fn from(err: CastError) -> Self {
         Self::new(err.to_string())
     }
 }
 
-impl From<DowncastIntoError<'_>> for JournError {
-    fn from(err: DowncastIntoError) -> Self {
+impl From<CastIntoError<'_>> for JournError {
+    fn from(err: CastIntoError) -> Self {
         Self::new(err.to_string())
     }
 }

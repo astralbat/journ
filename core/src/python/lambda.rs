@@ -9,9 +9,12 @@ use crate::err;
 use crate::error::{JournError, JournResult};
 use crate::ext::StrExt;
 use crate::python::conversion::DeferredArg;
-use crate::python::environment::{FromPyObjectOwned, PythonEnvironment};
+use crate::python::environment::PythonEnvironment;
+use pyo3::conversion::FromPyObjectOwned;
 use std::collections::HashMap;
+use std::error::Error;
 use std::str::FromStr;
+use pyo3::FromPyObject;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Lambda {
@@ -51,7 +54,8 @@ impl Lambda {
 
     pub fn eval<T>(&self, args: Vec<Box<dyn DeferredArg>>) -> JournResult<T>
     where
-        T: FromPyObjectOwned,
+        T: for<'py> FromPyObjectOwned<'py>,
+        for<'py, 'a> <T as FromPyObject<'a, 'py>>::Error: Error,
     {
         assert_eq!(args.len(), self.parameters.len());
 

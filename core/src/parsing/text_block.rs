@@ -25,7 +25,6 @@ use nom_locate::LocatedSpan;
 use smartstring::alias::String as SS;
 use std::cmp::Ordering;
 use std::fmt::Write;
-use std::io::ErrorKind;
 use std::ops::Add;
 use std::path::Path;
 use std::{fmt, io};
@@ -109,10 +108,7 @@ impl<'h> TextBlock<'h> {
         parent: Option<&'h TextBlock<'h>>,
     ) -> JournResult<Self> {
         if !file.exists() {
-            return Err(err!(io::Error::new(
-                ErrorKind::InvalidFilename,
-                file.display().to_string()
-            )));
+            return Err(err!("File does not exist: {}", file.display()));
         }
         let text = std::fs::read_to_string(file).map_err(
             |e| err!(err!("IO Error: {}", e); "Cannot open file for reading; check that it exists"),

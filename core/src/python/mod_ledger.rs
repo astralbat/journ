@@ -20,9 +20,9 @@ use chrono::TimeZone;
 use chrono_tz::Tz;
 use pyo3::basic::CompareOp;
 use pyo3::exceptions::PyException;
-use pyo3::types::{PyAnyMethods, PyDateTime, PyDict, PyDictMethods, PyModule, PyModuleMethods};
+use pyo3::types::{PyDateTime, PyDict, PyDictMethods, PyModule, PyModuleMethods};
 use pyo3::{
-    Bound, IntoPyObject, PyErr, PyObject, PyResult, Python, create_exception, pyfunction,
+    Bound, IntoPyObject, Py, PyAny, PyErr, PyResult, Python, create_exception, pyfunction,
     wrap_pyfunction,
 };
 use pyo3::{pyclass, pymethods, pymodule};
@@ -42,14 +42,14 @@ impl PythonLedgerModule {
         let price_db = Arc::clone(price_db);
 
         PythonEnvironment::wait_for();
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let journal_dict = PythonEnvironment::journal_dict(py, None);
 
             match journal_dict
                 .get_item("__price_dbs")
                 .ok()
                 .flatten()
-                .map(|v| v.downcast_into::<PyDict>().unwrap())
+                .map(|v| v.cast_into::<PyDict>().unwrap())
             {
                 Some(db_map) => {
                     db_map.set_item(&alias_owned, Arc::as_ptr(&price_db) as usize).unwrap()
@@ -115,7 +115,7 @@ pub fn ledger<'py>(py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()> {
 
 /// Invoke the system valuer to get a valuation for the specified base and quote units at the specified datetime.
 #[pyfunction]
-fn value<'py>(py: Python<'py>, qu: &str, bu: &str, dt: PyObject) -> PyResult<Option<PyPrice>> {
+fn value<'py>(py: Python<'py>, qu: &str, bu: &str, dt: Py<PyAny>) -> PyResult<Option<PyPrice>> {
     let timestamp = dt.call_method(py, "timestamp", (), None)?.extract::<f64>(py)?.round() as i64;
     let datetime =
         JDateTime::new(Tz::UTC.timestamp_opt(timestamp, 0).unwrap(), DateTimePrecision::Second);
@@ -172,7 +172,7 @@ fn price_db_lookup<'py>(
     }
 }*/
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone)]
 pub struct PyPrice {
     #[pyo3(get, set, name = "base_curr")]
@@ -291,7 +291,7 @@ impl<'py> IntoPyObject<'py> for JDateTime {
                 None,
             )?
             .into_pyobject(py)?
-            .downcast_into()
+            .cast_into()
             .unwrap())
     }
 }

@@ -35,7 +35,7 @@ impl<'h> LinearSystemValuer<'h> {
     /// Only the first of X = Y pair shall be added to the system to prevent price contradictions
     /// later.
     pub fn new(
-        valued_amounts: impl Iterator<Item=(Amount<'h>, Amount<'h>)>,
+        valued_amounts: impl Iterator<Item = (Amount<'h>, Amount<'h>)>,
     ) -> LinearSystemValuer<'h> {
         // Add valuations, with equations rearranged to be Amount - Value = 0.
         let data = Vec::with_capacity(8);
@@ -64,14 +64,10 @@ impl<'h> LinearSystemValuer<'h> {
                     Ok(_) => {}
                     Err(ve) => match ve {
                         ValuationError::Undetermined(err)
-                        if err.contains_msg(&err!(VALUATION_NOT_WITHIN_TOLERANCE)) =>
-                            {
-                                return Err(err!(
-                                "Inconsistent valuations between {} and {}",
-                                pst.unit(),
-                                value_unit
-                            ));
-                            }
+                            if err.contains_msg(&err!(VALUATION_NOT_WITHIN_TOLERANCE)) =>
+                        {
+                            return Err(err!("Inconsistent valuations",));
+                        }
                         ValuationError::EvalFailure(err) => return Err(err),
                         _ => {}
                     },
@@ -184,7 +180,7 @@ impl<'h> LinearSystemValuer<'h> {
     /// Adds a zero sum constraint to the valuer. This extra information can be useful in solving the linear system.
     /// the `amounts` should either sum to zero or the total considered value of them are zero if they are in more
     /// than one kind of unit.
-    pub fn add_zero_sum(&mut self, amounts: impl Iterator<Item=Amount<'h>> + Clone) {
+    pub fn add_zero_sum(&mut self, amounts: impl Iterator<Item = Amount<'h>> + Clone) {
         // Pre-total the amounts in Decimal to make more accurate
         let mut total_amounts = SmallVec::<[Amount<'h>; 4]>::new();
         for amount in amounts.clone() {
@@ -273,13 +269,13 @@ impl<'h> From<&JournalEntry<'h>> for LinearSystemValuer<'h> {
         }
         vav.add_zero_sum(entry.balanced_postings().map(|p| p.amount()));
         if let Some(zero_sum_row) = vav.zero_sum_row {
-            for posting in entry.balanced_postings() {
+            for posting in entry.balanced_postings().filter(|pst| !pst.amount().is_zero()) {
                 let is_quoted_elsewhere = entry
                     .balanced_postings()
                     .flat_map(|posting| posting.posting_valuations())
-                    .any(|valuation| valuation.unit() == posting.amount().unit());
+                    .any(|valuation| valuation.unit() == posting.unit());
                 if is_quoted_elsewhere {
-                    let i = zero_sum_row * vav.units.len() + vav.unit_col(posting.amount().unit());
+                    let i = zero_sum_row * vav.units.len() + vav.unit_col(posting.unit());
                     vav.epsilon[i] += posting.amount().epsilon();
                 }
             }
@@ -336,7 +332,7 @@ impl<'h> Valuer<'h> for LinearSystemValuer<'h> {
         for i in 0..self.row_count + 1 {
             let mut row = vec![];
             let mut epsilon_row = vec![];
-            for j in (0..self.units.len()) {
+            for j in 0..self.units.len() {
                 if self.units[j] == base_unit {
                     a_base_col = row.len();
                 } else if self.units[j] == quote_unit {
@@ -471,7 +467,6 @@ impl Dsu {
 
 pub struct MatrixResult {
     pub solution: Option<Vec<Decimal>>,
-    pub rank: usize,
 }
 
 /// Performs Gauss-Jordan elimination (with partial pivoting) on `a`, reducing it to reduced row
@@ -568,7 +563,7 @@ fn analyze_and_solve(
     let mut row_ids: SmallVec<[usize; 8]> = (0..a.len()).collect();
 
     if a.is_empty() || a[0].is_empty() {
-        return Ok(MatrixResult { solution: None, rank: 0 });
+        return Ok(MatrixResult { solution: None });
     }
 
     let rank = eliminate(a, b, &mut row_ids, false);
@@ -626,8 +621,8 @@ fn analyze_and_solve(
         // identically), giving each original row's propagated tolerance in its final position.
         let mut tolerance = vec![Decimal::ZERO; original_a.len()];
         for (pos, &row_id) in prop_row_ids.iter().enumerate() {
-            tolerance[row_id] =
-                prop_rhs[pos] + if is_pivot_row[row_id] { Decimal::ZERO } else { local_tolerance[row_id] };
+            tolerance[row_id] = prop_rhs[pos]
+                + if is_pivot_row[row_id] { Decimal::ZERO } else { local_tolerance[row_id] };
         }
 
         check_tolerance(
@@ -640,7 +635,7 @@ fn analyze_and_solve(
         solution = Some(x);
     }
 
-    Ok(MatrixResult { solution, rank })
+    Ok(MatrixResult { solution })
 }
 
 /// Checks the tolerance of the solution by calculating a residual and tolerance for each row and comparing them.
@@ -752,6 +747,20 @@ mod test {
                 ACC_C  10 B @@ $9.98
             "#});
         assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_tolerance3() {
+        let res = entry(indoc! {r#"
+            2000-01-01  Entry1
+                ACC_A  1,000 A @@ £1,000.00
+                ACC_B  -1,000.00500000 A @@ £1,000.01
+                ACC_C  -1,000.00060000 B @@ £500.00
+                ACC_D  1,000 B @@ £500.00
+                ACC_E  0.00500000 A @@ £0.01
+                ACC_F  0.00060000 B @@ £0.00
+            "#});
+        assert!(res.is_ok());
     }
 
     #[test]
