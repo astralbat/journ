@@ -507,9 +507,7 @@ impl<'h> Deref for LinkedFlow<'h> {
 #[cfg(test)]
 mod test {
     use crate::entry;
-    use crate::journal_context::JContext;
     use crate::journal_entry_flow::Flows;
-    use crate::test_util::with_entry;
     use crate::valuer::SystemValuer;
     use indoc::indoc;
 

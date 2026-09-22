@@ -14,7 +14,7 @@ use nom::bytes::complete::take_while1;
 use pyo3::conversion::FromPyObjectOwned;
 use pyo3::prelude::{PyAnyMethods, PyDictMethods, PyModuleMethods, PyTracebackMethods};
 use pyo3::types::PyDict;
-use pyo3::{Bound, FromPyObject, Py, PyAny, PyErr, Python, intern};
+use pyo3::{Bound, FromPyObject, Py, PyAny, PyErr, PyResult, Python, intern};
 use std::collections::HashMap;
 use std::error::Error;
 use std::ffi::{CStr, CString};

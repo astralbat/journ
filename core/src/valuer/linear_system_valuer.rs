@@ -14,6 +14,7 @@ use crate::valuer::{Valuation, ValuationError, ValuationResult, Valuer};
 use rust_decimal::Decimal;
 use rust_decimal::prelude::{One, Zero};
 use smallvec::{SmallVec, smallvec};
+use std::collections::HashMap;
 use std::ops::Range;
 
 /// Valuer that derives valuations from a set of valued amounts in a specific quote unit.
@@ -27,6 +28,13 @@ pub struct LinearSystemValuer<'h> {
     row_count: usize,
     zero_sum_row: Option<usize>,
     connectivity: Dsu,
+    /// Tracks which row holds the accumulated data for a given (amount_col, val_col) unit pair,
+    /// keyed by the unordered pair of column indices. This is needed (rather than inferring the
+    /// row from which columns are currently nonzero) because a pair's coefficients can
+    /// legitimately become exactly zero once merged (e.g. two valuations of opposite sign that
+    /// cancel, or a valuation whose stated value is itself zero), which would otherwise be
+    /// indistinguishable from there being no row at all for that pair.
+    row_for_pair: HashMap<(usize, usize), usize>,
 }
 impl<'h> LinearSystemValuer<'h> {
     /// Creates a new valuer from a set of valued amounts in a specific quote unit.
@@ -46,6 +54,7 @@ impl<'h> LinearSystemValuer<'h> {
             row_count: 0,
             zero_sum_row: None,
             connectivity: Dsu::new(),
+            row_for_pair: HashMap::new(),
         };
 
         for (amount, val) in valued_amounts {
@@ -103,16 +112,8 @@ impl<'h> LinearSystemValuer<'h> {
     fn find_mapping(&self, value: (Amount<'h>, Amount<'h>)) -> Option<usize> {
         let amount_col = self.units.iter().position(|&u| u == value.0.unit())?;
         let val_col = self.units.iter().position(|&u| u == value.1.unit())?;
-
-        (0..self.row_count).into_iter().position(|i| {
-            (0..self.units.len()).all(|j| {
-                if j == amount_col || j == val_col {
-                    self.data[i * self.units.len() + j] != Decimal::zero()
-                } else {
-                    self.data[i * self.units.len() + j] == Decimal::zero()
-                }
-            })
-        })
+        let key = if amount_col <= val_col { (amount_col, val_col) } else { (val_col, amount_col) };
+        self.row_for_pair.get(&key).copied()
     }
 
     pub fn has_value(&self, value: (Amount<'h>, Amount<'h>)) -> bool {
@@ -137,17 +138,14 @@ impl<'h> LinearSystemValuer<'h> {
             Some(row) => {
                 let amount_idx = row * self.units.len() + amount_col;
                 let val_idx = row * self.units.len() + val_col;
-                // Don't add if the addition would make the row zero. This makes it useless.
-                if self.data[amount_idx] + value.0.quantity() != dec!(0) {
-                    self.data[amount_idx] += value.0.quantity();
-                    self.data[val_idx] += value.1.quantity() * dec!(-1);
-                    // The posted amount is treated as an exact, transacted quantity (not a
-                    // rounded measurement), so it contributes no epsilon of its own here. All
-                    // rounding uncertainty in this equation comes from the stated valuation,
-                    // whose rounding errors are additive when summing independently-rounded
-                    // valuations.
-                    self.epsilon[val_idx] += value_epsilon;
-                }
+                self.data[amount_idx] += value.0.quantity();
+                self.data[val_idx] += value.1.quantity() * dec!(-1);
+                // The posted amount is treated as an exact, transacted quantity (not a
+                // rounded measurement), so it contributes no epsilon of its own here. All
+                // rounding uncertainty in this equation comes from the stated valuation,
+                // whose rounding errors are additive when summing independently-rounded
+                // valuations.
+                self.epsilon[val_idx] += value_epsilon;
             }
             None => {
                 // Record these two units as connected.
@@ -172,6 +170,8 @@ impl<'h> LinearSystemValuer<'h> {
                 // Keep the last row available for the Valuer impl.
                 self.data.extend((0..self.units.len()).map(|_| Decimal::zero()));
                 self.epsilon.extend((0..self.units.len()).map(|_| Decimal::zero()));
+                let key = if amount_col <= val_col { (amount_col, val_col) } else { (val_col, amount_col) };
+                self.row_for_pair.insert(key, self.row_count);
                 self.row_count += 1;
             }
         }
@@ -254,10 +254,31 @@ impl<'h> LinearSystemValuer<'h> {
 impl<'h> From<&JournalEntry<'h>> for LinearSystemValuer<'h> {
     fn from(entry: &JournalEntry<'h>) -> Self {
         let mut vav = LinearSystemValuer::default();
+        // Count how many valuations exist per unordered unit-pair (posting unit, valuation unit)
+        // so that a valuation whose stated value is zero can still be included when it is
+        // corroborated by another valuation for the same pair (contributing useful rounding
+        // tolerance), while a *lone* zero valuation for a pair continues to be dropped (it
+        // carries no rate information on its own and would otherwise create a degenerate,
+        // self-contradictory row).
+        let mut pair_counts: HashMap<(&Unit, &Unit), usize> = HashMap::new();
         for posting in entry.balanced_postings() {
-            for valuation in
-                posting.posting_valuations().filter(|valuation| !valuation.value().is_zero())
-            {
+            for valuation in posting.posting_valuations() {
+                let a = posting.unit();
+                let b = valuation.unit();
+                let key = if a.code() <= b.code() { (a, b) } else { (b, a) };
+                *pair_counts.entry(key).or_insert(0) += 1;
+            }
+        }
+        for posting in entry.balanced_postings() {
+            for valuation in posting.posting_valuations().filter(|valuation| {
+                if !valuation.value().is_zero() {
+                    return true;
+                }
+                let a = posting.unit();
+                let b = valuation.unit();
+                let key = if a.code() <= b.code() { (a, b) } else { (b, a) };
+                pair_counts.get(&key).copied().unwrap_or(0) > 1
+            }) {
                 let value = valuation.value_with_primary(posting.amount());
                 let value_epsilon = if valuation.is_unit() {
                     valuation.expr().epsilon() * posting.amount().quantity().abs()
@@ -293,6 +314,7 @@ impl Default for LinearSystemValuer<'_> {
             row_count: 0,
             zero_sum_row: None,
             connectivity: Dsu::new(),
+            row_for_pair: HashMap::new(),
         }
     }
 }
@@ -482,14 +504,22 @@ pub struct MatrixResult {
 /// replayed to propagate per-row error budgets through to the solved variables (and to any
 /// redundant/check rows), rather than just the nominal solution.
 ///
-/// Returns the rank of `a`.
+/// Returns the rank of `a`. `pivot_cols`, if provided, is cleared and filled (in pivot order)
+/// with the original column index each successful pivot resolved, so callers can tell which
+/// column ended up at each final row position — this can diverge from row position once any
+/// earlier column fails to find a pivot (e.g. because its coefficients are all zero across the
+/// remaining rows), since a later column then takes over that row slot instead.
 #[allow(clippy::needless_range_loop)]
 fn eliminate(
     a: &mut [Vec<Decimal>],
     rhs: &mut [Decimal],
     row_ids: &mut [usize],
     worst_case: bool,
+    mut pivot_cols: Option<&mut Vec<usize>>,
 ) -> usize {
+    if let Some(pivot_cols) = pivot_cols.as_deref_mut() {
+        pivot_cols.clear();
+    }
     if a.is_empty() || a[0].is_empty() {
         return 0;
     }
@@ -543,6 +573,9 @@ fn eliminate(
                 }
             }
         }
+        if let Some(pivot_cols) = pivot_cols.as_deref_mut() {
+            pivot_cols.push(j);
+        }
         pivot_row += 1;
     }
 
@@ -566,12 +599,35 @@ fn analyze_and_solve(
         return Ok(MatrixResult { solution: None });
     }
 
-    let rank = eliminate(a, b, &mut row_ids, false);
+    let mut pivot_cols: Vec<usize> = Vec::new();
+    let rank = eliminate(a, b, &mut row_ids, false, Some(&mut pivot_cols));
+
+    // Column 1 is, by convention of the sole caller, the quote unit's column (after the
+    // base/quote columns were swapped to the front). If it never received a pivot, its rate
+    // is genuinely undetermined by the system (no combination of rows resolves it), so it
+    // would be meaningless (and unsound, per the comment on `x_by_col` below) to run tolerance
+    // checks against a "solution" that doesn't actually include it.
+    if a[0].len() > 1 && !pivot_cols.iter().take(rank).any(|&c| c == 1) {
+        return Ok(MatrixResult { solution: None });
+    }
 
     let mut solution = None;
     if rank >= 2 {
         let mut x = vec![Decimal::ZERO; rank];
         x.copy_from_slice(&b[..rank]);
+
+        // `x` is indexed by *final row/pivot position*, which only lines up with the original
+        // column order when every column from left to right finds a pivot. Once some column
+        // fails to pivot (e.g. its coefficients are all zero at that point), a later column
+        // takes over that row slot instead, shifting the correspondence. Rebuild a
+        // column-indexed view (0 for any column that was never pivoted, i.e. left undetermined)
+        // so that every subsequent computation that combines `x` with per-column data
+        // (`a_row`/`eps_row`, both still in original column order) lines up correctly.
+        let cols = a[0].len();
+        let mut x_by_col = vec![Decimal::ZERO; cols];
+        for (pos, &col) in pivot_cols.iter().enumerate() {
+            x_by_col[col] = x[pos];
+        }
 
         // Each row that was actually used to *pivot* (i.e. solve for one of the variables in `x`)
         // has its own local error budget: the worst-case change to its residual if its own
@@ -596,7 +652,8 @@ fn analyze_and_solve(
             .iter()
             .zip(epsilon.iter())
             .map(|(a_row, eps_row)| {
-                x.iter()
+                x_by_col
+                    .iter()
                     .zip(a_row.iter().zip(eps_row.iter()))
                     .map(|(x_j, (_, &eps_ij))| x_j.abs() * eps_ij)
                     .sum()
@@ -614,7 +671,7 @@ fn analyze_and_solve(
                 tolerance
             })
             .collect();
-        eliminate(&mut prop_a, &mut prop_rhs, &mut prop_row_ids, true);
+        eliminate(&mut prop_a, &mut prop_rhs, &mut prop_row_ids, true, None);
 
         // `prop_rhs` is now indexed the same way `row_ids`/`b` ended up after the main
         // elimination (since it was derived from an identical copy of `a` and so pivots
@@ -628,7 +685,7 @@ fn analyze_and_solve(
         check_tolerance(
             original_a.as_ref(),
             row_ids.as_ref(),
-            &x,
+            &x_by_col,
             original_b.as_ref(),
             &tolerance,
         )?;
@@ -759,6 +816,15 @@ mod test {
                 ACC_D  1,000 B @@ £500.00
                 ACC_E  0.00500000 A @@ £0.01
                 ACC_F  0.00060000 B @@ £0.00
+            "#});
+        assert!(res.is_ok());
+
+        let res = entry(indoc! {r#"
+            2000-01-01  Entry1
+                ACC_A  -0.007305 A @@ £0.01
+                ACC_B  -0.004305 B @@ £0.00
+                ACC_C  0.004305 A @@ £0.01
+                ACC_D  0.007305 B @@ £0.00
             "#});
         assert!(res.is_ok());
     }
