@@ -18,17 +18,21 @@ use crate::module::{ModuleConfiguration, ModuleConfigurationEq};
 use crate::parsing::DerefMutAndDebug;
 use crate::price_db::PriceDatabase;
 use crate::tree_id::{BranchCountingTreeId, TreeId};
+use crate::unit;
 use crate::unit::{NumberFormat, RoundingStrategy, Unit};
 use chrono_tz::Tz;
+use hashlink::{LinkedHashMap, linked_hash_map};
 use im::HashMap;
 use regex::{Regex, RegexBuilder};
 use smallvec::SmallVec;
 use std::borrow::Cow;
-use std::fmt;
+use std::collections::HashSet;
 use std::fmt::{Debug, Formatter};
+use std::hash::Hash;
 use std::ops::Deref;
 use std::string::ToString;
 use std::sync::Arc;
+use std::{fmt, iter};
 
 #[derive(Debug)]
 pub struct ConfigurationVersion {
@@ -77,7 +81,8 @@ struct BaseConfiguration<'h> {
     datetime_format: &'h DateTimeFormat<'h>,
     timezone: Tz,
     number_format: &'h NumberFormat,
-    default_unit: &'h Unit<'h>,
+    unit_patterns: LinkedHashMap<Expression, &'h Unit<'h>>,
+    account_patterns: LinkedHashMap<Expression, Arc<Account<'h>>>,
     units: HashMap<String, &'h Unit<'h>>,
     accounts: HashMap<String, Arc<Account<'h>>>,
     /// Maps module names to their configuration.
@@ -94,9 +99,20 @@ impl<'h> BaseConfiguration<'h> {
             time_format: DEFAULT_TIME_FORMAT.deref(),
             datetime_format: DEFAULT_DATETIME_FORMAT.deref(),
             timezone: Tz::UTC,
-            default_unit: allocator.alloc(Unit::none()),
+            unit_patterns: [(
+                Expression::from_glob_pattern("*", None),
+                &*allocator.alloc(Unit::none()),
+            )]
+            .into_iter()
+            .collect(),
             units: Default::default(),
             accounts: Default::default(),
+            account_patterns: [(
+                Expression::from_glob_pattern("**", Some(':')),
+                Arc::new(Account::new(String::new(), None, vec![], HashSet::new())),
+            )]
+            .into_iter()
+            .collect(),
             module_config: Default::default(),
             version: ConfigurationVersion::new_root(),
         };
@@ -118,6 +134,8 @@ impl<'h> BaseConfiguration<'h> {
                 version: self.version.increment(),
                 units: self.units.clone(),
                 accounts: self.accounts.clone(),
+                account_patterns: self.account_patterns.clone(),
+                unit_patterns: self.unit_patterns.clone(),
                 module_config: self.module_config.clone(),
                 ..**self
             };
@@ -130,8 +148,23 @@ impl<'h> BaseConfiguration<'h> {
         }
     }
 
-    pub fn default_unit(&self) -> &'h Unit<'h> {
-        self.default_unit
+    pub fn get_matching_units(&self, code: &str) -> SmallVec<[&'h Unit<'h>; 4]> {
+        self.parent
+            .as_ref()
+            .map(|parent| parent.get_matching_units(code))
+            .into_iter()
+            .flatten()
+            .chain(self.unit_patterns.iter().filter(|(e, _)| e.is_match(code)).map(|(_, u)| *u))
+            .collect()
+    }
+
+    pub fn units<'a>(&'a self) -> Box<dyn Iterator<Item = (&'a str, &'h Unit<'h>)> + 'a> {
+        match &self.parent {
+            Some(parent) => {
+                Box::new(parent.units().chain(self.units.iter().map(|(k, v)| (k.as_str(), *v))))
+            }
+            None => Box::new(self.units.iter().map(|(k, v)| (k.as_str(), *v))),
+        }
     }
 
     pub fn get_unit(&self, code: &str) -> Option<&'h Unit<'h>> {
@@ -156,6 +189,21 @@ impl<'h> BaseConfiguration<'h> {
         })
     }
 
+    pub fn get_matching_accounts(&self, full_name: &str) -> SmallVec<[Arc<Account<'h>>; 4]> {
+        self.parent
+            .as_ref()
+            .map(|parent| parent.get_matching_accounts(full_name))
+            .into_iter()
+            .flatten()
+            .chain(
+                self.account_patterns
+                    .iter()
+                    .filter(|(e, _)| e.is_match(full_name))
+                    .map(|(_, a)| Arc::clone(a)),
+            )
+            .collect()
+    }
+
     pub fn get_module_config<T: ModuleConfiguration>(
         &self,
         module_name: &'static str,
@@ -172,9 +220,10 @@ impl<'h> BaseConfiguration<'h> {
 impl PartialEq for BaseConfiguration<'_> {
     fn eq(&self, other: &Self) -> bool {
         let eq = self.number_format == other.number_format
-            && self.default_unit == other.default_unit
             && self.units == other.units
+            && self.unit_patterns == other.unit_patterns
             && self.accounts == other.accounts
+            && self.account_patterns == other.account_patterns
             && self.module_config.len() == other.module_config.len();
         if !eq {
             return false;
@@ -210,14 +259,21 @@ impl Debug for BaseConfiguration<'_> {
         writeln!(f, "    Datetime Format:  {}", self.datetime_format.format_str())?;
         writeln!(f, "    Timezone:      {}", self.timezone)?;
         writeln!(f, "    Number Format: {}", self.number_format)?;
-        writeln!(f, "    Default Unit:  {}", self.default_unit.code())?;
         writeln!(f, "    Units:")?;
         for code in self.units.keys() {
             writeln!(f, "        {code}")?;
         }
+        writeln!(f, "    Unit Patterns:")?;
+        for (expr, _unit) in self.unit_patterns.iter() {
+            writeln!(f, "        Pattern: {}", expr.input)?;
+        }
         writeln!(f, "    Accounts:")?;
         for name in self.accounts.keys() {
             writeln!(f, "        {name}")?;
+        }
+        writeln!(f, "    Account Patterns:")?;
+        for (expr, _account) in self.account_patterns.iter() {
+            writeln!(f, "        Pattern: {}", expr.input)?;
         }
         writeln!(f, "    Module Configurations:")?;
         for (module_name, config) in &self.module_config {
@@ -305,10 +361,6 @@ pub struct Configuration<'h> {
 }
 
 impl<'h> Configuration<'h> {
-    pub fn new() -> Self {
-        Self { base_config: Arc::new(BaseConfiguration::new(None)) }
-    }
-
     /// Creates a new `Configuration` that is a branch of the current one. The new configuration
     /// is essentially the same as the current one.
     pub fn create_child(&self) -> Self {
@@ -327,6 +379,8 @@ impl<'h> Configuration<'h> {
                 version: self.base_config.version.branch(),
                 units: HashMap::new(),
                 accounts: HashMap::new(),
+                account_patterns: Default::default(),
+                unit_patterns: Default::default(),
                 module_config: HashMap::new(),
                 ..*self.base_config
             }),
@@ -391,68 +445,116 @@ impl<'h> Configuration<'h> {
         self.base_config.number_format
     }
 
-    pub fn default_unit(&self) -> &'h Unit<'h> {
-        self.base_config.default_unit()
-    }
-
-    pub fn merge_default_unit(
+    pub fn merge_unit_pattern(
         &mut self,
-        def_unit: &Unit<'h>,
-        allocator: &'h HerdAllocator<'h>,
+        unit_pattern: Expression,
+        mut def_unit: Unit<'h>,
     ) -> &'h Unit<'h> {
-        self.get_mut().default_unit =
-            allocator.alloc(Configuration::merge_units(def_unit, self.base_config.default_unit));
-        self.base_config.default_unit
+        let allocator = self.allocator();
+        let base_config = self.get_mut();
+
+        match base_config.unit_patterns.entry(unit_pattern) {
+            linked_hash_map::Entry::Occupied(mut entry) => {
+                let existing_unit = entry.get_mut();
+                def_unit += existing_unit;
+                *existing_unit = allocator.alloc(def_unit);
+                existing_unit
+            }
+            linked_hash_map::Entry::Vacant(entry) => entry.insert(allocator.alloc(def_unit)),
+        }
     }
 
     pub fn get_unit(&self, code: &str) -> Option<&'h Unit<'h>> {
         self.base_config.get_unit(code)
     }
 
+    /// Gets an iterator of all unit aliases and their corresponding unit.
+    /// The unit code will always equal the primary alias, not necessarily the map key.
+    pub fn units(&self) -> impl Iterator<Item = (&str, &'h Unit<'h>)> {
+        self.base_config.units()
+    }
+
+    pub fn get_matching_units(&self, code: &str) -> SmallVec<[&'h Unit<'h>; 4]> {
+        self.base_config.get_matching_units(code)
+    }
+
     pub fn get_or_create_unit(&mut self, code: &str) -> &'h Unit<'h> {
         match self.base_config.get_unit(code) {
             Some(unit) => unit,
+            None => self.merge_unit(Unit::new(code), &[], None),
+        }
+    }
+
+    /// Merges the `unit` with any existing unit already in the configuration. If no existing unit is found, then the `unit` is merged with any matching unit patterns.
+    pub fn merged_unit(
+        &self,
+        mut unit: Unit<'h>,
+        aliases: &[&str],
+        new_code: Option<&str>,
+    ) -> Unit<'h> {
+        // Try to merge with an already existing unit.
+        let existing = iter::once(unit.code())
+            .chain(aliases.iter().copied())
+            .find_map(|alias| self.get_unit(alias));
+
+        match existing {
+            Some(existing) => unit += existing,
             None => {
-                let unit = Unit::new(code);
-                self.merge_unit(&unit)
+                // Fall back to merging with default settings. Apply these in reverse from the local configuration
+                // up to the root.
+                for matching in self.get_matching_units(unit.code()).into_iter().rev() {
+                    unit += matching;
+                }
             }
         }
+
+        if let Some(new_code) = new_code {
+            unit.set_code(new_code.to_string());
+        }
+        unit
     }
 
     /// Inserts the unit if it doesn't already exist. If it exists, then a new unit is created
     /// that is merged with the existing one with the new currencies parameters overriding the existing
     /// where they have been specified.
     /// Returns the unit inserted or merged.
-    pub fn merge_unit(&mut self, unit: &Unit<'h>) -> &'h Unit<'h> {
-        let mut_base = self.get_mut();
+    pub fn merge_unit(
+        &mut self,
+        unit: Unit<'h>,
+        aliases: &[&str],
+        new_code: Option<&str>,
+    ) -> &'h Unit<'h> {
         let allocator = JContext::get().allocator();
 
         // See if we already have a unit with the same code as any of the unit's aliases and merge with that.
-        let mut merged_unit = None;
-        for alias in unit.aliases() {
-            if let Some(entry) = mut_base.get_unit(alias) {
-                merged_unit = Some(&*allocator.alloc(Self::merge_units(unit, entry)));
-                break;
-            }
-        }
-        // Otherwise, merge with the default unit
-        if merged_unit.is_none() {
-            merged_unit = Some(allocator.alloc(Self::merge_units(unit, mut_base.default_unit)));
-        }
+        let merged = self.merged_unit(unit, aliases, new_code);
+        let allocated = allocator.alloc(merged);
 
-        // Insert an entry for each alias in the merged unit, now having merged aliases.
-        for alias in merged_unit.unwrap().aliases() {
-            mut_base.units.insert(alias.to_string(), merged_unit.unwrap());
+        // We could have old aliases pointing to the old version of the unit. Update these pointers for consistency.
+        let prev_aliases: SmallVec<[String; 4]> =
+            self.units().filter(|(_, u)| *u == allocated).map(|(k, _)| k.to_string()).collect();
+
+        let base_config = self.get_mut();
+        prev_aliases.into_iter().for_each(|alias| {
+            base_config.units.insert(alias, allocated);
+        });
+
+        // Insert an entry for the unit's primary code
+        base_config.units.insert(allocated.code().to_string(), allocated);
+        // Insert an entry for each mentioned alias
+        for alias in aliases {
+            base_config.units.insert(alias.to_string(), allocated);
         }
-        merged_unit.unwrap()
+        allocated
     }
 
+    /*
     /// Takes two units and merges them to create a third unit.
     /// Values are taken from the primary unit and falling back to the secondary.
-    fn merge_units(primary: &Unit<'h>, secondary: &Unit<'h>) -> Unit<'h> {
-        let mut builder = if primary.code() != "" {
+    fn merge_units(primary: &mut Unit<'h>, secondary: &Unit<'h>) -> Unit<'h> {
+        let mut builder = if !primary.is_none() {
             Unit::new(primary.code())
-        } else if secondary.code() != "" {
+        } else if !secondary.is_none() {
             Unit::new(secondary.code())
         } else {
             Unit::none()
@@ -472,9 +574,10 @@ impl<'h> Configuration<'h> {
         }
 
         // Combine aliases, but not with the default unit
-        let mut combined_aliases = Vec::with_capacity(primary.aliases().count());
-        for alias in secondary.aliases().chain(primary.aliases()).map(|a| a.into()) {
-            if !combined_aliases.contains(&alias) {
+        let mut combined_aliases =
+            Vec::with_capacity(primary.aliases().count() + secondary.aliases().count());
+        for alias in primary.aliases().chain(secondary.aliases()).map(str::to_string) {
+            if !combined_aliases.contains(&alias) && !alias.is_empty() {
                 combined_aliases.push(alias);
             }
         }
@@ -499,7 +602,7 @@ impl<'h> Configuration<'h> {
         );
 
         builder
-    }
+    }*/
 
     /// Merges the specified `config` over the top of this configuration.
     /// Parent and version are left unchanged.
@@ -510,12 +613,17 @@ impl<'h> Configuration<'h> {
         base_config.datetime_format = config.datetime_format();
         base_config.timezone = config.timezone();
         base_config.number_format = config.number_format();
-        base_config.default_unit = config.default_unit();
         for (k, v) in config.base_config.units.iter() {
             base_config.units.insert(k.clone(), *v);
         }
+        for (k, v) in config.base_config.unit_patterns.iter() {
+            base_config.unit_patterns.insert(k.clone(), *v);
+        }
         for (k, v) in config.base_config.accounts.iter() {
             base_config.accounts.insert(k.clone(), Arc::clone(v));
+        }
+        for (k, v) in config.base_config.account_patterns.iter() {
+            base_config.account_patterns.insert(k.clone(), Arc::clone(v));
         }
         for (k, v) in config.base_config.module_config.iter() {
             base_config.module_config.insert(k, *v);
@@ -526,8 +634,10 @@ impl<'h> Configuration<'h> {
     /// The set of all unique price databases.
     pub fn price_databases(&self) -> Vec<&Arc<PriceDatabase<'h>>> {
         let mut dbs = vec![];
-        if let Some(price_db) = self.base_config.default_unit.prices() {
-            dbs.push(price_db);
+        for (_, unit) in self.base_config.unit_patterns.iter() {
+            if let Some(price_db) = unit.prices() {
+                dbs.push(price_db);
+            }
         }
         for curr in self.base_config.units.values() {
             if let Some(curr_db) = curr.prices()
@@ -551,28 +661,35 @@ impl<'h> Configuration<'h> {
         }
     }
 
-    pub fn merge_account(&mut self, mut account: Account<'h>) -> Arc<Account<'h>> {
+    pub fn merge_account(&mut self, account: Account<'h>) -> Arc<Account<'h>> {
+        /*
         for unit in account.units_mut() {
             if let Some(secondary) = self.get_unit(unit.primary_code()) {
                 *unit = self.allocator().alloc(Self::merge_units(unit, secondary));
             }
-        }
+        }*/
 
-        let mut_base = self.get_mut();
-        match mut_base.accounts.get(account.name_exact()) {
-            Some(acc) => {
-                let secondary = Arc::clone(acc);
-                let merged = self.merge_accounts(&Arc::new(account), &secondary);
-                let ret = Arc::clone(&merged);
-                self.get_mut().accounts.insert(merged.name_exact().to_string(), merged);
-                ret
+        let merged = 'merge: {
+            let mut accum = Arc::new(account);
+            // Try to merge with an already existing account.
+            for alias in accum.aliases() {
+                if let Some(entry) = self.get_account(alias).map(Arc::clone) {
+                    break 'merge self.merge_accounts(&accum, &entry);
+                }
             }
-            None => {
-                let ret = Arc::new(account);
-                mut_base.accounts.insert(ret.name_exact().to_string(), Arc::clone(&ret));
-                ret
+
+            // Fall back to merging with default account settings
+            for matching in self.get_matching_accounts(accum.name_exact()) {
+                accum = self.merge_accounts(&accum, &matching);
             }
+            accum
+        };
+
+        // Insert an entry for each alias in the merged account, now having merged aliases.
+        for alias in merged.aliases() {
+            self.get_mut().accounts.insert(alias.to_string(), Arc::clone(&merged));
         }
+        merged
     }
 
     /// Merges two accounts, taking values from the primary and falling back to the secondary
@@ -585,13 +702,24 @@ impl<'h> Configuration<'h> {
         metadata.append(&mut primary.lazy_metadata().clone());
         metadata.append(&mut secondary.lazy_metadata().clone());
 
-        let mut units = vec![];
-        units.append(&mut primary.units().clone());
-        units.append(&mut secondary.units().clone());
+        let mut units = HashSet::new();
+        units.extend(primary.units().iter().cloned());
+        units.extend(secondary.units().iter().cloned());
+
+        // Combine aliases
+        let mut combined_aliases =
+            Vec::with_capacity(primary.aliases().count() + secondary.aliases().count());
+        for alias in primary.aliases().chain(secondary.aliases()).map(str::to_string) {
+            if !combined_aliases.contains(&alias) && !alias.is_empty() {
+                combined_aliases.push(alias);
+            }
+        }
 
         let parent = Account::parent_str(primary.name_exact())
             .map(|parent| self.get_or_create_account(parent));
-        Arc::new(Account::new(primary.name_exact().to_string(), parent, metadata, units))
+        let mut account = Account::new(primary.name_exact().to_string(), parent, metadata, units);
+        account.set_aliases(combined_aliases);
+        Arc::new(account)
     }
 
     pub fn get_or_create_account<'a, S: Into<Cow<'a, str>>>(
@@ -603,15 +731,37 @@ impl<'h> Configuration<'h> {
             Some(acc) => Arc::clone(acc),
             None => {
                 let parent = Account::parent_str(&full_name).map(|s| self.get_or_create_account(s));
-                let acc = Arc::new(Account::new(full_name.into_owned(), parent, vec![], vec![]));
+                let acc =
+                    Arc::new(Account::new(full_name.into_owned(), parent, vec![], HashSet::new()));
                 self.insert_account(Arc::clone(&acc));
                 acc
             }
         }
     }
 
+    pub fn merge_account_pattern(
+        &mut self,
+        account_pattern: Expression,
+        account: Arc<Account<'h>>,
+    ) {
+        let existing = self.base_config.account_patterns.get(&account_pattern).cloned();
+        match existing {
+            Some(existing_account) => {
+                let merged_account = self.merge_accounts(&account, &existing_account);
+                self.get_mut().account_patterns.insert(account_pattern, merged_account);
+            }
+            None => {
+                self.get_mut().account_patterns.insert(account_pattern, account);
+            }
+        }
+    }
+
     pub fn get_account(&self, full_name: &str) -> Option<&Arc<Account<'h>>> {
         self.base_config.get_account(full_name)
+    }
+
+    pub fn get_matching_accounts(&self, full_name: &str) -> SmallVec<[Arc<Account<'h>>; 4]> {
+        self.base_config.get_matching_accounts(full_name)
     }
 
     /// An iterator of all parent accounts, followed by all child accounts.
@@ -664,15 +814,13 @@ impl Debug for Configuration<'_> {
     }
 }
 
-impl<'s, 'h> DerefMutAndDebug<'h, 's, Configuration<'h>> for &'s mut Configuration<'h> {}
-
-//impl<'s, 'h> DerefMutAndDebug<'h, 's, Configuration<'h>> for MutexGuard<'s, Configuration<'h>> {}
-
-fn as_expressions<S: AsRef<str>, I: Iterator<Item = S>>(
-    items: I,
-) -> impl Iterator<Item = Expression> {
-    items.map(|i| Expression::from(i.as_ref()))
+impl Default for Configuration<'_> {
+    fn default() -> Self {
+        Self { base_config: Arc::new(BaseConfiguration::new(None)) }
+    }
 }
+
+impl<'s, 'h> DerefMutAndDebug<'h, 's, Configuration<'h>> for &'s mut Configuration<'h> {}
 
 /// Case-insensitive pattern matching with ".." used to match any number of characters like ".*".
 #[derive(Debug, Clone)]
@@ -693,28 +841,72 @@ impl PartialEq for Expression {
         self.input == other.input
     }
 }
-impl From<&str> for Expression {
-    fn from(input: &str) -> Self {
-        // Replace the escaped '..' with a regex that matches any characters.
-        let mut s = regex::escape(input).replace("\\.\\.", ".*");
-        // The whole item has to match.
+impl Eq for Expression {}
+impl Hash for Expression {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.input.hash(state);
+    }
+}
+
+impl Expression {
+    pub fn is_match(&self, text: &str) -> bool {
+        self.regex.is_match(text)
+    }
+
+    /// Creates an expression from a glob pattern. The component separator indicates that '*'
+    /// should only match between components.
+    pub fn from_glob_pattern(pattern: &str, component_separator: Option<char>) -> Self {
+        let regex = match component_separator {
+            Some(sep) => {
+                // If the pattern contains the separator, then we need to escape it in the regex.
+                let sep_str = regex::escape(&sep.to_string());
+                let s = regex::escape(pattern).replace("\\*\\*", ".*");
+                s.replace("\\*", &format!("[^{sep_str}]*"))
+            }
+            None => regex::escape(pattern).replace("\\*", ".*"),
+        };
+
+        // Handle '?' character in glob pattern to match any single character
+        let regex = regex.replace("\\?", ".");
+
+        let mut s = regex;
         s.insert(0, '^');
         s.push('$');
 
         Expression {
             regex: RegexBuilder::new(&s).case_insensitive(true).build().unwrap(),
-            input: input.to_string(),
+            input: pattern.to_string(),
         }
     }
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct UnitFilter {
+    unit_codes: HashSet<String>,
     expressions: Vec<Expression>,
 }
 impl UnitFilter {
     pub fn new<S: AsRef<str>, I: Iterator<Item = S>>(units: I) -> Self {
-        Self { expressions: as_expressions(units).collect() }
+        let mut codes = HashSet::new();
+        let expressions: Vec<Expression> =
+            units.map(|u| Expression::from_glob_pattern(u.as_ref(), None)).collect();
+        // This is assumed to be the global configuration until the report's end date.
+        let config = JContext::get().config();
+
+        for (code, unit) in config.units() {
+            for expr in &expressions {
+                // If the unit starts with a + (and not quoted), then it is a tag
+                // and not a unit code.
+                if expr.input.starts_with('+') {
+                    if unit.has_metadata_key(expr.input[1..].trim_start()) {
+                        codes.insert(unit.canonical_code().to_string());
+                    }
+                } else if expr.is_match(code) {
+                    codes.insert(unit.canonical_code().to_string());
+                }
+            }
+        }
+        Self { unit_codes: codes, expressions }
     }
 }
 impl<'h> Filter<Unit<'h>> for UnitFilter {
@@ -724,11 +916,19 @@ impl<'h> Filter<Unit<'h>> for UnitFilter {
             return true;
         }
 
+        self.unit_codes.contains(u.canonical_code())
+
+        /*
+        // When the filter is empty, all units are included.
+        if self.expressions.is_empty() {
+            return true;
+        }
+
         for unit_expr in &self.expressions {
             // If the unit starts with a + (and not quoted), then it is a tag
             // and not a unit code.
             if unit_expr.input.starts_with('+') {
-                if u.has_tag(unit_expr.input[1..].trim_start()) {
+                if u.has_metadata_key(unit_expr.input[1..].trim_start()) {
                     return true;
                 }
                 continue;
@@ -740,7 +940,7 @@ impl<'h> Filter<Unit<'h>> for UnitFilter {
                 }
             }
         }
-        false
+        false*/
     }
 }
 
@@ -753,7 +953,11 @@ pub struct AccountFilter {
 impl AccountFilter {
     /// Creates a new account filter from the given string expressions.
     pub fn new<S: AsRef<str>, I: Iterator<Item = S>>(accounts: I) -> Self {
-        Self { expressions: as_expressions(accounts).collect() }
+        Self {
+            expressions: accounts
+                .map(|a| Expression::from_glob_pattern(a.as_ref(), Some(':')))
+                .collect(),
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -769,8 +973,19 @@ impl<'h> Filter<Account<'h>> for AccountFilter {
         }
 
         for account_expr in &self.expressions {
-            if account_expr.is_match(item.name()) {
-                return true;
+            // If the account starts with a + (and not quoted), then it is a tag
+            // and not an account code.
+            if account_expr.input.starts_with('+') {
+                if item.has_metadata_key(&account_expr.input[1..].trim_start()) {
+                    return true;
+                }
+                continue;
+            }
+
+            for alias in item.aliases() {
+                if account_expr.is_match(alias) {
+                    return true;
+                }
             }
         }
         false
@@ -793,22 +1008,6 @@ impl<'h> Filter<Account<'h>> for &AccountFilter {
     }
 }
 
-/*
-impl<'h, T: Deref<Target = Account<'h>>> Filter<T> for AccountFilter {
-    fn is_included(&self, item: &T) -> bool {
-        if self.expressions.is_empty() {
-            return true;
-        }
-
-        for account_expr in &self.expressions {
-            if account_expr.is_match(item.name()) {
-                return true;
-            }
-        }
-        false
-    }
-}*/
-
 /// The standard description filter is a substring filter.
 #[derive(Clone)]
 pub struct DescriptionFilter {
@@ -816,7 +1015,11 @@ pub struct DescriptionFilter {
 }
 impl DescriptionFilter {
     pub fn new<S: AsRef<str>, I: Iterator<Item = S>>(descriptions: I) -> Self {
-        Self { expressions: as_expressions(descriptions).collect() }
+        Self {
+            expressions: descriptions
+                .map(|d| Expression::from_glob_pattern(d.as_ref(), None))
+                .collect(),
+        }
     }
 }
 
@@ -836,6 +1039,7 @@ impl Filter<str> for DescriptionFilter {
     }
 }
 
+/// A file filter that matches files with glob expressions.
 #[derive(Clone)]
 pub struct FileFilter {
     expressions: SmallVec<[Expression; 2]>,
@@ -843,13 +1047,17 @@ pub struct FileFilter {
 
 impl FileFilter {
     pub fn new<S: AsRef<str>, I: Iterator<Item = S>>(files: I) -> Self {
-        Self { expressions: as_expressions(files).collect() }
+        Self {
+            expressions: files
+                .map(|f| Expression::from_glob_pattern(f.as_ref(), Some(std::path::MAIN_SEPARATOR)))
+                .collect(),
+        }
     }
 }
 
 impl<'h> Filter<JournalNode<'h>> for FileFilter {
     fn is_included(&self, node: &JournalNode<'h>) -> bool {
-        // When the filter is empty, all accounts are included.
+        // When the filter is empty, all files are included.
         if self.expressions.is_empty() {
             return true;
         }
@@ -865,27 +1073,38 @@ impl<'h> Filter<JournalNode<'h>> for FileFilter {
     }
 }
 
-/*
-pub struct PostingFilter<'a> {
-    account_filter: Box<dyn Filter<Account<'a>> + 'a>,
-    units_filter: Box<dyn Filter<Unit<'a>> + 'a>,
-}
-impl<'a> PostingFilter<'a> {
-    pub fn new(
-        account_filter: impl for<'h> Filter<Account<'h>> + 'a,
-        units_filter: impl for<'h> Filter<Unit<'h>> + 'a,
-    ) -> Self {
-        Self { account_filter: Box::new(account_filter), units_filter: Box::new(units_filter) }
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_glob_pattern_with_star_no_sep() {
+        use super::Expression;
+
+        let expr = Expression::from_glob_pattern("foo*bar", None);
+        assert!(expr.is_match("foobar"));
+        assert!(expr.is_match("foo123bar"));
+        assert!(expr.is_match("foo/bar"));
+
+        let expr2 = Expression::from_glob_pattern("foo**bar", None);
+        assert!(expr2.is_match("foobar"));
+        assert!(expr2.is_match("foo/bar"));
+        assert!(expr2.is_match("foo/123/bar"));
+    }
+
+    #[test]
+    fn test_glob_pattern_with_star_account_sep() {
+        use super::Expression;
+
+        let expr = Expression::from_glob_pattern("foo*bar", Some(':'));
+        assert!(expr.is_match("foobar"));
+        assert!(expr.is_match("foo123bar"));
+        assert!(!expr.is_match("foo:bar"));
+
+        let expr2 = Expression::from_glob_pattern("foo**bar", Some(':'));
+        assert!(expr2.is_match("foobar"));
+        assert!(expr2.is_match("foo:bar"));
+        assert!(expr2.is_match("foo:123:bar"));
+
+        let expr2 = Expression::from_glob_pattern("foo**", Some(':'));
+        assert!(expr2.is_match("foo:bar"));
     }
 }
-impl<'h, 'a> Filter<Posting<'h>> for PostingFilter<'a> {
-    fn is_included(&self, pst: &Posting<'h>) -> bool {
-        // When the filter is empty, all postings are included.
-        if self.account_filter.is_included(pst.account())
-            && self.units_filter.is_included(pst.unit())
-        {
-            return true;
-        }
-        false
-    }
-}*/

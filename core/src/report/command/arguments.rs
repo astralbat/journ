@@ -10,7 +10,9 @@ use crate::datetime::JDateTime;
 use crate::datetime::{
     DEFAULT_DATE_FORMAT, DEFAULT_DATETIME_FORMAT, DateTimeFormat, DateTimePrecision,
 };
+use crate::journal_context::JContext;
 use crate::report::command::cmd_line::BeginAndEndCommand;
+use crate::report::command::table_format_args::TableFormatCommand;
 use chrono::{NaiveDateTime, TimeZone};
 use chrono_tz::Tz;
 use std::any::Any;
@@ -23,6 +25,8 @@ pub trait Command: Debug + Send + Sync + Any {
     fn datetime_fmt_cmd(&self) -> &DateTimeFormatCommand;
 
     fn begin_and_end_cmd(&self) -> &BeginAndEndCommand;
+
+    fn table_fmt_cmd(&self) -> &TableFormatCommand;
 }
 
 static ARGS: OnceLock<Arguments> = OnceLock::new();
@@ -67,27 +71,23 @@ impl DateTimeFormatCommand {
     /// If any formats have been specified on the command line (`DateTimeFormatCommand`),
     /// then use these.
     /// Otherwise, use the journal configurations.
-    pub fn from_args_or_config(args: &Arguments, config: &Configuration) -> Self {
-        let dtfc = &args.datetime_cmd;
-        let (df, tf, dtf, tz) = if dtfc.date_format().is_some()
-            || dtfc.time_format().is_some()
-            || dtfc.datetime_format().is_some()
-            || dtfc.timezone().is_some()
-        {
-            (dtfc.date_format(), dtfc.time_format(), dtfc.datetime_format(), dtfc.timezone())
-        } else {
-            (
-                Some(config.date_format().clone().into_owned()),
-                Some(config.time_format().clone().into_owned()),
-                Some(config.datetime_format().clone().into_owned()),
-                Some(config.timezone()),
-            )
-        };
+    pub fn or_config(&self, config: &Configuration) -> Self {
+        let df = self
+            .date_format
+            .or(self.datetime_format.and_then(|dtf| dtf.as_date_format().map(|df| df.into_owned())))
+            .or(Some(config.date_format().clone().into_owned()));
+        let tf = self
+            .time_format
+            .or(self.datetime_format.and_then(|dtf| dtf.as_time_format().map(|tf| tf.into_owned())))
+            .or(Some(config.time_format().clone().into_owned()));
+        let tz = self.timezone.or(Some(config.timezone()));
 
         DateTimeFormatCommand {
             date_format: df,
             time_format: tf,
-            datetime_format: dtf,
+            datetime_format: self
+                .datetime_format()
+                .or(Some(config.datetime_format().clone().into_owned())),
             timezone: tz,
         }
     }

@@ -11,16 +11,14 @@ use crate::datetime::{DateTimePrecision, JDateTime};
 use crate::error::JournResult;
 use crate::journal_context::JContext;
 use crate::price::Price;
-use crate::price_db::PriceDatabase;
 use crate::python::conversion::DateTimeWrapper;
-use crate::python::environment::PythonEnvironment;
 use crate::unit::Unit;
 use crate::valuer::{SystemValuer, Valuer};
 use chrono::TimeZone;
 use chrono_tz::Tz;
 use pyo3::basic::CompareOp;
 use pyo3::exceptions::PyException;
-use pyo3::types::{PyDateTime, PyDict, PyDictMethods, PyModule, PyModuleMethods};
+use pyo3::types::{PyDateTime, PyModule, PyModuleMethods};
 use pyo3::{
     Bound, IntoPyObject, Py, PyAny, PyErr, PyResult, Python, create_exception, pyfunction,
     wrap_pyfunction,
@@ -28,78 +26,6 @@ use pyo3::{
 use pyo3::{pyclass, pymethods, pymodule};
 use rust_decimal::Decimal;
 use std::ffi::CString;
-use std::sync::Arc;
-
-/// The rust-facing interface to the module.
-pub struct PythonLedgerModule;
-
-impl PythonLedgerModule {
-    /// Statically sets the price database for a particular unit code. This call is invoked in preparation
-    /// of python invoking price lookups. Because this is statically set, we need to be able to match which
-    /// journal incarnation this is for.
-    pub fn set_price_database(unit_code: &str, price_db: &Arc<PriceDatabase>) {
-        let alias_owned = unit_code.to_string();
-        let price_db = Arc::clone(price_db);
-
-        PythonEnvironment::wait_for();
-        Python::attach(|py| {
-            let journal_dict = PythonEnvironment::journal_dict(py, None);
-
-            match journal_dict
-                .get_item("__price_dbs")
-                .ok()
-                .flatten()
-                .map(|v| v.cast_into::<PyDict>().unwrap())
-            {
-                Some(db_map) => {
-                    db_map.set_item(&alias_owned, Arc::as_ptr(&price_db) as usize).unwrap()
-                }
-                None => {
-                    let price_db_map = PyDict::new(py);
-                    price_db_map.set_item(&alias_owned, Arc::as_ptr(&price_db) as usize).unwrap();
-                    journal_dict.set_item("__price_dbs", price_db_map).unwrap();
-                }
-            }
-        })
-    }
-
-    pub fn set_default_price_database(price_db: &Arc<PriceDatabase>) {
-        PythonLedgerModule::set_price_database("__default", price_db)
-    }
-
-    /*
-    fn get_price_database<'a, 'py>(
-        mod_ledger: &'a Bound<'py, PyModule>,
-        unit_code: &str,
-    ) -> Option<&'a PriceDatabase<'a>> {
-        let dict = PythonEnvironment::journal_dict(mod_ledger.py(), None);
-
-        let get_db = |unit_code| {
-            dict.get_item("__price_dbs")
-                .ok()
-                .flatten()
-                .map(|db| db.downcast_into::<PyDict>().unwrap())
-                .and_then(|db| {
-                    db.get_item(unit_code).ok().flatten().map(|r| r.extract::<usize>().unwrap())
-                })
-        };
-
-        match get_db(unit_code) {
-            Some(db_ptr) => unsafe {
-                let db = db_ptr as *const PriceDatabase;
-                Some(db.as_ref().unwrap())
-            },
-            // Fallback to default price database
-            None => match get_db("__default") {
-                Some(db_ptr) => unsafe {
-                    let db = db_ptr as *const PriceDatabase;
-                    Some(db.as_ref().unwrap())
-                },
-                None => None,
-            },
-        }
-    }*/
-}
 
 create_exception!(ledger, PriceLookupError, PyException);
 
@@ -342,10 +268,10 @@ impl PyPrice {
         let allocator = JContext::get().allocator();
         let base_unit = config
             .get_unit(self.base_unit())
-            .unwrap_or_else(|| config.merge_unit(&Unit::new(self.base_unit().clone())));
+            .unwrap_or_else(|| config.merge_unit(Unit::new(self.base_unit().clone()), &[], None));
         let quote_unit = config
             .get_unit(self.quote_unit())
-            .unwrap_or_else(|| config.merge_unit(&Unit::new(self.quote_unit().clone())));
+            .unwrap_or_else(|| config.merge_unit(Unit::new(self.quote_unit().clone()), &[], None));
         let chrono_date: DateTimeWrapper = self.datetime;
         let date = JDateTime::new(chrono_date.0, DateTimePrecision::Second);
 

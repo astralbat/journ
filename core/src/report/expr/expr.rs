@@ -338,6 +338,8 @@ where
         cond(args, context)
     } else if name.eq_ignore_ascii_case("iferror") {
         iferror(args, context)
+    } else if name.eq_ignore_ascii_case("reduce") {
+        reduce(args, context)
     } else if name.eq_ignore_ascii_case("unichar") {
         unichar(args, context)
     } else if name.eq_ignore_ascii_case("isdefined") {

@@ -25,17 +25,13 @@ where
             "Function 'datevalue(text [,datetime_format [,time_zone]])' requires one, two or three arguments"
         ));
     }
-    let text_arg = &args[0].eval(context)?;
+    let mut text_arg = args[0].eval(context)?;
     let date_format_arg = args.get(1).map(|a| a.eval(context)).transpose()?;
     let time_zone_arg = args.get(2).map(|a| a.eval(context)).transpose()?;
 
     if text_arg.is_undefined() {
         return Ok(ColumnValue::Undefined);
     }
-
-    let text = text_arg
-        .as_str()
-        .ok_or_else(|| err!("Function 'datevalue' requires a String argument`"))?;
 
     let df = date_format_arg
         .map(|v| {
@@ -61,30 +57,36 @@ where
         })
         .unwrap_or_else(|| Ok(JContext::get().cmd().datetime_fmt_cmd().timezone_or_default()))?;
 
-    if args.len() <= 2 {
-        JDate::parse(df)(text)
-            .map(|(_, d)| d)
-            .map_err(|e| {
-                err!(
-                    "Function 'datevalue' could not parse date '{}' with format '{}': {}",
-                    text,
-                    df,
-                    e
-                )
-            })
-            .map(ColumnValue::Date)
-    } else {
+    for val in text_arg.as_list_mut() {
+        if val.is_undefined() {
+            continue;
+        }
+        let text = val.as_str().ok_or_else(|| {
+            err!("Function 'datevalue' requires a String argument`: {}", val.as_type_string())
+        })?;
+
+        if args.len() <= 2 {
+            *val = parse(text, df, None)?
+        } else {
+            *val = parse(text, df, Some(tz))?
+        }
+    }
+
+    Ok(text_arg)
+}
+
+fn parse<'h>(
+    text: &str,
+    df: &DateTimeFormat<'h>,
+    tz: Option<chrono_tz::Tz>,
+) -> JournResult<ColumnValue<'h>> {
+    if let Some(tz) = tz {
         JDateTime::parse(df, tz)(text)
-        .map(|(_, d)| d)
-        .map_err(|e| {
-            err!(
-                "Function 'datevalue' could not parse date '{}' with date format '{}' and time zone '{}': {}",
-                text,
-                df,
-                tz,
-                e
-            )
+            .map(|(_, d)| ColumnValue::Datetime(d))
+            .map_err(|e| err!("Function 'datevalue' could not parse date '{}' with date format '{}' and time zone '{}': {}", text, df, tz, e))
+    } else {
+        JDate::parse(df)(text).map(|(_, d)| ColumnValue::Date(d)).map_err(|e| {
+            err!("Function 'datevalue' could not parse date '{}' with format '{}': {}", text, df, e)
         })
-        .map(ColumnValue::Datetime)
     }
 }

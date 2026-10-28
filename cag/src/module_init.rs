@@ -86,7 +86,7 @@ impl ModuleDirective for CgtDirective {
             },
             param_value("unitOfAccount") => |input: ModuleDirectiveInput<'h, 's, 'p>| {
                 let (input, unit_code) = promote(IErrorMsg::UNIT, amount::unit)(input)?;
-                let unit = input.config_mut().merge_unit(&Unit::new(unit_code));
+                let unit = input.config_mut().merge_unit(Unit::new(unit_code), &[], None);
                 let mut value_date = None;
                 match_blocks!(input,
                     param_value("revalueDate") => |input: ModuleDirectiveInput<'h, 's, 'p>| {

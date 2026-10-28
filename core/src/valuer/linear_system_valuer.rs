@@ -8,13 +8,14 @@
 use crate::amount::Amount;
 use crate::err;
 use crate::error::JournResult;
+use crate::ext::NumExt;
 use crate::journal_entry::JournalEntry;
 use crate::unit::Unit;
 use crate::valuer::{Valuation, ValuationError, ValuationResult, Valuer};
 use rust_decimal::Decimal;
 use rust_decimal::prelude::{One, Zero};
 use smallvec::{SmallVec, smallvec};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
 /// Valuer that derives valuations from a set of valued amounts in a specific quote unit.
@@ -35,6 +36,8 @@ pub struct LinearSystemValuer<'h> {
     /// cancel, or a valuation whose stated value is itself zero), which would otherwise be
     /// indistinguishable from there being no row at all for that pair.
     row_for_pair: HashMap<(usize, usize), usize>,
+    /// Units whose postings have an explicit zero valuation.
+    zero_valued_units: HashSet<&'h Unit<'h>>,
 }
 impl<'h> LinearSystemValuer<'h> {
     /// Creates a new valuer from a set of valued amounts in a specific quote unit.
@@ -55,6 +58,7 @@ impl<'h> LinearSystemValuer<'h> {
             zero_sum_row: None,
             connectivity: Dsu::new(),
             row_for_pair: HashMap::new(),
+            zero_valued_units: HashSet::new(),
         };
 
         for (amount, val) in valued_amounts {
@@ -127,6 +131,8 @@ impl<'h> LinearSystemValuer<'h> {
     }
 
     fn add_value_with_epsilon(&mut self, value: (Amount<'h>, Amount<'h>), value_epsilon: Decimal) {
+        assert!(value.0.is_sign_compatible(value.1), "Amount and value must have the same sign");
+
         // Don't add zeros
         if value.0.is_zero() && value.1.is_zero() {
             return;
@@ -170,7 +176,11 @@ impl<'h> LinearSystemValuer<'h> {
                 // Keep the last row available for the Valuer impl.
                 self.data.extend((0..self.units.len()).map(|_| Decimal::zero()));
                 self.epsilon.extend((0..self.units.len()).map(|_| Decimal::zero()));
-                let key = if amount_col <= val_col { (amount_col, val_col) } else { (val_col, amount_col) };
+                let key = if amount_col <= val_col {
+                    (amount_col, val_col)
+                } else {
+                    (val_col, amount_col)
+                };
                 self.row_for_pair.insert(key, self.row_count);
                 self.row_count += 1;
             }
@@ -287,6 +297,9 @@ impl<'h> From<&JournalEntry<'h>> for LinearSystemValuer<'h> {
                 };
                 vav.add_value_with_epsilon((posting.amount(), value), value_epsilon);
             }
+            if posting.posting_valuations().any(|valuation| valuation.value().is_zero()) {
+                vav.zero_valued_units.insert(posting.unit());
+            }
         }
         vav.add_zero_sum(entry.balanced_postings().map(|p| p.amount()));
         if let Some(zero_sum_row) = vav.zero_sum_row {
@@ -315,6 +328,7 @@ impl Default for LinearSystemValuer<'_> {
             zero_sum_row: None,
             connectivity: Dsu::new(),
             row_for_pair: HashMap::new(),
+            zero_valued_units: HashSet::new(),
         }
     }
 }
@@ -347,6 +361,8 @@ impl<'h> Valuer<'h> for LinearSystemValuer<'h> {
         #[allow(non_snake_case)]
         let mut A = vec![];
         let mut epsilon = vec![];
+        let mut zero_valued_cols: Vec<bool> =
+            self.units.iter().map(|unit| self.zero_valued_units.contains(unit)).collect();
         // Get the group id of the base_unit. We'll only include units that share
         // the same group in our linear system.
         let mut a_base_col = 0;
@@ -373,16 +389,19 @@ impl<'h> Valuer<'h> for LinearSystemValuer<'h> {
         // when we retain only those columns that are linearly independent.
         swap_columns(&mut A, a_base_col, 0);
         swap_columns(&mut epsilon, a_base_col, 0);
+        zero_valued_cols.swap(a_base_col, 0);
         if a_quote_col == 0 {
             a_quote_col = a_base_col
         }
         swap_columns(&mut A, a_quote_col, 1);
         swap_columns(&mut epsilon, a_quote_col, 1);
+        zero_valued_cols.swap(a_quote_col, 1);
         a_quote_col = 1;
 
         // If the system is not full rank, we'll have to remove some columns below.
         // This means the zero sum row is no longer valid and will have to be removed.
-        let res = analyze_and_solve(&mut A, &mut b, &epsilon, self.zero_sum_row)?;
+        let res =
+            analyze_and_solve(&mut A, &mut b, &epsilon, self.zero_sum_row, &zero_valued_cols)?;
 
         if let Some(solution) = res.solution {
             // The original row positons may have been reordered during solving so
@@ -589,6 +608,7 @@ fn analyze_and_solve(
     //epsilon: &[SmallVec<[Decimal; 4]>],
     epsilon: &[Vec<Decimal>],
     zero_sum_row: Option<usize>,
+    zero_valued_cols: &[bool],
 ) -> Result<MatrixResult, ValuationError> {
     // Keep track of the original row indices so we can validate accuracy later.
     let original_a = a.iter().cloned().collect::<SmallVec<[_; 8]>>();
@@ -608,6 +628,20 @@ fn analyze_and_solve(
     // would be meaningless (and unsound, per the comment on `x_by_col` below) to run tolerance
     // checks against a "solution" that doesn't actually include it.
     if a[0].len() > 1 && !pivot_cols.iter().take(rank).any(|&c| c == 1) {
+        return Ok(MatrixResult { solution: None });
+    }
+
+    // A pivoted quote rate remains indeterminate when its reduced row depends on a free unit.
+    // An explicitly zero-valued unit is the exception: it is intentionally treated as zero in a
+    // zero-sum derivation, matching a `@@ $0` posting's accounting meaning.
+    if let Some(quote_row) = pivot_cols.iter().position(|&col| col == 1)
+        && a[quote_row].iter().enumerate().any(|(col, coefficient)| {
+            col != 1
+                && !coefficient.is_zero()
+                && !pivot_cols.contains(&col)
+                && !zero_valued_cols[col]
+        })
+    {
         return Ok(MatrixResult { solution: None });
     }
 
@@ -765,6 +799,41 @@ mod test {
         let mut lsv = LinearSystemValuer::new(vec![(amount!("1 A"), amount!("10 B"))].into_iter());
         lsv.add_zero_sum(vec![amount!("1 A"), amount!("10 B"), amount!("100 C")].into_iter());
         assert_eq!(lsv.value(unit!("B"), amount!("0.5 A")), Ok(Valuation::unary(amount!("5 B"))));
+    }
+
+    #[test]
+    fn test_no_value_possible() {
+        with_entry(
+            indoc! {r#"
+            2000-01-01  Entry 1
+                A  100 ABC
+                B  -100 XYZ
+                C  -100 DEF
+            "#},
+            |entry| {
+                let mut valuer = LinearSystemValuer::from(entry);
+                assert_eq!(
+                    valuer.value(unit!("ABC"), amount!("100 DEF")),
+                    Err(ValuationError::Undetermined(err!(NOT_DERIVABLE)))
+                );
+            },
+        );
+
+        with_entry(
+            indoc! {r#"
+            2000-01-01  Entry 1
+                A  100 ABC @ 1 GHI
+                B  -100 XYZ
+                C  -100 DEF
+            "#},
+            |entry| {
+                let mut valuer = LinearSystemValuer::from(entry);
+                assert_eq!(
+                    valuer.value(unit!("ABC"), amount!("100 DEF")),
+                    Err(ValuationError::Undetermined(err!(NOT_DERIVABLE)))
+                );
+            },
+        );
     }
 
     #[test]

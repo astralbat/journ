@@ -17,7 +17,7 @@ where
     'h: 'a,
 {
     if args.len() != 2 {
-        return Err(err!("Function 'startswith' requires exactly two arguments"));
+        return Err(err!("Function 'StartsWith' requires exactly two arguments"));
     }
 
     let value = args[0].eval(context)?.as_reporting_string();

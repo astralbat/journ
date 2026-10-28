@@ -14,7 +14,7 @@ use nom::bytes::complete::take_while1;
 use pyo3::conversion::FromPyObjectOwned;
 use pyo3::prelude::{PyAnyMethods, PyDictMethods, PyModuleMethods, PyTracebackMethods};
 use pyo3::types::PyDict;
-use pyo3::{Bound, FromPyObject, Py, PyAny, PyErr, PyResult, Python, intern};
+use pyo3::{Bound, FromPyObject, Py, PyAny, PyErr, Python, intern};
 use std::collections::HashMap;
 use std::error::Error;
 use std::ffi::{CStr, CString};
@@ -239,6 +239,7 @@ impl PythonEnvironment {
     where
         F: Fn(Python, Option<Py<PyDict>>) -> JournResult<R>,
     {
+        Self::wait_for();
         Python::attach(|py| {
             let locals = match args {
                 Some(args) => {
@@ -323,6 +324,33 @@ impl PythonEnvironment {
             func(py, locals.map(|l| l.unbind()))
         })
     }
+
+    pub fn with_python<F, R>(func: F) -> JournResult<R>
+    where
+        F: Fn(Python) -> JournResult<R>,
+    {
+        Python::attach(func)
+    }
+
+    /*
+    pub fn parse_datetime(&self, datetime: JDateTime) -> JournResult<DateTimeWrapper> {
+        let convert_err = || err!("Python error parsing datetime: '{}'", datetime);
+
+        Python::attach(|py| {
+            py.eval(&format!(
+                "datetime.strptime(\"{}\", \"%Y-%m-%dT%H:%M:%S%z\")",
+                datetime.datetime().format("%FT%T%z")
+            ), None, None)
+                .map_err(|e| convert_err().with_source(e))
+                .and_then(move |res: Bound<PyAny>| {
+                    res.extract::<T>().map_err(|e| convert_err().with_source(e.to_string()))
+                })
+            ) {
+                Ok(r) => r,
+                Err(e) => panic!("Unable to prepare datetime for valuation call: {}", e),
+            };
+        })
+    }*/
 
     pub(super) fn set_active_journal(py: Python) -> u16 {
         let jid = JContext::get().jid();

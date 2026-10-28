@@ -9,7 +9,6 @@ use crate::amount::{Amount, Quantity};
 use crate::err;
 use crate::error::JournError;
 use crate::error::parsing::promote;
-use crate::ext::StrExt;
 use crate::metadata::Metadata;
 use crate::parsing;
 use crate::parsing::parse;
@@ -19,9 +18,9 @@ use rust_decimal::Decimal;
 use smartstring::alias::String as SS;
 use std::cell::RefCell;
 use std::cmp;
-use std::collections::HashSet;
 use std::fmt;
 use std::hash::{Hash, Hasher};
+use std::ops::AddAssign;
 use std::rc::Rc;
 use std::str::{self, FromStr};
 use std::sync::{Arc, LazyLock};
@@ -30,7 +29,7 @@ use yaml_rust2::Yaml;
 pub static DEFAULT_UNIT_FORMAT: LazyLock<UnitFormat> = LazyLock::new(UnitFormat::default);
 
 /// The unit used for nil amounts.
-pub static NONE: Unit = Unit::none::<'_>();
+pub static NONE: Unit = Unit::none::<'static>();
 
 #[derive(Default, Debug, Copy, Clone, PartialEq, Eq)]
 pub enum RoundingStrategy {
@@ -91,12 +90,19 @@ pub const DEFAULT_PRICE_LOOKUP_WITHIN_SECS: usize = 60 * 60; // 1 hour
 /// that many parser threads may see the same unit in multiple `Configurations`. Because of this,
 /// `&'h Unit<'h>` is required to be `Send`, but an aliased type `&T` can only be `Send` if it is also `Sync`.
 /// Therefore, we require this type to be both `Send` and `Sync`.
+///
+/// # Unit Equality
+/// Essentially two units are the same if they have the same `canonical_code`, the code the unit was created with when it was first defined.
+/// This code is immutable and so when a unit is renamed, we shall only change the `code` field. This allows our equality:
+/// * To be transitive
+/// * To allow for independent (branched) configurations to redefine the same unit, so as long as they start with the same canonical code.
 #[derive(Clone)]
 pub struct Unit<'h> {
+    /// The immutable code for this unit.
+    canonical_code: String,
+    /// The display code for this unit.
     code: String,
     name: Option<String>,
-    /// All codes this unit is known by, including this one.
-    aliases: Vec<String>,
     format: Option<UnitFormat>,
     conversion_expression: Option<Lambda>,
     /// The database to use when looking up quotes for this unit. If not set, the default session database will be used.
@@ -116,10 +122,9 @@ impl<'h> Unit<'h> {
         let code = code.into();
         assert!(!code.is_empty(), "Unit code cannot be empty string");
 
-        let aliases = vec![code.clone()];
         Unit {
+            canonical_code: code.clone(),
             code,
-            aliases,
             name: None,
             format: None,
             conversion_expression: None,
@@ -135,9 +140,9 @@ impl<'h> Unit<'h> {
     /// will be written without any unit.
     pub const fn none<'a>() -> Unit<'a> {
         Unit {
+            canonical_code: String::new(),
             code: String::new(),
             name: None,
-            aliases: vec![],
             format: None,
             conversion_expression: None,
             prices: None,
@@ -152,9 +157,8 @@ impl<'h> Unit<'h> {
         self.code.is_empty()
     }
 
-    /// Gets the primary code, i.e. the first alias.
-    pub fn primary_code(&self) -> &str {
-        self.aliases().next().unwrap_or("")
+    pub fn canonical_code(&self) -> &str {
+        &self.canonical_code
     }
 
     pub fn code(&self) -> &str {
@@ -179,27 +183,6 @@ impl<'h> Unit<'h> {
 
     pub fn set_name(&mut self, name: Option<String>) {
         self.name = name
-    }
-
-    /// Gets all known aliases for this unit, which is a list of other unit codes, including the code of this unit as well.
-    /// The first alias will always be the "primary" code; the first code defined for this unit.
-    pub fn aliases(&self) -> impl Iterator<Item = &str> {
-        self.aliases.iter().map(|s| s.as_str())
-    }
-
-    /// Sets all known aliases for this unit. The aliases must include this unit's code.
-    pub fn set_aliases(&mut self, aliases: Vec<String>) {
-        assert!(
-            self.code.is_empty() || aliases.contains(&self.code),
-            "Aliases must contain the primary code"
-        );
-        assert_eq!(
-            aliases.iter().collect::<HashSet<_>>().len(),
-            aliases.len(),
-            "Aliases must be unique"
-        );
-
-        self.aliases = aliases
     }
 
     pub fn display_name(&self) -> &str {
@@ -290,22 +273,20 @@ impl<'h> Unit<'h> {
     }
 
     /// Gets whether this account or a parent has the specified metadata key.
-    pub fn has_tag(&self, tag: &str) -> bool {
-        self.metadata.iter().any(|m| m.key() == tag)
+    pub fn has_metadata_key(&self, key: &str) -> bool {
+        self.metadata.iter().any(|m| m.key() == key)
     }
 }
 
 impl<'t> Hash for Unit<'t> {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.primary_code().to_ascii_lowercase().hash(state)
+        self.canonical_code.hash(state)
     }
 }
 
 impl<'a, 'b> PartialEq<Unit<'b>> for Unit<'a> {
-    /// Two units are always equal if they have the same code (ignoring case), since codes are expected to be unique.
-    /// If the units do not share the same code, then perhaps they share the same name.
     fn eq(&self, other: &Unit<'b>) -> bool {
-        self.primary_code().eq_ignore_ascii_case(other.primary_code())
+        self.canonical_code == other.canonical_code
     }
 }
 
@@ -319,10 +300,7 @@ impl<'h> PartialOrd for Unit<'h> {
 
 impl<'h> Ord for Unit<'h> {
     fn cmp(&self, other: &Unit<'h>) -> cmp::Ordering {
-        if self == other {
-            return cmp::Ordering::Equal;
-        }
-        self.code.cmp_ignore_case_ascii(&other.code)
+        self.canonical_code.cmp(&other.canonical_code)
     }
 }
 
@@ -339,17 +317,6 @@ impl<'h> fmt::Display for Unit<'h> {
 impl<'h> fmt::Debug for Unit<'h> {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         write!(f, "{}", self.code)?;
-        for (i, alias) in self.aliases.iter().enumerate() {
-            if i == 0 {
-                write!(f, "(")?;
-            }
-            write!(f, "{}", alias)?;
-            if i == self.aliases.len() - 1 {
-                write!(f, ")")?;
-            } else {
-                write!(f, ",")?;
-            }
-        }
         Ok(())
     }
 }
@@ -362,10 +329,6 @@ impl From<&Unit<'_>> for Yaml {
             Yaml::String("name".to_string()),
             Yaml::String(unit.display_name().to_string()),
         );
-        hash.insert(
-            Yaml::String("aliases".to_string()),
-            Yaml::Array(unit.aliases.iter().map(|a| Yaml::String(a.to_string())).collect()),
-        );
         if let Some(format) = &unit.format {
             hash.insert(Yaml::String("format".to_string()), Yaml::String(format.to_string()));
         }
@@ -374,6 +337,39 @@ impl From<&Unit<'_>> for Yaml {
             Yaml::String(unit.rounding_strategy.to_string()),
         );
         Yaml::Hash(hash)
+    }
+}
+
+impl AddAssign<&Self> for Unit<'_> {
+    /// Merges `rhs` on to this unit, only overwriting fields that are not already set on this unit. This is used when merging units from different configurations.
+    fn add_assign(&mut self, rhs: &Self) {
+        self.code = if self.code.is_empty() { rhs.code.clone() } else { self.code.clone() };
+        if !rhs.canonical_code.is_empty() {
+            self.canonical_code = rhs.canonical_code.clone();
+        }
+        if self.name.is_none() {
+            self.name = rhs.name.clone();
+        }
+        if self.conversion_ranking.is_none() {
+            self.conversion_ranking = rhs.conversion_ranking;
+        }
+        if self.conversion_expression.is_none() {
+            self.conversion_expression = rhs.conversion_expression.clone();
+        }
+        if self.prices.is_none() {
+            self.prices = rhs.prices.clone();
+        }
+        self.pricedb_lookup_within_secs =
+            self.pricedb_lookup_within_secs.or(rhs.pricedb_lookup_within_secs);
+        if self.format.is_none() {
+            self.format = rhs.format.clone();
+        }
+        self.rounding_strategy = if self.rounding_strategy == RoundingStrategy::default() {
+            rhs.rounding_strategy
+        } else {
+            self.rounding_strategy
+        };
+        self.metadata.extend(rhs.metadata.iter().cloned());
     }
 }
 
@@ -427,15 +423,6 @@ impl NumberFormat {
                 })
                 .count() as u8,
         )
-    }
-
-    pub fn with_full_precision(&self) -> NumberFormat {
-        NumberFormat {
-            negative_style: self.negative_style,
-            parts: vec![],
-            thousands_separator: self.thousands_separator,
-            decimal_separator: self.decimal_separator,
-        }
     }
 
     pub fn negative_style(&self) -> Option<NegativeStyle> {
@@ -848,15 +835,6 @@ impl UnitFormat {
         }
     }
 
-    pub fn as_precise(&self) -> Self {
-        UnitFormat {
-            number_format: self.number_format.with_full_precision(),
-            code: self.code.clone(),
-            code_position: self.code_position.clone(),
-            negative_style: self.negative_style,
-        }
-    }
-
     pub fn format(
         &self,
         quantity: Quantity,
@@ -1032,21 +1010,6 @@ impl FromStr for UnitFormat {
             ),
         )
         .map(|r| r.1)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct Units<'h> {
-    default_unit: Option<&'h Unit<'h>>,
-}
-
-impl<'h> Units<'h> {
-    pub fn default_unit(&self) -> Option<&'h Unit<'h>> {
-        self.default_unit
-    }
-
-    pub fn set_default_unit(&mut self, default: Option<&'h Unit<'h>>) {
-        self.default_unit = default
     }
 }
 

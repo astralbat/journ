@@ -165,12 +165,17 @@ pub trait ShrinkableCell: Cell {
 pub struct ModifiableCell<'c> {
     inner: CellRef<'c>,
     lines: RefCell<SmallVec<[SS; 2]>>,
+    cached_width: RefCell<Option<ColumnWidth>>,
 }
 
 impl<'c> ModifiableCell<'c> {
     pub fn new<C: Into<CellRef<'c>>>(cell: C) -> Self {
         let cell = cell.into();
-        let mc = Self { inner: cell, lines: RefCell::new(SmallVec::new()) };
+        let mc = Self {
+            inner: cell,
+            lines: RefCell::new(SmallVec::new()),
+            cached_width: RefCell::new(None),
+        };
         mc.init_lines();
         mc
     }
@@ -188,13 +193,13 @@ impl<'c> ModifiableCell<'c> {
     }
 
     pub fn lines_mut(&self) -> std::cell::RefMut<'_, SmallVec<[SS; 2]>> {
+        self.cached_width.take();
         self.lines.borrow_mut()
     }
 
-    /// Gets all lines that are equal to the max width
     pub fn longest_lines_mut(&self) -> impl Iterator<Item = std::cell::RefMut<'_, SS>> {
-        let max_width = self.width().sum();
         let mut index = 0;
+        let max_width = self.cached_width.take().unwrap_or_else(|| self.width()).sum();
         iter::from_fn(move || {
             let lines = self.lines.borrow_mut();
             while index < lines.len() {
@@ -221,7 +226,12 @@ impl Cell for ModifiableCell<'_> {
     }
 
     fn width(&self) -> CellWidth {
-        self.lines.borrow().iter().map(|s| s.width()).max().unwrap_or_default()
+        let cached = self.cached_width.borrow().clone();
+        cached.unwrap_or_else(|| {
+            let w = self.lines.borrow().iter().map(|s| s.width()).max().unwrap_or_default();
+            *self.cached_width.borrow_mut() = Some(w.clone());
+            w
+        })
     }
 
     fn height(&self) -> usize {

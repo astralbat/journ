@@ -198,7 +198,7 @@ where
 
     // Replace the `valued_amount` primary unit if specified on the account (overrides global config)
     if let Some(valued_amount) = &mut valued_amount
-        && let Some(unit) = account.unit(valued_amount.unit().code())
+        && let Some(unit) = account.units().get(valued_amount.unit())
     {
         valued_amount.set_amount(unit.with_quantity(valued_amount.amount().quantity()));
     }

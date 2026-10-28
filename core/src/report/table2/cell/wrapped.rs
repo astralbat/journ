@@ -5,6 +5,7 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
+use crate::ext::StrExt;
 use crate::report::table2::cell::{Cell, ModifiableCell, ShrinkableCell};
 use crate::report::table2::cell_width::CellWidth;
 use crate::report::table2::fmt::CellFormatter;
@@ -50,23 +51,6 @@ impl<'c> PolicyWrappingCell<'c> {
         self.ease = ease;
     }
 
-    /// Finds the `pattern` that resides closest to the middle of `haystack`.
-    fn find_closest_to_middle<P: Pattern + Copy>(haystack: &str, pattern: P) -> Option<usize>
-    where
-        for<'a> P::Searcher<'a>: ReverseSearcher<'a>,
-    {
-        let mut best_pos = haystack.len();
-        while let Some(pos) = haystack[..best_pos].rfind(pattern) {
-            let mid = haystack.len() / 2;
-            // Minimise distance from middle
-            if (pos as isize - mid as isize).abs() > (best_pos as isize - mid as isize).abs() {
-                return Some(best_pos);
-            }
-            best_pos = pos;
-        }
-        if best_pos == haystack.len() { None } else { Some(best_pos) }
-    }
-
     fn try_wrap_word(this: &PolicyWrappingCell) -> usize {
         Self::try_wrap(this, Self::wrap_word_pattern, 1, true)
     }
@@ -93,7 +77,7 @@ impl<'c> PolicyWrappingCell<'c> {
                     .enumerate()
                     .filter(|(_, l)| l.chars().count() == max_line_width)
                 {
-                    if let Some(pos) = Self::find_closest_to_middle(line, pattern)
+                    if let Some(pos) = line.find_closest_to_mid(pattern)
                         && pos + split_offset < line.len()
                     {
                         return Some((line_num, pos));

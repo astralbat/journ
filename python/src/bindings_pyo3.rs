@@ -124,7 +124,6 @@ pub(crate) static ALLOCATOR: LazyLock<HerdAllocator<'static>> =
 #[pyclass(unsendable)]
 struct Journal {
     context: Arc<JContext<'static>>,
-    //allocator: HerdAllocator<'static>,
     edit_node_id: Mutex<FileId>,
 }
 
@@ -185,8 +184,15 @@ impl Journal {
     }
 
     fn edit_file(&self, name: &str) -> PyLedgerResult<()> {
-        *self.edit_node_id.lock().unwrap() = self.file_id(name)?;
-        Ok(())
+        self.context.with(|| {
+            let journal = self.context.journal();
+            let node = journal
+                .find_node_by_filename(&PathBuf::from(name))
+                .ok_or_else(|| PyLedgerError::new(err!("No filename found: {}", name)))?;
+            self.context.set_config(node.last_segment().config().clone());
+            *self.edit_node_id.lock().unwrap() = FileId(node.id().as_ref().clone());
+            Ok(())
+        })
     }
 
     fn file_id(&self, name: &str) -> PyLedgerResult<FileId> {
@@ -335,7 +341,7 @@ impl Journal {
     }
 
     #[pyo3(signature = (begin, description, end=None, write_time=true))]
-    fn new_entry<'py>(
+    fn new_entry(
         &self,
         begin: DateTime<Tz>,
         description: String,
@@ -410,7 +416,7 @@ impl Journal {
     ///
     /// If no `date` is provided, the now date is used instead.
     #[pyo3(signature = (quantity, base_unit, quote_unit, date=None))]
-    fn value_amount<'py>(
+    fn value_amount(
         &self,
         quantity: Decimal,
         base_unit: &str,
@@ -418,13 +424,13 @@ impl Journal {
         date: Option<DateTime<Tz>>,
     ) -> PyLedgerResult<Decimal> {
         self.context.with(|| {
-            let mut config = JContext::get().journal().config().clone();
+            let mut config = JContext::get().config().clone();
             let quote_unit = config.get_or_create_unit(quote_unit);
             let base_unit = config.get_or_create_unit(base_unit);
 
             let qty = {
                 let valuation = SystemValuer::on_date(
-                    config.clone(),
+                    config,
                     date.map(|d| JDateTime::new(d, DateTimePrecision::Second))
                         .unwrap_or(JDateTime::now()),
                 )

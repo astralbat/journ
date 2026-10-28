@@ -16,6 +16,7 @@ use journ_core::eval_identifier;
 use journ_core::journal_context::JContext;
 use journ_core::report::expr::{ColumnValue, EvalContext, IdentifierContext, ValuerContext};
 use journ_core::valuer::{SystemValuer, Valuer};
+use linked_hash_set::LinkedHashSet;
 use smartstring::alias::String as SS;
 use std::collections::HashMap;
 
@@ -46,11 +47,9 @@ impl<'h, 'p> ValuerContext<'h, 'p> for CagContext<'h, '_> {
         'h: 'a,
     {
         let sys_valuer = match datetime {
-            Some(datetime) => {
-                SystemValuer::on_date(JContext::get().journal().config().clone(), datetime)
-            }
+            Some(datetime) => SystemValuer::on_date(JContext::get().config().clone(), datetime),
             None => SystemValuer::on_date(
-                JContext::get().journal().config().clone(),
+                JContext::get().config().clone(),
                 self.event.event_datetime().start(),
             ),
         };
@@ -190,7 +189,7 @@ impl<'h, 'e> EventObj<'h, 'e> {
         eval_identifier!(identifier, EventObj<'h, 'e>, self,
             AdjustedValue(ref bal) if "" => Value(ValuedAmount(bal.as_valued_amount())),
             AdjustedValue(ref bal) if "amount" => Value(Amount(bal.amount(), true)),
-            AdjustedValue(ref bal) if "adjCost" => Value(Amount(bal.value(), false)),
+            AdjustedValue(ref bal) if "value" => Value(Amount(bal.value(), false)),
             AdjustedValue(ref bal) if "expenses" => Value(Amount(bal.expenses(), false)),
             AdjustedValue(ref bal) if "consideration" => Value(Amount(bal.consideration(), false)),
             Pool(event) if "" => Value(String(event.pool_name().into())),
@@ -231,8 +230,6 @@ impl<'h, 'e> EventObj<'h, 'e> {
                         None => return Some(Undefined),
                     }
             },
-            DealHoldingSummary(group) if "total" => AdjustedValue(group.adjusted_value()),
-            DealHoldingSummary(group) if "expenses" => Value(Amount(group.expenses(), false)),
             DealHoldingSummary(group) if "date" => Value(DatetimeRange(group.datetime())),
             DealHoldingSummary(group) if "remainder" => Value(Boolean({
                 match group.parent() {
@@ -240,7 +237,34 @@ impl<'h, 'e> EventObj<'h, 'e> {
                     None => false
                 }
             })),
+            DealHoldingSummary(holding) if "file" => {
+                let root_node = JContext::get()
+                    .journal()
+                    .root();
+                Value(holding.entries().map(|e| {
+                    root_node.find_by_node_id(&e.id().parent().unwrap())
+                    .unwrap()
+                    .nearest_filename()
+                    .map(|p| String(p.to_str().unwrap().into()))
+                    .unwrap_or(Undefined)
+                }).collect::<LinkedHashSet<_>>().into_iter().collect())
+            },
             DealHoldingSummary(group) if "" => AdjustedValue(group.adjusted_value()),
+            DealHoldingSummary(holding) => |ident: &str| {
+                ident.strip_prefix('+').map(|key| {
+                    let md_values = holding.entry_metadata_by_key(key);
+                    if !md_values.is_empty() {
+                        Value(
+                            md_values
+                            .iter()
+                            .map(|m| m.value().map(|v| String(v.into())).unwrap_or(String(SS::new())))
+                            .collect::<ColumnValue>(),
+                        )
+                    } else {
+                        Value(Undefined)
+                    }
+                }).or_else(|| AdjustedValue(holding.adjusted_value()).eval_identifier(ident).map(Value))
+            },
             DealHolding(holding) if "" => AdjustedValue(holding.adjusted_value()),
             DealHolding(holding) if "parent" => {
                 match holding.split_parent() {
@@ -248,8 +272,6 @@ impl<'h, 'e> EventObj<'h, 'e> {
                     None => return Some(Undefined),
                 }
             },
-            DealHolding(holding) if "total" => AdjustedValue(holding.adjusted_value()),
-            DealHolding(holding) if "expenses" => Value(Amount(holding.expenses(), false)),
             DealHolding(holding) if "date" => Value(DatetimeRange(holding.datetime())),
             DealHolding(holding) if "remainder" => Value(Boolean({
                 match holding.split_parent() {
@@ -267,7 +289,7 @@ impl<'h, 'e> EventObj<'h, 'e> {
                     .nearest_filename()
                     .map(|p| String(p.to_str().unwrap().into()))
                     .unwrap_or(Undefined)
-                }).collect())
+                }).collect::<LinkedHashSet<_>>().into_iter().collect())
             },
             DealHolding(holding) => |ident: &str| {
                 ident.strip_prefix('+').map(|key| {
@@ -282,7 +304,7 @@ impl<'h, 'e> EventObj<'h, 'e> {
                     } else {
                         Value(Undefined)
                     }
-                })
+                }).or_else(|| AdjustedValue(holding.adjusted_value()).eval_identifier(ident).map(Value))
             },
             Adjustment(adj) if "unit" => AmountAdjustment(&adj.amount_adjustments()[0]),
             Adjustment(adj) if "cost" => match adj.amount_adjustments().get(1) {

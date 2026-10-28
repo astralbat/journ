@@ -85,12 +85,13 @@ impl<'h> PriceDatabase<'h> {
                     && let Some(filename) = node.nearest_filename()
                 {
                     debug!(
-                        "{:?} {}/{} price found in {} within {}s",
+                        "{:?} {}/{} price found in {} within {}s with datetime {:?}",
                         target,
                         closest_price.base_unit(),
                         closest_price.price(),
                         filename.to_str().unwrap(),
                         within_seconds,
+                        closest_price.datetime(),
                     );
                 }
                 Some(closest_price)

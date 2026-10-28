@@ -158,12 +158,14 @@ impl<'t> TableColumn<'t> {
 
     pub fn shrink_text(&mut self, to_reduce: usize) -> usize {
         let mut total_shrunk_amount = 0;
+        let original_width = self.width().sum();
         loop {
             let mapped_to_cells = self.longest_cells.clone().map(|i| self.cells[i]);
-            let shrunk_amount = Self::shrink_text_inner(&mapped_to_cells, to_reduce);
+            let shrunk_amount =
+                Self::shrink_text_inner(&mapped_to_cells, to_reduce - total_shrunk_amount);
             if shrunk_amount > 0 {
-                total_shrunk_amount += shrunk_amount;
                 self.recalc_width();
+                total_shrunk_amount = original_width - self.width().sum();
             } else {
                 break total_shrunk_amount;
             }
@@ -329,7 +331,6 @@ impl ColumnsVec for &mut [TableColumn<'_>] {
 
         while self.width() > max_width {
             let self_width = self.width().sum();
-            let mut reduction_needed: isize = (self_width - max_width) as isize;
             shrunk = false;
 
             // Decide which columns to wrap first in such a way that the number of lines printed is minimized.
@@ -350,14 +351,20 @@ impl ColumnsVec for &mut [TableColumn<'_>] {
                     }
                 })
                 .collect::<SmallVec<[_; 16]>>();
+
+            let mut reduction_needed: isize = (self_width - max_width) as isize;
+            // The alpha value is a scaling factor to prevent the algorithm from trying to shrink too much in one iteration.
+            // This lets us reassess the scoring after each iteration and avoid over-shrinking columns that may have been scored too high initially.
+            const ALPHA: f32 = 0.5;
+
             // Weight the scores
             let sum_scores = scores.iter().map(|(_, s)| s).sum::<f32>();
             let mut column_reduction_amounts = scores
                 .into_iter()
                 // Weight the scores so they sum to 1.
                 .map(|(i, s)| (i, s / sum_scores))
-                // Scale the weight to the reduction needed
-                .map(|(i, s)| (i, (s * (reduction_needed as f32)).floor() as usize))
+                // Scale the weight to the reduction needed. Round up to prevent all reductions being 0.
+                .map(|(i, s)| (i, (s * (reduction_needed as f32 * ALPHA)).ceil() as usize))
                 // Downsize the reduction to the max possible for the column
                 .map(|(i, s)| (i, s.min(self[i].width().sum() - 1)))
                 .collect::<SmallVec<[_; 16]>>();

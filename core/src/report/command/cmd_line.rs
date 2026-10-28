@@ -5,7 +5,7 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
-use crate::datetime::JDateTime;
+use crate::datetime::{JDateTime, JDateTimeRange};
 use crate::err;
 use crate::report::command::arguments::DateTimeFormatCommand;
 use crate::report::command::print_jerror;
@@ -13,7 +13,7 @@ use nom::Finish;
 use std::ops::{Bound, RangeBounds};
 use std::process::exit;
 
-#[derive(clap::Args, Debug, Default)]
+#[derive(clap::Args, Clone, Debug, Default)]
 pub struct BeginAndEndArguments {
     #[arg(short = 'b', long = "begin", value_name = "BEGIN_DATE", help = "The date to begin")]
     begin: Option<String>,
@@ -30,7 +30,7 @@ impl BeginAndEndArguments {
         let begin = if let Some(begin) = self.begin {
             match JDateTime::parse(dtf, tz)(begin.as_str()).finish() {
                 // All the input must be used
-                Ok((rem, date)) if rem.is_empty() => Some(date),
+                Ok(("", date)) => Some(date),
                 Ok((_, _)) => {
                     print_jerror(err!("Invalid start date: expected format {}", dtf));
                     exit(1)
@@ -50,7 +50,7 @@ impl BeginAndEndArguments {
         let end = if let Some(end) = self.end {
             match JDateTime::parse(dtf, tz)(end.as_str()).finish() {
                 // All the input must be used
-                Ok((rem, date)) if rem.is_empty() => Some(date),
+                Ok(("", date)) => Some(date),
                 Ok((_, _)) => {
                     print_jerror(err!("Invalid end date: expected format {}", dtf));
                     exit(1)
@@ -76,12 +76,12 @@ pub struct BeginAndEndCommand {
 }
 
 impl BeginAndEndCommand {
-    pub fn begin_end_range(&self) -> (Bound<JDateTime>, Bound<JDateTime>) {
+    pub fn begin_end_range(&self) -> JDateTimeRange {
         // Range focuses on the entry date and time being the end date of the entry.
         // Therefore we want a (from, to] range.
         let begin = self.begin.map(Bound::Excluded);
         let end = self.end.map(Bound::Included);
-        (begin.unwrap_or(Bound::Unbounded), end.unwrap_or(Bound::Unbounded))
+        (begin.unwrap_or(Bound::Unbounded), end.unwrap_or(Bound::Unbounded)).into()
     }
 
     pub fn until_end_range(&self) -> impl RangeBounds<JDateTime> {

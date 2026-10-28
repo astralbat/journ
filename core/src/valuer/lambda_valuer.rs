@@ -13,7 +13,6 @@ use crate::parsing::parse_with_config_mut;
 use crate::price::Price;
 use crate::price_db::PriceDatabase;
 use crate::python::conversion::{DateTimeWrapper, DeferredArg};
-use crate::python::environment::PythonEnvironment;
 use crate::python::mod_ledger::PyPrice;
 use crate::unit::Unit;
 use crate::valuer::{
@@ -92,6 +91,15 @@ impl<'h> LambdaValuer<'h> {
                     quote_unit.with_quantity(Decimal::from(val)),
                     None,
                 ))])
+            } else if let Ok(val) = result.extract::<f64>(py) {
+                Ok(vec![Arc::new(Price::new(
+                    datetime,
+                    base_unit,
+                    quote_unit.with_quantity(Decimal::try_from(val).map_err(|e| {
+                        ValuationError::EvalFailure(err!(e; "Unable to convert f64 to Decimal"))
+                    })?),
+                    None,
+                ))])
             } else if let Ok(None) = result.extract::<Option<String>>(py) {
                 Err(ValuationError::Undetermined(err!("None returned")))
             } else {
@@ -116,21 +124,10 @@ impl<'h> LambdaValuer<'h> {
             ))
         })?;
 
-        let py_datetime = match PythonEnvironment::eval::<DateTimeWrapper>(
-            &format!(
-                "datetime.strptime(\"{}\", \"%Y-%m-%dT%H:%M:%S%z\")",
-                self.datetime.datetime().format("%FT%T%z")
-            ),
-            None,
-        ) {
-            Ok(r) => r,
-            Err(e) => panic!("Unable to prepare datetime for valuation call: {}", e),
-        };
-
         let args: Vec<Box<dyn DeferredArg>> = vec![
-            Box::new(quote_unit.to_string()),
-            Box::new(amount.unit().to_string()),
-            Box::new(py_datetime),
+            Box::new(quote_unit.code().to_string()),
+            Box::new(amount.unit().code().to_string()),
+            Box::new(DateTimeWrapper(self.datetime.datetime())),
         ];
 
         let no_price_found_err = || {
@@ -139,7 +136,7 @@ impl<'h> LambdaValuer<'h> {
                 lambda.expression_with_args(vec![
                     quote_unit.to_string(),
                     amount.unit().to_string(),
-                    py_datetime.0.format("%FT%T%z").to_string()
+                    self.datetime.to_string(),
                 ]),
             )
         };
@@ -151,7 +148,7 @@ impl<'h> LambdaValuer<'h> {
                     lambda.expression_with_args(vec![
                         quote_unit.to_string(),
                         amount.unit().to_string(),
-                        py_datetime.0.format("%FT%T%z").to_string()
+                        self.datetime.to_string()
                     ])
                 )
                 .with_source(e),
@@ -175,7 +172,7 @@ impl<'h> LambdaValuer<'h> {
             }
         };
         let got_inverse = prices.first().map(|p| p.base_unit() == quote_unit).unwrap_or(false);
-        match prices.len() {
+        let val = match prices.len() {
             // No results, no valuation possible.
             0 => Err(ValuationError::Undetermined(err!(
                 no_price_found_err().with_source(err!("No results returned"))
@@ -239,7 +236,12 @@ impl<'h> LambdaValuer<'h> {
                     None => unreachable!("There's at least one price in the result database"),
                 }
             }
-        }
+        };
+        // Write eagerly. We need an option on the unit or something to specify when to flush.
+        // This use case is for price prompts.
+        price_db.write_file().map_err(ValuationError::EvalFailure)?;
+
+        val
     }
 }
 
@@ -266,7 +268,7 @@ impl<'h> Valuer<'h> for LambdaValuer<'h> {
         }
         self.eval_stack.push((amount.unit(), quote_unit));
 
-        let res = 'eval: {
+        let res = {
             let mut value = {
                 match self.value_impl(quote_unit, amount) {
                     Ok(result) => Ok(result),
@@ -276,23 +278,34 @@ impl<'h> Valuer<'h> for LambdaValuer<'h> {
                         self.value_impl(amount.unit(), quote_unit.with_quantity(1))
                     }
                 }
+                .map_err(|e| {
+                    e.with_source(err!("Unable to value {} in {}", amount.unit(), quote_unit))
+                })
             }?;
 
-            match Valuer::value(&mut value, quote_unit, amount) {
-                Ok(val) => Ok(val),
-                Err(_) => {
-                    if let Some(ref mut linear_system_valuer) = self.linear_system_valuer {
-                        let mut values_iter = value.values();
-                        let first_second_vals =
-                            (values_iter.next().unwrap(), values_iter.next().unwrap());
-                        if !linear_system_valuer.has_value(first_second_vals) {
-                            linear_system_valuer.add_value(first_second_vals);
-                        }
-                        if let Ok(val) = linear_system_valuer.value(quote_unit, amount) {
-                            break 'eval Ok(val);
-                        }
+            let mut linear_system_update = |val: &Valuation<'h>| {
+                if let Some(ref mut linear_system_valuer) = self.linear_system_valuer {
+                    let mut values_iter = val.values();
+                    let quote_val = values_iter.next().unwrap();
+                    let base_val = values_iter.next().unwrap();
+                    if !linear_system_valuer.has_value((base_val, quote_val)) {
+                        linear_system_valuer.add_value((base_val, quote_val));
                     }
+                }
+            };
 
+            match Valuer::value(&mut value, quote_unit, amount) {
+                Ok(val) => {
+                    linear_system_update(&val);
+                    Ok(val)
+                }
+                Err(_) => {
+                    linear_system_update(&value);
+                    if let Some(ref mut linear_system_valuer) = self.linear_system_valuer
+                        && let Ok(val) = linear_system_valuer.value(quote_unit, amount)
+                    {
+                        return Ok(val);
+                    }
                     self.value_via(quote_unit, amount, value)
                 }
             }

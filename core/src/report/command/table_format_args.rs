@@ -7,20 +7,23 @@
  */
 #[derive(clap::Args, Debug, Default)]
 pub struct TableFormatArguments {
-    #[arg(long = "table-title-sep", help = "The padding character for section titles")]
+    #[arg(long = "tab-title-sep", help = "The padding character for section titles")]
     title_separator: Option<char>,
-    #[arg(long = "table-total-sep", help = "The padding character for separating totals")]
+    #[arg(long = "tab-total-sep", help = "The padding character for separating totals")]
     total_separator: Option<char>,
     #[arg(
-        long = "table-grand-total-sep",
+        long = "tab-grand-total-sep",
         help = "The padding character for separating the grand total"
     )]
     grand_total_separator: Option<char>,
-    #[arg(
-        long = "table-chain-sep",
-        help = "The padding character for separating chained commands"
-    )]
+    #[arg(long = "tab-chain-sep", help = "The padding character for separating chained commands")]
     chain_separator: Option<char>,
+    #[arg(
+        long = "tab-wrap",
+        default_value = "false",
+        help = "Whether to wrap long lines in the table"
+    )]
+    wrap: bool,
 }
 
 impl TableFormatArguments {
@@ -30,6 +33,7 @@ impl TableFormatArguments {
             grand_total_separator: self.grand_total_separator,
             chain_separator: self.chain_separator,
             title_separator: self.title_separator,
+            wrap: self.wrap,
         }
     }
 }
@@ -40,11 +44,12 @@ pub struct TableFormatCommand {
     total_separator: Option<char>,
     grand_total_separator: Option<char>,
     chain_separator: Option<char>,
+    wrap: bool,
 }
 
 impl TableFormatCommand {
     const DEFAULT_TITLE_SEPARATOR: char = '\u{2501}';
-    const DEFAULT_CHAIN_SEPARATOR: char = ' ';
+    const DEFAULT_CHAIN_SEPARATOR: Option<char> = None;
     const DEFAULT_GRAND_TOTAL_SEPARATOR: char = '\u{2550}';
     const DEFAULT_TOTAL_SEPARATOR: char = '\u{2500}';
 
@@ -52,8 +57,8 @@ impl TableFormatCommand {
         self.title_separator.unwrap_or(Self::DEFAULT_TITLE_SEPARATOR)
     }
 
-    pub fn chain_separator(&self) -> char {
-        self.chain_separator.unwrap_or(Self::DEFAULT_CHAIN_SEPARATOR)
+    pub fn chain_separator(&self) -> Option<char> {
+        self.chain_separator.or(Self::DEFAULT_CHAIN_SEPARATOR)
     }
 
     pub fn total_separator(&self) -> char {
@@ -64,12 +69,17 @@ impl TableFormatCommand {
         self.grand_total_separator.unwrap_or(Self::DEFAULT_GRAND_TOTAL_SEPARATOR)
     }
 
+    pub fn wrap(&self) -> bool {
+        self.wrap
+    }
+
     pub fn merge_from(&self, other: &Self) -> Self {
         Self {
             total_separator: self.total_separator.or(other.total_separator),
             title_separator: self.title_separator.or(other.title_separator),
             chain_separator: self.chain_separator.or(other.chain_separator),
             grand_total_separator: self.grand_total_separator.or(other.grand_total_separator),
+            wrap: self.wrap || other.wrap,
         }
     }
 }

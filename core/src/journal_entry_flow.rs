@@ -5,7 +5,7 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
-use crate::account::{Account, AccountType};
+use crate::account::Account;
 use crate::amount::{Amount, Quantity};
 use crate::err;
 use crate::error::JournResult;
@@ -17,7 +17,7 @@ use smallvec::{SmallVec, smallvec};
 use std::cmp::Ordering;
 use std::fmt;
 use std::fmt::Formatter;
-use std::ops::{Add, AddAssign, Deref};
+use std::ops::{Add, AddAssign, Deref, DerefMut};
 use std::sync::Arc;
 
 pub type FlowVec<'h> = SmallVec<[Flow<'h>; 4]>;
@@ -80,35 +80,40 @@ pub trait Flows<'h>: IntoIterator<Item = Flow<'h>> {
     /// Links debits and credits together, returning a vector of linked flows.
     ///
     /// # Returns
-    /// A list of linked flows where the `linked` flow are matching credits.
+    /// A list of linked (debit, credit) flows.
     /// Flows are linked in the order they appear with credits of the same unit and same amount being matched first.
-    fn linked<V: Valuer<'h>>(&self, valuer: &mut V) -> JournResult<SmallVec<[LinkedFlow<'h>; 4]>> {
-        let mut res: SmallVec<[LinkedFlow<'h>; 4]> = smallvec![];
-        let push_res =
-            |res: &mut SmallVec<[LinkedFlow<'h>; 4]>, mut debit: Flow<'h>, mut credit: Flow<'h>| {
-                // A non-explicit zero flow that would round to 0 is not something we want.
-                if !debit.is_zero()
-                    && debit.amount().rounded().is_zero()
-                    && !credit.is_zero()
-                    && credit.amount().rounded().is_zero()
-                {
-                    return;
-                }
-                // Ensure valuations are set for when flows are split up later.
-                if credit.unit() != debit.unit() {
-                    debit
-                        .valued_amount_mut()
-                        .set_valuation(PostingValuation::new_total(-credit.amount(), true));
-                    credit
-                        .valued_amount_mut()
-                        .set_valuation(PostingValuation::new_total(-debit.amount(), true));
-                }
-                debit.round();
-                credit.round();
-                res.push(LinkedFlow::new(debit, credit));
-            };
+    fn linked<V: Valuer<'h>>(
+        &self,
+        valuer: &mut V,
+    ) -> JournResult<SmallVec<[(Flow<'h>, Flow<'h>); 4]>> {
+        let mut res: SmallVec<[(Flow<'h>, Flow<'h>); 4]> = smallvec![];
+        let push_res = |res: &mut SmallVec<[(Flow<'h>, Flow<'h>); 4]>,
+                        mut debit: Flow<'h>,
+                        mut credit: Flow<'h>| {
+            // A non-explicit zero flow that would round to 0 is not something we want.
+            if !debit.is_zero()
+                && debit.amount().rounded().is_zero()
+                && !credit.is_zero()
+                && credit.amount().rounded().is_zero()
+            {
+                return;
+            }
+            // Ensure valuations are set for when flows are split up later.
+            if credit.unit() != debit.unit() {
+                debit
+                    .valued_amount_mut()
+                    .set_valuation(PostingValuation::new_total(-credit.amount(), true));
+                credit
+                    .valued_amount_mut()
+                    .set_valuation(PostingValuation::new_total(-debit.amount(), true));
+            }
+            debit.round();
+            credit.round();
+            res.push((debit, credit))
+        };
 
         let (mut debits, mut credits) = (self.debits(), self.credits());
+
         // Reverse for popping
         debits.reverse();
         // When credits is empty, it could mean because a 0 amount has been interpreted as a debit when
@@ -119,6 +124,41 @@ pub trait Flows<'h>: IntoIterator<Item = Flow<'h>> {
             credits.push(debits.remove(pos));
         }
 
+        // First iteration is to link debits and credits of the same amount or unit.
+        let mut unused_debits: SmallVec<[Flow<'h>; 4]> = smallvec![];
+        while let Some(debit) = debits.pop() {
+            // Find the best credit to link with in priority of:
+            // * Same amount
+            // * Same unit
+            let (credit, credit_pos) = {
+                let best_credit_pos = credits
+                    .iter()
+                    .position(|cr| cr.amount() == debit.amount())
+                    .or_else(|| credits.iter().position(|cr| cr.unit() == debit.unit()));
+                match best_credit_pos {
+                    Some(pos) => (credits.remove(pos), pos),
+                    None => {
+                        unused_debits.push(debit);
+                        continue;
+                    }
+                }
+            };
+            if debit.amount().abs() > credit.amount().abs() {
+                let (taken, debit_rem) = debit.split(-credit.amount());
+                push_res(&mut res, taken, credit);
+                debits.push(debit_rem);
+            } else if debit.amount().abs() < credit.amount().abs() {
+                let (taken, credit_rem) = credit.split(-debit.amount());
+                push_res(&mut res, debit, taken);
+                credits.insert(credit_pos, credit_rem);
+            } else {
+                push_res(&mut res, debit, credit);
+            }
+        }
+        debits = unused_debits;
+        debits.reverse();
+
+        // Second iteration is to link remaining debits and credits by value.
         while let Some(debit) = debits.pop() {
             // If there's only 1 credit left, we just need to link with that
             if debits.is_empty() && credits.len() == 1 {
@@ -127,80 +167,69 @@ pub trait Flows<'h>: IntoIterator<Item = Flow<'h>> {
             }
             // If there are no credits left, we need to create a zero credit to link with.
             if credits.is_empty() {
-                let credit = debit.clone().with_zero();
+                let credit = res.last().map(|l| &l.1).cloned().unwrap_or(debit.clone()).with_zero();
                 push_res(&mut res, debit, credit);
                 continue;
             }
 
             // Find the best credit to link with in priority of:
-            // * Same amount
-            // * Same unit
             // * Same valuation
             let mut credit = {
                 let best_credit_pos = credits
                     .iter()
-                    .position(|cr| cr.amount() == debit.amount())
-                    .or_else(|| credits.iter().position(|cr| cr.unit() == debit.unit()))
-                    .or_else(|| {
-                        credits
-                            .iter()
-                            .position(|cr| cr.valued_amount().eq_abs_value(debit.valued_amount()))
-                    });
+                    .position(|cr| cr.valued_amount().eq_abs_value(debit.valued_amount()));
                 match best_credit_pos {
                     Some(pos) => credits.remove(pos),
-                    None => credits.pop().unwrap(),
+                    None => credits.remove(0),
                 }
             };
 
             // This can happen with bad valuations. Only thing we can
             // do is consume the credits and continue.
-            if debit.amount().is_zero() && debits.is_empty() {
-                push_res(&mut res, debit, credit);
-                continue;
-            }
-
-            // Value the credit in the debit's unit and compare the valuations.
-            // Don't round because:
-            // - Sometimes we can end up rounding to 0, which then wrongly ends
-            //   up taking the valuation.is_zero() branch below.
-            // - Valuations are less accurate when set with rounded values
-            match credit.net_amount.set_value_in_or_value_with(debit.unit(), valuer, false) {
-                // Beware 0 valuations.
-                Ok(credit_value) if (*credit_value).is_zero() => {
-                    push_res(&mut res, debit, credit.clone().with_zero());
-                    if !credit.amount().is_zero() {
-                        credits.push(credit);
+            if !debit.amount().is_zero() || !debits.is_empty() {
+                // Value the credit in the debit's unit and compare the valuations.
+                // Don't round because:
+                // - Sometimes we can end up rounding to 0, which then wrongly ends
+                //   up taking the valuation.is_zero() branch below.
+                // - Valuations are less accurate when set with rounded values
+                match credit.net_amount.set_value_in_or_value_with(debit.unit(), valuer, false) {
+                    // Beware 0 valuations.
+                    Ok(credit_value) if (*credit_value).is_zero() => {
+                        push_res(&mut res, debit, credit.clone().with_zero());
+                        if !credit.amount().is_zero() {
+                            credits.push(credit);
+                        }
                     }
+                    Ok(credit_value) => match (*credit_value).abs().cmp(&debit.amount()) {
+                        Ordering::Greater => {
+                            let (taken, credit_rem) = credit.split(-debit.amount());
+                            push_res(&mut res, debit, taken);
+                            if !credit_rem.amount().is_zero() {
+                                credits.push(credit_rem);
+                            }
+                        }
+                        Ordering::Less => {
+                            let (taken, debit_rem) = debit.split(-*credit_value);
+                            push_res(&mut res, taken, credit);
+                            if !debit_rem.amount().is_zero() {
+                                debits.push(debit_rem);
+                            }
+                        }
+                        Ordering::Equal => {
+                            push_res(&mut res, debit, credit);
+                        }
+                    },
+                    Err(e) => return Err(err!(e)),
                 }
-                Ok(credit_value) => match (*credit_value).abs().cmp(&debit.amount()) {
-                    Ordering::Greater => {
-                        let (taken, credit_rem) = credit.split(-debit.amount());
-                        push_res(&mut res, debit, taken);
-                        if !credit_rem.amount().is_zero() {
-                            credits.push(credit_rem);
-                        }
-                    }
-                    Ordering::Less => {
-                        let (taken, debit_rem) = debit.split(-*credit_value);
-                        push_res(&mut res, taken, credit);
-                        if !debit_rem.amount().is_zero() {
-                            debits.push(debit_rem);
-                        }
-                    }
-                    Ordering::Equal => {
-                        push_res(&mut res, debit, credit);
-                    }
-                },
-                Err(e) => return Err(err!(e)),
+            } else {
+                // If the debit is zero, we can just link with a zero credit.
+                push_res(&mut res, debit, credit);
             }
 
             // We need to ensure that there is at least 1 debit/credit if there are more credits/debits.
-            /*
             if debits.is_empty() && !credits.is_empty() {
-                debits.push(res.last().unwrap().flow().clone().with_zero());
-            } else if credits.is_empty() && !debits.is_empty() {
-                credits.push(res.last().unwrap().linked().clone().with_zero());
-            }*/
+                debits.push(res.last().unwrap().0.clone().with_zero());
+            }
         }
         debug_assert!(debits.is_empty());
         debug_assert!(credits.is_empty());
@@ -297,10 +326,6 @@ impl<'h> Flow<'h> {
 
     pub fn account_root(&self) -> Option<&Arc<Account<'h>>> {
         self.account_root.as_ref()
-    }
-
-    pub fn account_type(&self) -> Option<AccountType> {
-        self.account_root.as_ref()?.account_type()
     }
 
     pub fn unit(&self) -> &'h Unit<'h> {
@@ -475,24 +500,12 @@ impl<'h> LinkedFlow<'h> {
         Self { flow, linked }
     }
 
-    pub fn flow(&self) -> &Flow<'h> {
-        &self.flow
-    }
-
-    pub fn flow_mut(&mut self) -> &mut Flow<'h> {
-        &mut self.flow
-    }
-
     pub fn linked(&self) -> &Flow<'h> {
         &self.linked
     }
 
     pub fn linked_mut(&mut self) -> &mut Flow<'h> {
         &mut self.linked
-    }
-
-    pub fn invert(self) -> Self {
-        Self { flow: self.linked, linked: self.flow }
     }
 }
 
@@ -504,11 +517,20 @@ impl<'h> Deref for LinkedFlow<'h> {
     }
 }
 
+impl<'h> DerefMut for LinkedFlow<'h> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.flow
+    }
+}
+
 #[cfg(test)]
 mod test {
+    use crate::amount::Amount;
     use crate::entry;
+    use crate::journal_entry::JournalEntry;
     use crate::journal_entry_flow::Flows;
-    use crate::valuer::SystemValuer;
+    use crate::unit::Unit;
+    use crate::valuer::{SystemValuer, Valuation};
     use indoc::indoc;
 
     #[test]
@@ -524,10 +546,10 @@ mod test {
         assert!(linked.is_ok());
         let linked = linked.unwrap();
         assert_eq!(linked.len(), 2);
-        assert_eq!(&**linked[0].flow().account_root().unwrap(), "A");
-        assert_eq!(&**linked[0].linked().account_root().unwrap(), "B");
-        assert_eq!(&**linked[1].flow().account_root().unwrap(), "C");
-        assert_eq!(&**linked[1].linked().account_root().unwrap(), "C");
+        assert_eq!(&**linked[0].0.account_root().unwrap(), "A");
+        assert_eq!(&**linked[0].1.account_root().unwrap(), "B");
+        assert_eq!(&**linked[1].0.account_root().unwrap(), "C");
+        assert_eq!(&**linked[1].1.account_root().unwrap(), "B");
 
         let entry = entry!(indoc! {r#"
         2000-01-01  Entry 1
@@ -540,10 +562,10 @@ mod test {
         assert!(linked.is_ok());
         let linked = linked.unwrap();
         assert_eq!(linked.len(), 2);
-        assert_eq!(&**linked[0].flow().account_root().unwrap(), "A");
-        assert_eq!(&**linked[0].linked().account_root().unwrap(), "B");
-        assert_eq!(&**linked[1].flow().account_root().unwrap(), "C");
-        assert_eq!(&**linked[1].linked().account_root().unwrap(), "C");
+        assert_eq!(&**linked[0].0.account_root().unwrap(), "A");
+        assert_eq!(&**linked[0].1.account_root().unwrap(), "B");
+        assert_eq!(&**linked[1].0.account_root().unwrap(), "C");
+        assert_eq!(&**linked[1].1.account_root().unwrap(), "A");
     }
 
     /// When units are different, the flows are linked by equal value if possible.
@@ -561,10 +583,10 @@ mod test {
         assert!(linked.is_ok());
         let linked = linked.unwrap();
         assert_eq!(linked.len(), 2);
-        assert_eq!(&**linked[0].flow().account_root().unwrap(), "A");
-        assert_eq!(&**linked[0].linked().account_root().unwrap(), "B");
-        assert_eq!(&**linked[1].flow().account_root().unwrap(), "C");
-        assert_eq!(&**linked[1].linked().account_root().unwrap(), "D");
+        assert_eq!(&**linked[0].0.account_root().unwrap(), "A");
+        assert_eq!(&**linked[0].1.account_root().unwrap(), "B");
+        assert_eq!(&**linked[1].0.account_root().unwrap(), "C");
+        assert_eq!(&**linked[1].1.account_root().unwrap(), "D");
     }
 
     /// Tests that the linked flows are in the same order as the postings, and that they are linked correctly.
@@ -584,12 +606,12 @@ mod test {
         assert!(linked.is_ok());
         let linked = linked.unwrap();
         assert_eq!(linked.len(), 3);
-        assert_eq!(&**linked[0].flow().account_root().unwrap(), "A");
-        assert_eq!(&**linked[0].linked().account_root().unwrap(), "B");
-        assert_eq!(&**linked[1].flow().account_root().unwrap(), "C");
-        assert_eq!(&**linked[1].linked().account_root().unwrap(), "D");
-        assert_eq!(&**linked[2].flow().account_root().unwrap(), "E");
-        assert_eq!(&**linked[2].linked().account_root().unwrap(), "F");
+        assert_eq!(&**linked[0].0.account_root().unwrap(), "A");
+        assert_eq!(&**linked[0].1.account_root().unwrap(), "B");
+        assert_eq!(&**linked[1].0.account_root().unwrap(), "C");
+        assert_eq!(&**linked[1].1.account_root().unwrap(), "D");
+        assert_eq!(&**linked[2].0.account_root().unwrap(), "E");
+        assert_eq!(&**linked[2].1.account_root().unwrap(), "F");
 
         let entry = entry!(indoc! {r#"
         2000-01-01  Entry 1
@@ -605,11 +627,102 @@ mod test {
         assert!(linked.is_ok());
         let linked = linked.unwrap();
         assert_eq!(linked.len(), 3);
-        assert_eq!(&**linked[0].flow().account_root().unwrap(), "A");
-        assert_eq!(&**linked[0].linked().account_root().unwrap(), "D");
-        assert_eq!(&**linked[1].flow().account_root().unwrap(), "C");
-        assert_eq!(&**linked[1].linked().account_root().unwrap(), "F");
-        assert_eq!(&**linked[2].flow().account_root().unwrap(), "E");
-        assert_eq!(&**linked[2].linked().account_root().unwrap(), "B");
+        assert_eq!(&**linked[0].0.account_root().unwrap(), "A");
+        assert_eq!(&**linked[0].1.account_root().unwrap(), "D");
+        assert_eq!(&**linked[1].0.account_root().unwrap(), "C");
+        assert_eq!(&**linked[1].1.account_root().unwrap(), "F");
+        assert_eq!(&**linked[2].0.account_root().unwrap(), "E");
+        assert_eq!(&**linked[2].1.account_root().unwrap(), "B");
+
+        let entry = entry!(indoc! {r#"
+        2000-01-01  Entry 1
+            A  -$1
+            B  -$2
+            C  $0.75
+            D  $0.75
+            E  $1.50
+            ; These next 3 form a separate group
+            F  $0.50
+            G  -$0.25
+            H  -$0.25
+        "#});
+        let mut valuer = SystemValuer::from(&entry);
+        let linked = entry.flows().linked(&mut valuer);
+        assert!(linked.is_ok());
+        let linked = linked.unwrap();
+        assert_eq!(linked.len(), 6);
+        assert_eq!(&**linked[0].0.account_root().unwrap(), "C");
+        assert_eq!(&**linked[0].1.account_root().unwrap(), "A");
+        assert_eq!(&**linked[1].0.account_root().unwrap(), "D");
+        assert_eq!(&**linked[1].1.account_root().unwrap(), "A");
+        assert_eq!(&**linked[2].0.account_root().unwrap(), "D");
+        assert_eq!(&**linked[2].1.account_root().unwrap(), "B");
+        assert_eq!(&**linked[3].0.account_root().unwrap(), "E");
+        assert_eq!(&**linked[3].1.account_root().unwrap(), "B");
+
+        assert_eq!(&**linked[4].0.account_root().unwrap(), "F");
+        assert_eq!(&**linked[4].1.account_root().unwrap(), "G");
+        assert_eq!(&**linked[5].0.account_root().unwrap(), "F");
+        assert_eq!(&**linked[5].1.account_root().unwrap(), "H");
+    }
+
+    #[test]
+    #[allow(extra_unused_lifetimes)]
+    fn test_link_with_insufficient_debits<'h>() {
+        let entry = entry!(indoc! {r#"
+        2000-01-01  Entry 1
+            A  100 A
+            B  -100 B
+            C  -100 C
+            D  -100 D
+        "#});
+        let mut valuer = |quote_unit: &'h Unit<'h>, base_amount: Amount<'h>| {
+            Ok(Valuation::binary(quote_unit.with_quantity(base_amount.quantity()), base_amount))
+        };
+        let linked = entry.flows().linked(&mut valuer);
+        assert!(linked.is_ok());
+        let linked = linked.unwrap();
+        assert_eq!(linked.len(), 3);
+
+        assert_eq!(&**linked[0].0.account_root().unwrap(), "A");
+        assert_eq!(&**linked[0].1.account_root().unwrap(), "B");
+
+        assert!(linked[1].0.amount().is_zero());
+        assert_eq!(&**linked[1].0.account_root().unwrap(), "A");
+        assert_eq!(&**linked[1].1.account_root().unwrap(), "C");
+
+        assert!(linked[2].0.amount().is_zero());
+        assert_eq!(&**linked[2].0.account_root().unwrap(), "A");
+        assert_eq!(&**linked[2].1.account_root().unwrap(), "D");
+    }
+
+    #[test]
+    #[allow(extra_unused_lifetimes)]
+    fn test_link_with_insufficient_credits<'h>() {
+        let entry = entry!(indoc! {r#"
+        2000-01-01  Entry 1
+            A  -100 A
+            B  100 B
+            C  100 C
+            D  100 D
+        "#});
+        let mut valuer = |quote_unit: &'h Unit<'h>, base_amount: Amount<'h>| {
+            Ok(Valuation::binary(quote_unit.with_quantity(base_amount.quantity()), base_amount))
+        };
+        let linked = entry.flows().linked(&mut valuer);
+        assert!(linked.is_ok());
+        let linked = linked.unwrap();
+        assert_eq!(linked.len(), 3);
+
+        assert_eq!(&**linked[0].0.account_root().unwrap(), "B");
+        assert_eq!(&**linked[0].1.account_root().unwrap(), "A");
+
+        assert!(linked[1].1.amount().is_zero());
+        assert_eq!(&**linked[1].0.account_root().unwrap(), "C");
+        assert_eq!(&**linked[1].1.account_root().unwrap(), "A");
+
+        assert!(linked[2].1.amount().is_zero());
+        assert_eq!(&**linked[2].0.account_root().unwrap(), "D");
+        assert_eq!(&**linked[2].1.account_root().unwrap(), "A");
     }
 }

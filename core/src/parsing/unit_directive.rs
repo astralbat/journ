@@ -5,23 +5,26 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
+use crate::configuration::Expression;
 use crate::directive::{Directive, DirectiveKind};
 use crate::error::parsing::promote;
 use crate::journal_node::JournalNodeKind;
-use crate::parsing::amount::decimal_expr;
-use crate::parsing::directive::{StreamResult, stream};
+use crate::parsing::amount::{decimal_expr, unit};
+use crate::parsing::directive::{StreamResult, stream_file};
 use crate::parsing::input::{BlockInput, ConfigInput, LocatedInput, NodeInput, TextInput};
 use crate::parsing::util::{
-    line_value, multiline_value_string, param_value, repeat0, separated_field,
+    double_quoted, line_value, multiline_value_string, param_value, repeat0, separated_field, word,
 };
-use crate::parsing::{JParseResult, entry, util};
+use crate::parsing::{JParseResult, amount, entry, util};
 use crate::price_db::PriceDatabase;
 use crate::python::lambda::Lambda;
-use crate::python::mod_ledger::PythonLedgerModule;
-use crate::unit::{RoundingStrategy, Unit, Units};
+use crate::unit::{RoundingStrategy, Unit};
 use crate::{match_blocks, parsing};
 use nom::Parser;
-use nom::combinator::{map, map_parser, map_res, rest};
+use nom::branch::alt;
+use nom::character::complete::{char, space0};
+use nom::combinator::{map, map_parser, map_res, opt, rest};
+use nom::sequence::{preceded, terminated, tuple};
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -30,28 +33,28 @@ pub const E_INVALID_VALUE_EXPRESSION: &str = "Unit value expression must be a va
 pub const E_UNKNOWN_UNIT_KEY: &str = "Unknown unit configuration parameter";
 pub const E_INVALID_PRICES_WITHIN_SECS: &str = "Unit priceWithinSecs must be a positive integer";
 
-pub fn unit_definition_body<'h, 's, 'p, I>(input: I) -> JParseResult<I, &'h Unit<'h>>
+pub fn unit_definition_body<'h, 's, 'p, I>(
+    input: I,
+) -> JParseResult<I, (Unit<'h>, Vec<&'h str>, Option<&'h str>)>
 where
     I: TextInput<'h> + ConfigInput<'h> + NodeInput<'h, 's, 'p> + BlockInput<'h> + LocatedInput<'h>,
     'h: 's,
     's: 'p,
 {
     // Read the unit codes
-    let mut all_codes = vec![];
-    let unit_code = || map(separated_field(','), |s: I| s.text());
+    //let unit_code = || map(separated_field(','), |s: I| s.text());
     // Read the first unit code
-    let (input, primary_code) = promote("Unit code expected", unit_code())(input)?;
-    all_codes.push(primary_code);
+    let (input, primary_code) = promote("Unit code expected", preceded(space0, unit))(input)?;
     // Read aliases
-    let input = repeat0(unit_code().and_then(|code: &'h str| {
-        all_codes.push(code);
-        Ok(("", ()))
+    let mut aliases = vec![];
+    let alias_code = || preceded(tuple((space0, char(','), space0)), unit);
+    let (input, _) = repeat0(map(alias_code(), |code: &'h str| {
+        aliases.push(code);
     }))(input.clone())
-    .unwrap()
-    .0;
+    .unwrap();
     // Parse the primary unit
-    let (rem, primary) = read_unit(primary_code, &all_codes, None)(input.clone())?;
-    Ok((rem, primary))
+    let (rem, (primary, new_code)) = read_unit(primary_code, None)(input.clone())?;
+    Ok((rem, (primary, aliases, new_code)))
 }
 
 pub fn unit_directive_body<'h, 's, 'e, 'p, I>(input: I) -> JParseResult<I, Directive<'h>>
@@ -61,9 +64,9 @@ where
     'e: 's,
     's: 'p,
 {
-    let (rem, mut unit) = unit_definition_body(input.clone())?;
-    unit = input.config_mut().merge_unit(unit);
-    Ok((rem, Directive::new(Some(input.block()), DirectiveKind::Unit(unit))))
+    let (rem, (unit, aliases, new_code)) = unit_definition_body(input.clone())?;
+    let unit_ref = input.config_mut().merge_unit(unit, &aliases, new_code);
+    Ok((rem, Directive::new(Some(input.block()), DirectiveKind::Unit(unit_ref))))
 }
 
 pub fn units_directive<'h, 's, 'p, I>(input: I) -> JParseResult<I, Directive<'h>>
@@ -72,8 +75,9 @@ where
     'h: 's,
     's: 'p,
 {
+    let (input, unit_pattern) =
+        promote("Unit pattern expected", alt((double_quoted, word)))(input)?;
     let node = input.parse_node();
-    let mut units = Units::default();
     let mut def_unit = Unit::none();
     let mut metadata = vec![];
 
@@ -88,15 +92,19 @@ where
                 def_unit.set_conversion_expression(Some(lambda_expr));
                 Ok(())
             },
+            param_value("format") => |input| {
+                let format = promote("Invalid unit format", map_parser(line_value, parsing::amount::unit_format(true)))(input)?.1;
+                def_unit.set_format(format);
+                Ok(())
+            },
             param_value("prices") => |input: I| {
-                let node = match stream(input, JournalNodeKind::Prices) {
+                let node = match stream_file(input, JournalNodeKind::Prices) {
                     StreamResult::AlreadyStreamed(_, node) => node,
                     StreamResult::NewStream(_, branch_input) => node.branch(branch_input),
                     StreamResult::Err(e) => return Err(e)
                 };
 
                 let pd = Arc::new(PriceDatabase::new(node));
-                PythonLedgerModule::set_default_price_database(&pd);
                 def_unit.set_prices(Some(pd));
                 Ok(())
             },
@@ -112,20 +120,21 @@ where
                 Ok(())
             },
             util::comment => |_| Ok(()),
-            entry::metadata => |m| Ok(metadata.push(m))
+            entry::metadata => |m| Ok(metadata.push(m)),
+            rest => |input: I| Err(NomErr::Error(input.into_err(E_UNKNOWN_UNIT_KEY)))
         )?.0;
     def_unit.set_metadata(metadata);
-    let def_unit = input.config_mut().merge_default_unit(&def_unit, input.parse_node().allocator());
-    units.set_default_unit(Some(def_unit));
+    let allocated = input
+        .config_mut()
+        .merge_unit_pattern(Expression::from_glob_pattern(unit_pattern.text(), None), def_unit);
 
-    Ok((rem, Directive::new(Some(input.block()), DirectiveKind::Units(units))))
+    Ok((rem, Directive::new(Some(input.block()), DirectiveKind::Units(allocated))))
 }
 
 fn read_unit<'h, 's, 'e, 'p, 'a, I>(
     unit_code: &'h str,
-    all_codes: &'a [&'h str],
     primary: Option<&'h Unit<'h>>,
-) -> impl FnMut(I) -> JParseResult<I, &'h Unit<'h>> + 'a
+) -> impl FnMut(I) -> JParseResult<I, (Unit<'h>, Option<&'h str>)> + 'a
 where
     I: TextInput<'h> + ConfigInput<'h> + NodeInput<'h, 's, 'p> + BlockInput<'h> + LocatedInput<'h>,
     'h: 'e,
@@ -136,8 +145,9 @@ where
     move |input: I| {
         let node = input.parse_node();
         let mut unit = Unit::new(unit_code);
-        unit.set_aliases(all_codes.iter().copied().map(|c| c.into()).collect());
+        //unit.set_aliases(all_codes.iter().copied().map(|c| c.into()).collect());
         let mut metadata = vec![];
+        let mut new_code = None;
         let rem = match_blocks!(input.clone(),
                 param_value("name") => |input: I| {
                     let name = promote("Invalid unit name", line_value)(input)?.1;
@@ -176,7 +186,7 @@ where
                             }
                         }
                         None => {
-                            let node = match stream(input, JournalNodeKind::Prices) {
+                            let node = match stream_file(input, JournalNodeKind::Prices) {
                                 StreamResult::AlreadyStreamed(_, node) => node,
                                 StreamResult::NewStream(_, branch_input) => node.branch(branch_input),
                                 StreamResult::Err(e) => return Err(e)
@@ -198,12 +208,19 @@ where
                     unit.set_pricedb_lookup_within_secs(usize::try_from(d).unwrap());
                     Ok(())
                 },
+                // Rename is a more explicit way of writing: "unit <new_code>, <old_code>".
+                // We cannot release the <old_code> from the configuration, as it would create ambiguity if redefined.
+                param_value("rename") => |input: I| {
+                    let code = promote("New unit name expected", amount::unit)(input)?.1.text();
+                    new_code = Some(code);
+                    Ok(())
+                },
                 util::comment => |_| Ok(()),
                 entry::metadata => |m| Ok(metadata.push(m)),
                 rest => |input: I| Err(NomErr::Error(input.into_err(E_UNKNOWN_UNIT_KEY)))
             )?.0;
         unit.set_metadata(metadata);
-        Ok((rem, node.allocator().alloc(unit)))
+        Ok((rem, (unit, new_code)))
     }
 }
 
@@ -211,7 +228,7 @@ where
 mod tests {
     use crate::parsing::text_block::{TextBlockBuf, TextBlockWriter};
     use crate::python::lambda::Lambda;
-    use crate::unit::RoundingStrategy;
+    use crate::unit::{RoundingStrategy, Unit};
     use crate::{journ, parse, parsing};
     use indoc::indoc;
     use std::str::FromStr;
@@ -260,25 +277,26 @@ mod tests {
 
     #[test]
     fn test_default_unit_directive() {
-        let journ = journ!("default unit rounding halfeven");
-        assert_eq!(journ.config().default_unit().rounding_strategy(), RoundingStrategy::HalfEven);
+        let journ = journ!("units * rounding halfeven");
+        let merged = journ.config().merged_unit(Unit::new("ABC"), &[], None);
+        assert_eq!(merged.rounding_strategy(), RoundingStrategy::HalfEven);
 
         let journ = journ!(indoc! { r#"
-        default unit value d, b, q ->
+        units * value d, b, q ->
                       1
           prices
            P 2000-01-01 10:11:12Z "€" "$1.00""# });
 
         let config = journ.config();
-        let unit = config.default_unit();
+        let merged = journ.config().merged_unit(Unit::new("ABC"), &[], None);
         assert_eq!(
-            unit.conversion_expression(),
+            merged.conversion_expression(),
             Some(Lambda::from_str("d, b, q -> 1").unwrap()).as_ref()
         );
-        assert!(unit.prices().is_some());
-        assert_eq!(unit.prices().unwrap().prices().len(), 1, "Price DB contains one price");
+        assert!(merged.prices().is_some());
+        assert_eq!(merged.prices().unwrap().prices().len(), 1, "Price DB contains one price");
 
-        let price = unit.prices().unwrap().prices().iter().next().cloned().unwrap();
+        let price = merged.prices().unwrap().prices().iter().next().cloned().unwrap();
         let mut buf = Vec::new();
         let mut block_writer = TextBlockWriter::new(&mut buf);
         block_writer.write(price.as_ref(), Some(config)).unwrap();

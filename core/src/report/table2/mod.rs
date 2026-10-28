@@ -16,7 +16,7 @@ mod table;
 pub use cell::aligned::{AlignedCell, Alignment};
 pub use cell::binary::BinaryCell;
 pub use cell::blank::{BLANK_CELL, BlankCell};
-pub use cell::ellipsis::EllipsisCell;
+pub use cell::ellipsis::{EllipsisCell, EllipsisPolicy};
 pub use cell::multi::{MultiCell, MultiLineCell};
 pub use cell::separator::SeparatorCell;
 pub use cell::spanned::SpannedCell;

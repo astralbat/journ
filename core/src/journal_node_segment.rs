@@ -6,8 +6,9 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::configuration::Configuration;
-use crate::directive::Directive;
-use crate::journal_node::JournalNode;
+use crate::datetime::JDateTime;
+use crate::directive::{Directive, DirectiveKind};
+use crate::journal_node::{JournalNode, JournalNodeKind};
 use crate::tree_id::BranchCountingTreeId;
 use std::fmt::{Debug, Formatter};
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -63,6 +64,37 @@ impl<'h> JournalNodeSegment<'h> {
     /// Gets the configuration state as it is at the end of the segment.
     pub fn config(&self) -> &Configuration<'h> {
         self.configuration.get().expect("Journal node segment has no configuration")
+    }
+
+    /// Gets the last dated configuration before the given datetime, if any.
+    /// This is done a little heuristically by examining the configuration on entry directives, since only they have an
+    /// associated datetime.
+    /// We only take configuration from entries that start before the given datetime, and we take the last one of those.
+    ///
+    /// This really only works properly if the entries are ordered by datetime.
+    pub fn last_config_before(&self, datetime: JDateTime) -> Option<&Configuration<'h>> {
+        if self.node().file_kind() != JournalNodeKind::Entry {
+            return None;
+        }
+        let guard = self.directives.lock().unwrap();
+        let mut last_config = None;
+        //let mut found_excluded_entry = false;
+        for directive in guard.iter() {
+            match directive.kind() {
+                //DirectiveKind::Entry(entry) if entry.datetime_range().start() > datetime => {
+                //    found_excluded_entry = true;
+                //    break;
+                //}
+                DirectiveKind::Entry(entry) if entry.datetime_range().start() <= datetime => {
+                    last_config = Some(entry.config());
+                }
+                _ => {}
+            }
+        }
+        //if !found_excluded_entry {
+        //    return Some(self.config());
+        //}
+        last_config
     }
 
     /// Sets the configuration state as it is at the end of the segment.

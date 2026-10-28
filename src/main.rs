@@ -41,6 +41,7 @@ use journ_core::{err, parsing};
 use num_format::{SystemLocale, ToFormattedString};
 use std::env;
 use std::io::Write;
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::process::exit;
 use std::sync::LazyLock;
@@ -128,17 +129,16 @@ enum CommandArguments {
 }
 
 impl CommandArguments {
-    pub fn exec(self, args: &Arguments) -> JournResult<()> {
-        let context = JContext::get();
-        let cmd = match self {
+    pub fn into_exec_cmd(self, args: &Arguments) -> JournResult<Box<dyn ExecCommand>> {
+        match self {
             CommandArguments::Print(print_args) => {
-                Ok(context.set_cmd(context.allocator().alloc(print_args.into_exec_cmd(args)?)))
+                Ok(Box::new(print_args.into_exec_cmd(args)?) as Box<dyn ExecCommand>)
             }
             CommandArguments::Bal(bal_args) => {
-                Ok(context.set_cmd(context.allocator().alloc(bal_args.into_exec_cmd(args)?)))
+                Ok(Box::new(bal_args.into_exec_cmd(args)?) as Box<dyn ExecCommand>)
             }
             CommandArguments::Reg(reg_args) => {
-                Ok(context.set_cmd(context.allocator().alloc(reg_args.into_exec_cmd(args)?)))
+                Ok(Box::new(reg_args.into_exec_cmd(args)?) as Box<dyn ExecCommand>)
             }
             CommandArguments::Module(module_args) => {
                 match MODULES
@@ -148,14 +148,11 @@ impl CommandArguments {
                     .filter_map(Module::command)
                     .find(|c| c.name() == module_args[0])
                 {
-                    Some(command) => Ok(context.set_cmd(
-                        &**context.allocator().alloc(command.create(args, &module_args)?),
-                    )),
+                    Some(command) => Ok(command.create(args, &module_args)?),
                     None => Err(err!("Unknown command: '{}'", module_args[0])),
                 }
             }
-        }?;
-        cmd.execute(None)
+        }
     }
 }
 
@@ -227,20 +224,34 @@ fn main() {
 
     let herd = Herd::new();
     let herd_allocator = herd.get().alloc(HerdAllocator::new(&herd));
-    let context = parse(&file_path, herd_allocator);
+    let context = JContext::new(herd_allocator);
 
     // Execute the command
     context.with(|| {
-        if let Err(e) = main_args.command.exec(&args) {
+        parse(&file_path, herd_allocator);
+        if let Err(e) = main_args.command.into_exec_cmd(args).and_then(|cmd| {
+            let cmd = context.set_cmd(&**context.allocator().alloc(cmd));
+            // Set a global config
+            context.set_config(
+                context
+                    .journal()
+                    .config(Some(cmd.begin_and_end_cmd().begin_end_range().end()))
+                    .clone(),
+            );
+            cmd.execute(None)
+        }) {
             print_jerror(e);
             exit(1)
         }
-    });
+    })
     //herd.reset();
 }
 
 /// Parse the ledger
-fn parse<'h>(file_path: &Path, herd_allocator: &'h HerdAllocator<'h>) -> JContext<'h> {
+fn parse<'h>(
+    file_path: &Path,
+    herd_allocator: &'h HerdAllocator<'h>,
+) -> Box<dyn Deref<Target = Journal<'h>> + 'h> {
     let now = SystemTime::now();
     let file_name = herd_allocator.alloc(PathBuf::from(file_path.file_name().unwrap()));
     PythonEnvironment::startup();

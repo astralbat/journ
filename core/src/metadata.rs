@@ -6,7 +6,7 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::alloc::HerdAllocator;
-use crate::configuration::{Configuration, Expression};
+use crate::configuration::Configuration;
 use crate::error::{BlockContext, BlockContextError, JournError, JournResult};
 use crate::parsing::input::{BlockInput, ConfigInput, LocatedInput, TextInput};
 use crate::parsing::text_block::{BlockObject, TextBlock, TextBlockBuf, block, block_remainder1};
@@ -26,16 +26,10 @@ use std::fmt::{Debug, Formatter};
 use std::hash::{Hash, Hasher};
 use std::sync::OnceLock;
 
-/// &str wrapper for key, to override PartialEq behavior.
+/// &str wrapper for key, to override PartialEq behaviour.
 /// Metadata key comparisons are case-insensitive.
 #[derive(Debug, Clone, Hash, Ord, PartialOrd)]
 pub struct MetadataKey<'h>(pub Cow<'h, str>);
-
-impl MetadataKey<'_> {
-    pub fn is_match(&self, pattern: &str) -> bool {
-        Expression::from(pattern).is_match(&self.0)
-    }
-}
 
 impl PartialEq for MetadataKey<'_> {
     fn eq(&self, other: &Self) -> bool {
@@ -109,6 +103,10 @@ impl<'h> Metadata<'h> {
     /// Gets the metadata value.
     pub fn value(&self) -> Option<&str> {
         self.inner().value()
+    }
+
+    pub fn is_same_block(&self, other: &Self) -> bool {
+        self.block.get() == other.block.get()
     }
 
     /// Gets the pretext - the padded '+' before the key.

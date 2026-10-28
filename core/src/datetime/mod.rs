@@ -5,7 +5,6 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
-mod date_and_time;
 mod datetime_format;
 mod jdate;
 mod jdatetime;
@@ -15,7 +14,6 @@ mod jtime;
 use crate::unit::NumberFormat;
 use chrono::format::{Item, Numeric, Parsed};
 use chrono_tz::Tz;
-pub use date_and_time::DateAndTime;
 pub use jdate::JDate;
 pub use jdatetime::{JDateTime, MAX_DATETIME, MIN_DATETIME};
 pub use jdatetime_range::JDateTimeRange;

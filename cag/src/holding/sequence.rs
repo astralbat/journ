@@ -111,8 +111,16 @@ impl<'h> SequenceDealHolding<'h> {
         self.split_parent.as_ref()
     }
 
+    /// Returns an iterator over all the journal entries in the sequence of deal holdings.
+    /// The list of entries is deduplicated, so that if the same entry appears in multiple deal holdings, it will only be returned once.
     pub fn entries(&self) -> Box<dyn Iterator<Item = &'h JournalEntry<'h>> + '_> {
-        Box::new(self.sequence.iter().flat_map(|dh| dh.entries()))
+        Box::new(
+            self.sequence
+                .iter()
+                .flat_map(|dh| dh.entries())
+                .collect::<LinkedHashSet<_>>()
+                .into_iter(),
+        )
     }
 
     /// Calculates the balance.

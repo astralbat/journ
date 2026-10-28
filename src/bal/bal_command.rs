@@ -6,7 +6,7 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::ExecCommand;
-use journ_core::configuration::{AccountFilter, DescriptionFilter, UnitFilter};
+use journ_core::configuration::{AccountFilter, Configuration, DescriptionFilter, UnitFilter};
 use journ_core::err;
 use journ_core::error::JournResult;
 use journ_core::journal::Journal;
@@ -58,18 +58,6 @@ pub struct BalCommand {
 }
 
 impl BalCommand {
-    pub fn account_filter(&self) -> AccountFilter {
-        AccountFilter::new(self.account_filter.iter().flatten())
-    }
-
-    pub fn unit_filter(&self) -> UnitFilter {
-        UnitFilter::new(self.unit_filter.iter().flatten())
-    }
-
-    pub fn description_filter(&self) -> DescriptionFilter {
-        DescriptionFilter::new(self.description_filter.iter())
-    }
-
     pub fn expr_filter(&self) -> JournResult<Vec<ScalarExpr>> {
         Ok(self
             .filter
@@ -107,39 +95,11 @@ impl BalCommand {
             let cmd = JContext::get().cast_cmd::<BalCommand>();
 
             let query = PostingQuery::between(cmd.begin_and_end_cmd.begin_end_range())
-                .with_description_filter(self.description_filter())
-                .with_unit_filter(self.unit_filter())
-                .with_account_filter(self.account_filter())
+                .with_description_filter(DescriptionFilter::new(self.description_filter.iter()))
+                .with_unit_filter(UnitFilter::new(self.unit_filter.iter().flatten()))
+                .with_account_filter(AccountFilter::new(self.account_filter.iter().flatten()))
                 .with_expr_filter(self.expr_filter()?);
             Ok(Box::new(journ.postings(query)))
-            /*
-            Ok(Box::new(
-                journ
-                    .entry_range(cmd.begin_and_end_cmd.begin_end_range())
-                    .filter(move |e| description_filter.is_included(e.description()))
-                    .flat_map(move |e| e.postings().map(move |p| (e, p)))
-                    .filter(move |(_e, p)| account_filter.is_included(p.account()))
-                    .filter(move |(_e, p)| unit_filter.is_included(p.unit()))
-                    .filter_map(move |(e, p)| {
-                        let mut context = PostingContext::new(e, p);
-                        for filter_expr in &filter_exprs {
-                            match filter_expr.eval(&mut context) {
-                                Ok(val) => match val.as_bool() {
-                                    Some(true) => continue,
-                                    Some(false) => return None,
-                                    None => {
-                                        return Some(Err(err!(format!(
-                                            "Filter expression must evaluate to true of false: {}",
-                                            filter_expr
-                                        ))));
-                                    }
-                                },
-                                Err(e) => return Some(Err(e)),
-                            }
-                        }
-                        Some(Ok((e, p)))
-                    }),
-            ))*/
         }
     }
 
@@ -160,8 +120,10 @@ impl BalCommand {
         let chain_pos = JContext::get().chain_position();
         let mut rows = vec![];
 
-        if chain_pos > 0 {
-            rows.push(table.create_chain_separator());
+        if chain_pos > 0
+            && let Some(chain_sep) = table.create_chain_separator()
+        {
+            rows.push(chain_sep);
         }
         if let Some(title) = &self.title {
             let (title, title_sep) = table.create_title_row(
@@ -308,6 +270,10 @@ impl Command for BalCommand {
     fn begin_and_end_cmd(&self) -> &BeginAndEndCommand {
         &self.begin_and_end_cmd
     }
+
+    fn table_fmt_cmd(&self) -> &TableFormatCommand {
+        &self.table_fmt_cmd
+    }
 }
 
 impl ChainableCommand for BalCommand {
@@ -317,6 +283,10 @@ impl ChainableCommand for BalCommand {
 }
 
 impl ExecCommand for BalCommand {
+    fn with_config<'h>(&mut self, config: &Configuration<'h>) {
+        self.datetime_fmt_cmd = self.datetime_fmt_cmd.or_config(config);
+    }
+
     fn execute<'h, 'a, 'cell>(
         &self,
         chained: Option<ChainingResult<'h, 'a, 'cell>>,
@@ -350,7 +320,10 @@ impl ExecCommand for BalCommand {
         let (mut data, total) = plan.execute(
             self.filtered_postings(&journ)()?,
             grand_total.as_mut(),
-            |(entry, pst)| PostingContext::new(entry, pst),
+            |(entry, pst)| {
+                JContext::get().set_config(entry.config().clone());
+                PostingContext::new(entry, pst)
+            },
             None::<NullBalanceUpdater<'h, (&'h JournalEntry<'h>, &'h Posting<'h>)>>,
         )?;
 
@@ -415,7 +388,11 @@ impl ExecCommand for BalCommand {
         self.chain_or_print(chain_result, previously_chained)?;
 
         // We only need to write the price database.
-        journ.config().price_databases().into_iter().for_each(|db| db.write_file().unwrap());
+        JContext::get()
+            .config()
+            .price_databases()
+            .into_iter()
+            .for_each(|db| db.write_file().unwrap());
 
         Ok(())
     }

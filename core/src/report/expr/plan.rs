@@ -5,8 +5,10 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
+use crate::datetime::JDateTimeRange;
 use crate::err;
 use crate::error::JournResult;
+use crate::journal_context::JContext;
 use crate::report::expr::column_spec::ColumnSpec;
 use crate::report::expr::{
     ColumnValue, Expr, GroupKey, GroupState, IdentifierContext, LateContext, ScalarExpr,
@@ -179,8 +181,9 @@ impl<'h> Plan {
                 Entry::Vacant(e) => e.insert(GroupState::try_from(self.column_spec.clone())?),
             };
             group.add(&mut context)?;
-            grand_total.as_mut().map(|t| t.add(&mut context)).transpose()?;
-            total_group.add(&mut context)?;
+            // Ignore errors as we retry with the late context for totals below.
+            let _ = grand_total.as_mut().map(|t| t.add(&mut context)).transpose();
+            let _ = total_group.add(&mut context);
         }
         Ok((groups, total_group))
     }
@@ -192,7 +195,7 @@ impl<'h> Plan {
     fn execute_with_groups<'e, 'a, 'j, E, F, C>(
         &self,
         items: impl Iterator<Item = JournResult<E>>,
-        grand_total: Option<&mut GroupState<'h, 'a>>,
+        mut grand_total: Option<&mut GroupState<'h, 'a>>,
         context_fn: F,
     ) -> JournResult<(Vec<RowData<'h>>, Option<RowData<'h>>)>
     where
@@ -200,10 +203,16 @@ impl<'h> Plan {
         F: FnMut(E) -> C,
         E: Copy + 'e,
     {
-        let (groups, total_group) = self.execute_to_groups(items, grand_total, context_fn)?;
+        let (groups, mut total_group) =
+            self.execute_to_groups(items, grand_total.as_deref_mut(), context_fn)?;
+
+        // Set the configuration to be the global config up to the date we're processing.
+        let context = JContext::get();
+        let until = context.cmd().begin_and_end_cmd().begin_end_range().end();
+        context.set_config(context.journal().config(Some(until)).clone());
 
         let mut rows = Vec::new();
-        'next_row: for (key, group) in groups {
+        'next_group_row: for (key, group) in groups {
             let mut context = LateContext::new(key.clone(), group.finalize());
             let mut row_data = RowData::default();
 
@@ -230,12 +239,16 @@ impl<'h> Plan {
                     None => row_data.push_column_value(value),
                 }
             }
+            // Try again with the totals in case they use column aliases.
+            // This allows a simple sum() of actual group results for example.
+            let _ = total_group.add(&mut context);
+            let _ = grand_total.as_mut().map(|t| t.add(&mut context)).transpose();
 
             for cond in self.where_conditions.iter() {
                 match cond.eval(&mut context)? {
                     ColumnValue::Boolean(bool) => {
                         if !bool {
-                            continue 'next_row;
+                            continue 'next_group_row;
                         }
                     }
                     val => {

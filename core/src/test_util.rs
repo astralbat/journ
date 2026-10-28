@@ -9,9 +9,11 @@ use crate::alloc::HerdAllocator;
 use crate::configuration::Configuration;
 use crate::error::JournResult;
 use crate::journal::Journal;
+use crate::journal_context::JContext;
 use crate::journal_entry::JournalEntry;
 use crate::parsing::text_block::TextBlock;
 use bumpalo_herd::Herd;
+use std::ops::Deref;
 
 #[macro_export]
 /// Parses a journal.
@@ -27,11 +29,11 @@ macro_rules! journ {
     }};
 }
 
-pub fn journ(text: &str) -> JournResult<Journal<'_>> {
+pub fn journ(text: &str) -> JournResult<Box<dyn Deref<Target = Journal<'_>> + '_>> {
     let herd = Box::leak(Box::new(Herd::new()));
     let allocator = herd.get().alloc(HerdAllocator::new(herd));
     match Journal::parse(None, TextBlock::from(text), allocator) {
-        Ok(jc) => Ok(jc.into_journal()),
+        Ok(journ) => Ok(journ),
         Err(err) => Err(err),
     }
 }
@@ -41,10 +43,13 @@ pub fn with_entry(text: &str, f: impl FnOnce(&JournalEntry)) {
     let herd = Box::leak(Box::new(Herd::new()));
     let allocator = herd.get().alloc(HerdAllocator::new(herd));
     match Journal::parse(None, TextBlock::from(text), allocator) {
-        Ok(jc) => jc.with(|| {
-            let entry = jc.journal().entry_range(..).next().expect("No entry found");
-            f(entry)
-        }),
+        Ok(_) => {
+            let jc = JContext::get();
+            jc.with(|| {
+                let entry = jc.journal().entry_range(..).next().expect("No entry found");
+                f(entry)
+            })
+        }
         Err(err) => {
             eprintln!("{}", err);
             panic!("Parsing errors encountered. See above")
@@ -60,7 +65,7 @@ macro_rules! config {
 
 pub fn config(text: &str) -> Configuration<'_> {
     let journ = journ!(text);
-    Configuration::clone(journ.config())
+    Configuration::clone(journ.config(None))
 }
 
 #[macro_export]

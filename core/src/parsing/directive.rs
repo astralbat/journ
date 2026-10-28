@@ -5,29 +5,29 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
-use crate::account::Account;
 use crate::datetime::{DateFormatMode, DateTimeFormat, JDateTimeRange};
 use crate::directive::{Directive, DirectiveKind};
 use crate::error::parsing::{IParseError, promote};
 use crate::error::{JournError, JournErrors, JournResult};
 use crate::journal_node::{JournalNode, JournalNodeKind};
 use crate::module::MODULES;
+use crate::parsing::account_directive::{account_directive, accounts_directive};
 use crate::parsing::amount::unit;
 use crate::parsing::input::{
     BlockInput, ConfigInput, LocatedInput, NodeInput, TextBlockInput, TextInput,
 };
 use crate::parsing::text_block::{TextBlock, TextBlockLocation};
-use crate::parsing::unit_directive::{unit_definition_body, unit_directive_body, units_directive};
+use crate::parsing::unit_directive::{unit_directive_body, units_directive};
 use crate::parsing::util::{
-    double_quoted, line_value, param_value, param_value_untrimmed, rest_line1, word,
+    interim_space, line_value, param_value, param_value_untrimmed, rest_line1,
 };
 use crate::parsing::{IParseResult, entry};
 use crate::parsing::{JParseResult, util};
 use crate::price::Price;
+use crate::python::environment::PythonEnvironment;
 use crate::{err, match_blocks, parsing};
 use chrono_tz::Tz;
-use nom::branch::alt;
-use nom::character::complete::{space0, space1};
+use nom::character::complete::space1;
 use nom::combinator::{consumed, map, opt, rest};
 use nom::sequence::preceded;
 use nom::{Err as NomErr, Finish};
@@ -42,33 +42,6 @@ pub const E_VALUE: &str = "Value expected";
 
 pub const E_ACCOUNT_NAME: &str = "Account name expected";
 pub const E_METADATA_OR_UNIT: &str = "Metadata or unit expected";
-
-fn account_directive<'h, 's, 'p, I>(input: I) -> JParseResult<I, Directive<'h>>
-where
-    I: TextInput<'h> + ConfigInput<'h> + BlockInput<'h> + LocatedInput<'h> + NodeInput<'h, 's, 'p>,
-    'h: 's,
-    's: 'p,
-{
-    let (input, full_name) =
-        promote(E_ACCOUNT_NAME, preceded(space0, alt((double_quoted, word))))(input)?;
-    let mut metadata = vec![];
-    let mut units = vec![];
-
-    let rem = match_blocks!(input.clone(),
-        param_value("unit") => |input| Ok(units.push(unit_definition_body(input)?.1)),
-        entry::metadata => |m| Ok(metadata.push(m)),
-        util::comment => |_| Ok(()),
-        rest => |i: I| Err(NomErr::Error(err!(i.into_err(E_METADATA_OR_UNIT))))
-    )?
-    .0;
-    let mut config_mut = input.config_mut();
-    let parent =
-        Account::parent_str(full_name.text()).map(|s| config_mut.get_or_create_account(&s));
-    let acc = Account::new(full_name.text().to_string(), parent, metadata, units);
-    let merged = config_mut.merge_account(acc);
-    Ok((rem, Directive::new(Some(input.block()), DirectiveKind::Account(merged))))
-}
-
 pub const E_INVALID_DATE_FORMAT: &str = "Invalid date format";
 
 fn dateformat_directive<'h, I>(input: I) -> JParseResult<I, Directive<'h>>
@@ -115,28 +88,6 @@ where
         .map_err(|_| NomErr::Failure(input.clone().into_err(E_BAD_TIMEZONE)))?;
     input.config_mut().set_time_zone(tz);
     Ok((rem, Directive::new(Some(input.block()), DirectiveKind::TimeZone(tz))))
-}
-
-fn python_directive<'h, 's, 'e, 'p, I>(input: I) -> JParseResult<I, Directive<'h>>
-where
-    I: TextInput<'h> + BlockInput<'h> + NodeInput<'h, 's, 'p> + LocatedInput<'h>,
-    'h: 'e,
-    'e: 's,
-    's: 'p,
-{
-    let orig_block = input.block();
-
-    let (rem, node) = match stream(input.clone(), JournalNodeKind::Python) {
-        StreamResult::AlreadyStreamed(rem, node) => (rem, node),
-        StreamResult::NewStream(rem, include_input) => {
-            (rem, input.parse_node().include(include_input).map_err(NomErr::Failure)?)
-        }
-        StreamResult::Err(e) => return Err(e),
-    };
-
-    // Do not branch Python execution by default. Other python directives further on may choose to depend on
-    // certain functions earlier defined being available.
-    Ok((rem, Directive::new(Some(orig_block), DirectiveKind::Python(node))))
 }
 
 pub const E_BASE_UNIT: &str = "Unable to read base unit";
@@ -236,48 +187,39 @@ pub(super) enum StreamResult<'h, I> {
     NewStream(I, I),
     Err(NomErr<JournError>),
 }
-pub(super) fn stream<'h, 's, 'e, 'p, I>(input: I, node_kind: JournalNodeKind) -> StreamResult<'h, I>
+pub(super) fn stream_file<'h, 's, 'e, 'p, I>(
+    input: I,
+    node_kind: JournalNodeKind,
+) -> StreamResult<'h, I>
 where
     I: TextInput<'h> + LocatedInput<'h> + BlockInput<'h> + NodeInput<'h, 's, 'p>,
     'h: 'e,
     'e: 's,
     's: 'p,
 {
-    // Test if the input is just a single line. Do this without counting over all of them.
-    let input_is_single_line = input.text().trim().lines().nth(1).is_none();
+    let (rem, filename) = match filename(input.clone()) {
+        Ok((rem, filename)) => (rem, filename),
+        Err(e) => return StreamResult::Err(e),
+    };
 
-    if input_is_single_line {
-        let (rem, filename) = match filename(input.clone()) {
-            Ok((rem, filename)) => (rem, filename),
-            Err(e) => return StreamResult::Err(e),
-        };
+    let node = match input.parse_node().create_child_node(Some(filename), node_kind) {
+        Ok(node) => node,
+        Err(node) => return StreamResult::AlreadyStreamed(rem, node),
+    };
 
-        let node = match input.parse_node().create_child_node(Some(filename), node_kind) {
-            Ok(node) => node,
-            Err(node) => return StreamResult::AlreadyStreamed(rem, node),
-        };
-
-        // Try to open the file, failing silently if it doesn't exist.
-        if let Ok(mut block) =
-            TextBlock::from_file(filename, input.parse_node().allocator(), Some(input.block()))
-        {
+    // Try to open the file, failing silently if it doesn't exist.
+    match TextBlock::from_file(filename, input.parse_node().allocator(), Some(input.block())) {
+        Ok(mut block) => {
             block.set_node(node);
             let branch_input = input.with_child(block);
-            return StreamResult::NewStream(rem, branch_input);
+            StreamResult::NewStream(rem, branch_input)
+        }
+        Err(e) => {
+            let e =
+                input.into_err(&format!("Unable to stream file '{}': {}", filename.display(), e));
+            StreamResult::Err(NomErr::Error(e))
         }
     }
-
-    let node = input.parse_node().create_child_node_unchecked(None, node_kind);
-    // Interpret the input the rest of it
-    let mut block = TextBlock::new_child(
-        input.text(),
-        TextBlockLocation::new(Some(node), input.line(), input.location_offset()),
-        input.block(),
-    );
-    block.set_node(node);
-    let (rem, mut block_input) = rest::<_, ()>(input).unwrap();
-    block_input = block_input.with_child(block);
-    StreamResult::NewStream(rem, block_input)
 }
 
 fn branch<'h, 's, 'e, 'p, I>(kind: JournalNodeKind) -> impl Fn(I) -> JParseResult<I, Directive<'h>>
@@ -289,19 +231,21 @@ where
 {
     move |input| {
         let orig_block = input.block();
-        match stream(input.clone(), kind) {
-            StreamResult::AlreadyStreamed(rem, node) => {
-                Ok((rem, Directive::new(Some(orig_block), DirectiveKind::Branch(node))))
-            }
-            StreamResult::NewStream(rem, branch_input) => Ok((
-                rem,
-                Directive::new(
-                    Some(orig_block),
-                    DirectiveKind::Branch(input.parse_node().branch(branch_input)),
-                ),
-            )),
-            StreamResult::Err(err) => Err(err),
-        }
+        let node = input.parse_node().create_child_node_unchecked(None, kind);
+        // Interpret the input the rest of it
+        let mut block = TextBlock::new_child(
+            input.text(),
+            TextBlockLocation::new(Some(node), input.line(), input.location_offset()),
+            input.block(),
+        );
+        block.set_node(node);
+        let (rem, mut block_input) = rest::<_, ()>(input).unwrap();
+        block_input = block_input.with_child(block);
+        let parse_node = rem.parse_node();
+        Ok((
+            rem,
+            Directive::new(Some(orig_block), DirectiveKind::Branch(parse_node.branch(block_input))),
+        ))
     }
 }
 
@@ -312,7 +256,7 @@ where
     'e: 's,
     's: 'p,
 {
-    move |input| match stream(input.clone(), kind) {
+    move |input| match stream_file(input.clone(), kind) {
         StreamResult::AlreadyStreamed(rem, node) => {
             Ok((rem, Directive::new(Some(input.block()), DirectiveKind::Include(node))))
         }
@@ -329,10 +273,28 @@ where
     }
 }
 
+fn python_directive<'h, 's, 'e, 'p, I>(input: I) -> JParseResult<I, Directive<'h>>
+where
+    I: TextInput<'h> + BlockInput<'h> + NodeInput<'h, 's, 'p> + LocatedInput<'h>,
+    'h: 'e,
+    'e: 's,
+    's: 'p,
+{
+    let block = input.block();
+    let (rem, input) = rest::<_, ()>(input).unwrap();
+    let outdented = block.text_outdented(3);
+    let outdented_sans_python = outdented.strip_prefix("python").unwrap_or(&outdented);
+    let python_code = outdented_sans_python.trim_start_matches(interim_space);
+
+    let filename =
+        input.parse_node().node().canonical_filename().map(|p| p.to_str().unwrap().to_string());
+    PythonEnvironment::run(python_code, None, filename.as_deref()).map_err(NomErr::Failure)?;
+
+    Ok((rem, Directive::new(Some(block), DirectiveKind::Python(block))))
+}
+
 /// Returns a list of segments where each segment is a list of `Directives`.
-pub fn entry_file_directives<'h, 's, 'e, 'p, I>(
-    input: I,
-) -> JParseResult<I, Vec<Vec<Directive<'h>>>>
+pub fn entry_file_directives<'h, 's, 'e, 'p, I>(input: I) -> JParseResult<I, ()>
 where
     I: TextInput<'h> + BlockInput<'h> + LocatedInput<'h> + NodeInput<'h, 's, 'p> + ConfigInput<'h>,
     'h: 's,
@@ -373,51 +335,33 @@ where
         }
     };
 
-    let mut segments = vec![vec![]];
-    let mut push_directive =
-        |directive: Directive<'h>, start_new_segment: bool| -> Result<(), NomErr<_>> {
-            segments.last_mut().unwrap().push(directive);
-            if start_new_segment {
-                segments.push(vec![]);
-            }
-            Ok(())
-        };
-
     let rem = match_blocks!(input,
-            entry::entry_date_and_remainder => |(date_and_time, input)| {
-                push_directive(entry(date_and_time)(input)?.1, false)
-            },
-            util::comment => |c: I| push_directive(Directive::new(Some(c.block()), DirectiveKind::Comment(c.text())), false),
-            param_value("account") => |input| push_directive(account_directive(input)?.1, false),
-            param_value("unit") => |input| push_directive(unit_directive_body(input)?.1, false),
-            param_value("branch") => |input| {
-                push_directive(branch(JournalNodeKind::Entry)(input)?.1, true)
-            },
-            param_value("include") => |input| {
-                push_directive(include(JournalNodeKind::Entry)(input)?.1, true)
-            },
-            param_value("dateformat") => |input| push_directive(dateformat_directive(input)?.1, false),
-            param_value("timeformat") => |input| push_directive(timeformat_directive(input)?.1, false),
-            param_value("datetimeformat") => |input| push_directive(datetimeformat_directive(input)?.1, false),
-            param_value("timezone") => |input| push_directive(timezone_directive(input)?.1, false),
+            entry::entry_date_and_remainder => |(date_and_time, input): (_, I)| Ok(input.parse_node().push_directive(entry(date_and_time)(input)?.1)),
+            util::comment => |input: I| Ok(input.parse_node().push_directive(Directive::new(Some(input.block()), DirectiveKind::Comment(input.text())))),
+            param_value("account") => |input: I| Ok(input.parse_node().push_directive(account_directive(input)?.1)),
+            param_value("accounts") => |input: I| Ok(input.parse_node().push_directive(accounts_directive(input)?.1)),
+            param_value("unit") => |input: I| Ok(input.parse_node().push_directive(unit_directive_body(input)?.1)),
+            param_value("branch") => |input: I| Ok(input.parse_node().push_directive(branch(JournalNodeKind::Entry)(input)?.1)),
+            param_value("include") => |input: I| Ok(input.parse_node().push_directive(include(JournalNodeKind::Entry)(input)?.1)),
+            param_value("dateformat") => |input: I| Ok(input.parse_node().push_directive(dateformat_directive(input)?.1)),
+            param_value("timeformat") => |input: I| Ok(input.parse_node().push_directive(timeformat_directive(input)?.1)),
+            param_value("datetimeformat") => |input: I| Ok(input.parse_node().push_directive(datetimeformat_directive(input)?.1)),
+            param_value("timezone") => |input: I| Ok(input.parse_node().push_directive(timezone_directive(input)?.1)),
             // No trimming for python as we need to outdent accurately
-            param_value_untrimmed("python") => |input| push_directive(python_directive(input)?.1, false),
-            param_value("units") => |input| push_directive(units_directive(input)?.1, false),
-            plugin_dir => |(dir, input)| push_directive(plugin_directive(dir, input)?.1, false),
+            param_value_untrimmed("python") => |input: I| Ok(input.parse_node().push_directive(python_directive(input)?.1)),
+            param_value("units") => |input: I| Ok(input.parse_node().push_directive(units_directive(input)?.1)),
+            plugin_dir => |(dir, input): (_, I)| Ok(input.parse_node().push_directive(plugin_directive(dir, input)?.1)),
             rest => |input: I| Err(NomErr::Error(input.into_err("Unknown directive")))
         )?.0;
-    Ok((rem, segments))
+    Ok((rem, ()))
 }
 
-pub fn price_file_directives<'h, 's, 'e, 'p, I>(
-    input: I,
-) -> JParseResult<I, Vec<Vec<Directive<'h>>>>
+pub fn price_file_directives<'h, 's, 'e, 'p, I>(input: I) -> JParseResult<I, ()>
 where
     I: TextInput<'h> + ConfigInput<'h> + LocatedInput<'h> + BlockInput<'h> + NodeInput<'h, 's, 'p>,
     'h: 's,
     's: 'p,
 {
-    let mut dirs = vec![];
     let mut amongst_prices = false;
 
     let bad_dir_check = |input: I, amongst_prices| {
@@ -431,46 +375,48 @@ where
     };
 
     let rem = match_blocks!(input,
-        param_value("p") => |input| {
-            let pd = price(input)?.1;
+        param_value("p") => |input: I| {
             amongst_prices = true;
-            Ok(dirs.push(pd))
+            Ok(input.parse_node().push_directive(price(input)?.1))
         },
-        util::comment => |c: I| Ok(dirs.push(Directive::new(Some(c.block()), DirectiveKind::Comment(c.text())))),
-        param_value("dateformat") => |input| {
+        util::comment => |input: I| Ok(input.parse_node().push_directive(Directive::new(Some(input.block()), DirectiveKind::Comment(input.text())))),
+        param_value("dateformat") => |input: I| {
+            let parse_node = input.parse_node();
             let (cons, df) = consumed(dateformat_directive)(input)?.1;
             bad_dir_check(cons, amongst_prices)?;
-            Ok(dirs.push(df))
+            Ok(parse_node.push_directive(df))
         },
-        param_value("timeformat") => |input| {
+        param_value("timeformat") => |input: I| {
+            let parse_node = input.parse_node();
             let (cons, tf) = consumed(timeformat_directive)(input)?.1;
             bad_dir_check(cons, amongst_prices)?;
-            Ok(dirs.push(tf))
+            Ok(parse_node.push_directive(tf))
         },
-        param_value("timezone") => |input| {
+        param_value("timezone") => |input: I| {
+            let parse_node = input.parse_node();
             let (cons, tz) = consumed(timezone_directive)(input)?.1;
             bad_dir_check(cons, amongst_prices)?;
-            Ok(dirs.push(tz))
+            Ok(parse_node.push_directive(tz))
         },
         rest => |input: I| Err(NomErr::Error(input.into_err("Unknown directive")))
     )?
         .0;
-    Ok((rem, vec![dirs]))
+    Ok((rem, ()))
 }
 
-pub fn directives<'h, 's, 'p, I>(input: I) -> JournResult<Vec<Vec<Directive<'h>>>>
+pub fn directives<'h, 's, 'p, I>(input: I) -> JournResult<()>
 where
     I: TextInput<'h> + BlockInput<'h> + ConfigInput<'h> + LocatedInput<'h> + NodeInput<'h, 's, 'p>,
     'h: 's,
     's: 'p,
 {
-    let r = if input.parse_node().node().file_kind() == JournalNodeKind::Prices {
+    if input.parse_node().node().file_kind() == JournalNodeKind::Prices {
         price_file_directives(input)
     } else {
         entry_file_directives(input)
     }
     .finish()?;
-    Ok(r.1)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -493,7 +439,7 @@ mod tests {
         let date_and_time = date_and_time.unwrap().1;
 
         let ent = |s: &'static str| {
-            let entry_res = parse_node!(s, entry(date_and_time.clone()));
+            let entry_res = parse_node!(s, entry(date_and_time));
             assert!(entry_res.is_ok());
             let ((_config, _), entry_dir) = entry_res.unwrap();
             match_then!(entry_dir.kind(), DirectiveKind::Entry(e) => *e)
@@ -582,11 +528,7 @@ mod tests {
         let df_dir = |s: &'static str| {
             let dir = dir!(s);
             let df = match_then!(dir.kind(), DirectiveKind::DateFormat(df) => *df);
-            let date = JDate::new(NaiveDate::from_ymd_opt(1999, 1, 2).unwrap())
-                .format(df)
-                .to_string()
-                .intern();
-            date
+            JDate::new(NaiveDate::from_ymd_opt(1999, 1, 2).unwrap()).format(df).to_string().intern()
         };
 
         assert_eq!(df_dir("dateformat dd/mm/yyyy"), "02/01/1999");

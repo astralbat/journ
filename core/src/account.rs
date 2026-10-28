@@ -6,36 +6,33 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::configuration::{AccountFilter, Filter};
+use crate::ext::StrExt;
+use crate::journal_context::JContext;
 use crate::metadata::Metadata;
 use crate::report::table2::fmt::CellFormatter;
 use crate::report::table2::{
-    Cell, CellWidth, ColumnWidth, PolicyWrappingCell, StyledCell, WrapEase, WrapPolicy,
+    Cell, CellRef, CellWidth, ColumnWidth, EllipsisCell, EllipsisPolicy, PolicyWrappingCell,
+    StyledCell, WrapEase, WrapPolicy,
 };
 use crate::report::term_style::{Colour, Style};
 use crate::unit::Unit;
 use smallvec::{SmallVec, smallvec};
+use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::{cmp, fmt, iter};
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum AccountType {
-    Asset,
-    Liability,
-    Income,
-    Expense,
-    Equity,
-}
 
 #[derive(Clone, Eq)]
 pub struct Account<'h> {
     /// The full name of the account, including any parents
     name: String,
+    /// All codes this account is known by, including this one.
+    aliases: Vec<String>,
     /// The parent account will never be virtual
     parent: Option<Arc<Account<'h>>>,
     metadata: Vec<Metadata<'h>>,
     /// Unit definitions for parsed primary amounts on this account
-    units: Vec<&'h Unit<'h>>,
+    units: HashSet<&'h Unit<'h>>,
 }
 
 impl<'h> Account<'h> {
@@ -43,26 +40,17 @@ impl<'h> Account<'h> {
         name: String,
         parent: Option<Arc<Account<'h>>>,
         metadata: Vec<Metadata<'h>>,
-        units: Vec<&'h Unit<'h>>,
+        units: HashSet<&'h Unit<'h>>,
     ) -> Account<'h> {
-        Account { name, parent, metadata, units }
+        Account { aliases: vec![name.clone()], name, parent, metadata, units }
     }
 
-    pub fn units(&self) -> &Vec<&'h Unit<'h>> {
+    pub fn units(&self) -> &HashSet<&'h Unit<'h>> {
         &self.units
     }
 
-    pub(crate) fn units_mut(&mut self) -> &mut Vec<&'h Unit<'h>> {
-        &mut self.units
-    }
-
     pub fn push_unit(&mut self, unit: &'h Unit<'h>) {
-        self.units.push(unit);
-    }
-
-    /// Finds a unit by its alias.
-    pub fn unit(&self, alias: &str) -> Option<&'h Unit<'h>> {
-        self.units.iter().copied().find(|u| u.aliases().any(|a| a == alias))
+        self.units.insert(unit);
     }
 
     /// Gets the parent name of the account specified.
@@ -101,6 +89,32 @@ impl<'h> Account<'h> {
         if self.is_virtual() { &self.name[1..self.name.len() - 1] } else { &self.name }
     }
 
+    /// Gets the primary code, i.e. the first alias.
+    pub fn primary_name(&self) -> &str {
+        self.aliases.first().unwrap()
+    }
+
+    /// Gets all known aliases for this account, which is a list of other account names, including the name of this account as well.
+    /// The first alias will always be the "primary" name; the first name defined for this account.
+    pub fn aliases(&self) -> impl Iterator<Item = &str> {
+        self.aliases.iter().map(|s| s.as_str())
+    }
+
+    /// Sets all known aliases for this account. The aliases must include this account's name.
+    pub fn set_aliases(&mut self, aliases: Vec<String>) {
+        assert!(
+            self.name.is_empty() || aliases.contains(&self.name),
+            "Aliases must contain the primary name"
+        );
+        assert_eq!(
+            aliases.iter().collect::<HashSet<_>>().len(),
+            aliases.len(),
+            "Aliases must be unique"
+        );
+
+        self.aliases = aliases
+    }
+
     /// Gets the last, non-parent part of the account name.
     pub fn last_part(&self) -> &str {
         match &self.parent {
@@ -115,47 +129,6 @@ impl<'h> Account<'h> {
 
     pub fn parent(&self) -> Option<&Arc<Account<'h>>> {
         self.parent.as_ref()
-    }
-
-    pub fn account_type(&self) -> Option<AccountType> {
-        if self.is_asset() {
-            Some(AccountType::Asset)
-        } else if self.is_liability() {
-            Some(AccountType::Liability)
-        } else if self.is_income() {
-            Some(AccountType::Income)
-        } else if self.is_expense() {
-            Some(AccountType::Expense)
-        } else if self.is_equity() {
-            Some(AccountType::Equity)
-        } else {
-            None
-        }
-    }
-
-    pub fn is_asset(&self) -> bool {
-        self.name.to_lowercase().starts_with("assets:")
-    }
-
-    pub fn is_liability(&self) -> bool {
-        self.name.to_lowercase().starts_with("liability:")
-    }
-
-    pub fn is_equity(&self) -> bool {
-        self.name.to_lowercase().starts_with("equity:")
-    }
-
-    pub fn is_income(&self) -> bool {
-        self.name.to_lowercase().starts_with("income:")
-    }
-
-    pub fn is_expense(&self) -> bool {
-        self.name.to_lowercase().starts_with("expenses:")
-    }
-
-    pub fn is_trading_fee(&self) -> bool {
-        let s = self.name.to_lowercase();
-        s.starts_with("expenses:") && (s.ends_with("tradingfees") || s.ends_with("fxfees"))
     }
 
     pub fn is_real(&self) -> bool {
@@ -262,14 +235,17 @@ impl<'h> Account<'h> {
     }
 
     pub fn into_cell(self: Arc<Account<'h>>) -> Box<dyn Cell + 'h> {
-        let mut wrapping_account =
-            PolicyWrappingCell::new(Box::new(self), WrapPolicy::AfterStr(":"));
-        wrapping_account.set_wrap_ease(WrapEase::Reluctant);
+        let wrap = JContext::get().cmd().table_fmt_cmd().wrap();
+        let boxed: Box<dyn Cell> = if wrap {
+            let mut wrapping_account =
+                PolicyWrappingCell::new(Box::new(self), WrapPolicy::AfterStr(":"));
+            wrapping_account.set_wrap_ease(WrapEase::Reluctant);
+            Box::new(wrapping_account)
+        } else {
+            Box::new(EllipsisCell::new(Box::new(self), EllipsisPolicy::AfterMidSep(':')))
+        };
 
-        Box::new(StyledCell::new(
-            Box::new(wrapping_account),
-            Style::default().with_fg(Colour::Blue),
-        ))
+        Box::new(StyledCell::new(CellRef::Owned(boxed), Style::default().with_fg(Colour::Blue)))
     }
 }
 
@@ -287,19 +263,22 @@ impl fmt::Debug for Account<'_> {
 
 impl PartialEq for Account<'_> {
     fn eq(&self, other: &Self) -> bool {
-        self.name() == other.name()
+        self.primary_name().eq_ignore_ascii_case(other.primary_name())
     }
 }
 
 impl PartialEq<str> for Account<'_> {
     fn eq(&self, other: &str) -> bool {
-        self.name() == other
+        self.aliases.iter().any(|a| a.eq_ignore_ascii_case(other))
     }
 }
 
 impl Ord for Account<'_> {
     fn cmp(&self, other: &Self) -> cmp::Ordering {
-        self.name().cmp(other.name())
+        if self == other {
+            return cmp::Ordering::Equal;
+        }
+        self.name().cmp_ignore_case_ascii(other.name())
     }
 }
 
@@ -311,7 +290,7 @@ impl PartialOrd for Account<'_> {
 
 impl Hash for Account<'_> {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.name().hash(state)
+        self.primary_name().hash(state)
     }
 }
 
@@ -321,7 +300,7 @@ where
 {
     fn from(s: S) -> Account<'t> {
         let parent = Account::parent_str(s.as_ref()).map(|s| Arc::new(Account::from(s)));
-        Account::new(s.as_ref().to_string(), parent, vec![], vec![])
+        Account::new(s.as_ref().to_string(), parent, vec![], HashSet::new())
     }
 }
 

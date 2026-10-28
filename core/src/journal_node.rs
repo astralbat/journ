@@ -91,7 +91,7 @@ pub type NodeId = BranchCountingTreeId;
 pub enum JournalNodeKind {
     Entry,
     Prices,
-    Python,
+    //Python,
 }
 
 /// A node usually representing a file on the filesystem.
@@ -201,6 +201,10 @@ impl<'h> JournalNode<'h> {
 
     pub fn file_kind(&self) -> JournalNodeKind {
         self.kind
+    }
+
+    pub fn last_segment(&self) -> &'h JournalNodeSegment<'h> {
+        self.segments().last().unwrap()
     }
 
     /// Gets the segments of this node. The node will always have at least one segment.

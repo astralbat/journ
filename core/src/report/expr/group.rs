@@ -114,7 +114,14 @@ impl<'h, 'a> GroupState<'h, 'a> {
     }
 
     pub fn finalize(&self) -> Vec<ColumnValue<'h>> {
-        self.aggs.iter().map(|agg| agg.finalize()).collect()
+        self.aggs
+            .iter()
+            .map(|agg| {
+                let mut finalized = agg.finalize();
+                finalized.update();
+                finalized
+            })
+            .collect()
     }
 }
 

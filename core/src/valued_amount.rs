@@ -418,8 +418,21 @@ impl<'h> ValuedAmount<'h> {
         //   assert_eq!(va!("10 A @@ £0.00").value_in(unit!("€")), Some(amount!("€0.00")));
         // However, this can cause 0 valuations to accumulate, creating inconsistencies.
         self.amounts()
-            .find(|v| v.unit() == in_unit)
+            .find_map(|v| {
+                if v.unit() == in_unit { Some(in_unit.with_quantity(v.quantity())) } else { None }
+            })
             .or_else(|| if self.amount.is_zero() { Some(in_unit.with_quantity(0)) } else { None })
+    }
+
+    pub fn value_in_or_value_with<V: Valuer<'h>>(
+        &self,
+        in_unit: &'h Unit<'h>,
+        valuer: &mut V,
+    ) -> Result<Amount<'h>, ValuationError> {
+        match self.value_in(in_unit) {
+            Some(value) => Ok(value),
+            None => valuer.value(in_unit, self.amount()).map(|v| v.value()),
+        }
     }
 
     pub fn valuer(&self) -> impl Valuer<'h> + '_ {
@@ -657,7 +670,7 @@ impl<'h> ValuedAmount<'h> {
 
     /// Gets whether this valued amount is considered equal in value to another valued amount.
     pub fn eq_abs_value(&self, other: &Self) -> bool {
-        ValuedAmount::common_units(&[self, other])
+        ValuedAmount::common_units([self, other].into_iter())
             .next()
             .map(|u| self.value_in(u).unwrap().abs() == other.value_in(u).unwrap().abs())
             .unwrap_or(false)
@@ -674,14 +687,18 @@ impl<'h> ValuedAmount<'h> {
     /// assert_eq!(ValuedAmount::common_units(&[&val!("£10 @@ $12 @@ €12"), &val!("$6 @@ £5")]).collect::<Vec<_>>(), vec![unit!("£"), unit!("$")]);
     /// assert_eq!(ValuedAmount::common_units(&[&ValuedAmount::nil(), &val!("£5")]).collect::<Vec<&Unit<'_>>>(), vec![unit!("£")]);
     /// ```
-    pub fn common_units<'a>(
-        valued_amounts: &'a [&ValuedAmount<'h>],
-    ) -> impl Iterator<Item = &'h Unit<'h>> + 'a {
+    pub fn common_units<'a, 'v>(
+        valued_amounts: impl Iterator<Item = &'v ValuedAmount<'h>> + Clone + 'a,
+    ) -> impl Iterator<Item = &'h Unit<'h>> + 'a
+    where
+        'h: 'v,
+        'h: 'a,
+    {
         let mut units: SmallVec<[&'h Unit<'h>; 2]> = smallvec![];
         iter::from_fn(move || {
-            for va in valued_amounts {
+            for va in valued_amounts.clone() {
                 for unit in va.units().filter(|u| !units.contains(u)) {
-                    if valued_amounts.iter().all(|va| va.value_in(unit).is_some()) {
+                    if valued_amounts.clone().all(|va| va.value_in(unit).is_some()) {
                         units.push(unit);
                         return Some(unit);
                     }
@@ -711,7 +728,7 @@ impl<'h> ValuedAmount<'h> {
         }
 
         let mut has_common_unit = false;
-        for common_unit in ValuedAmount::common_units(&valued_amounts) {
+        for common_unit in ValuedAmount::common_units(valued_amounts.iter().copied()) {
             has_common_unit = true;
             let mut weights = smallvec![];
 
@@ -756,13 +773,13 @@ impl<'h> ValuedAmount<'h> {
 
     pub fn as_cell(&self) -> Box<dyn table2::Cell> {
         // Initial amount is formatted with full precision.
-        let mut cell = self.amount().into_cell(&self.amount().unit().format().as_precise());
+        let mut cell = self.amount().into_cell(self.amount().unit().format(), true);
         for val in self.posting_valuations() {
             let symbol = if val.is_total() { " @@ " } else { " @ " };
 
             let val_cell = table2::BinaryCell::new(
                 Box::new(symbol),
-                val.value().into_cell(val.value().unit().format()),
+                val.value().into_cell(val.value().unit().format(), false),
             );
             cell = Box::new(table2::BinaryCell::new(cell, Box::new(val_cell)));
         }
@@ -928,7 +945,7 @@ impl<'h> Add<&ValuedAmount<'h>> for &ValuedAmount<'h> {
                 (true, false) => Box::new_in(rhs.units(), allocator),
                 (false, true) => Box::new_in(self.units(), allocator),
                 (false, false) => {
-                    Box::new_in(ValuedAmount::common_units(&self_rhs_array), allocator)
+                    Box::new_in(ValuedAmount::common_units(self_rhs_array.into_iter()), allocator)
                 }
             };
         let initial = unit_iter.next();
@@ -987,7 +1004,7 @@ impl<'h> Add<&ValuedAmount<'h>> for &ValuedAmount<'h> {
                         }
                         // When only one side has a unit valuation, we set it as the valuation.
                         (Some(Unit(uv)), None) | (None, Some(Unit(uv))) => {
-                            va_accum.set_valuation(PostingValuation::new_unit(uv.clone()));
+                            va_accum.set_valuation(PostingValuation::new_unit(*uv));
                         }
                         // Otherwise we sum the total valuations.
                         (Some(Total(_expr, e)), _) | (_, Some(Total(_expr, e))) => {
@@ -1087,7 +1104,7 @@ impl<'h> Div<&ValuedAmount<'h>> for &ValuedAmount<'h> {
     type Output = Option<Decimal>;
 
     fn div(self, rhs: &ValuedAmount<'h>) -> Option<Decimal> {
-        ValuedAmount::common_units(&[&self, rhs])
+        ValuedAmount::common_units([self, rhs].into_iter())
             .next()
             .map(|unit| (self.value_in(unit).unwrap() / rhs.value_in(unit).unwrap()).quantity())
     }

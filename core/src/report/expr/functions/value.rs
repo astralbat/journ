@@ -32,16 +32,10 @@ where
             if quote_col.is_undefined() {
                 return Ok(ColumnValue::Undefined);
             }
-            let quote_unit = quote_col
-                .as_str()
+            let quote_unit = quote_col.as_unit()
                 .ok_or(err!(
-                    "Function 'value()' requires the first argument to be a string representing a unit"
-                ))
-                .map(|s| {
-                    JContext::get().journal().config()
-                        .get_unit(s)
-                        .unwrap_or(JContext::get().allocator().alloc(Unit::new(s)))
-                })?;
+                    "Function 'value()' requires the first argument to be a string representing a unit: {}", quote_col.as_type_string()
+                ))?;
 
             // The second argument is evaluated as the base amount that needs to be valued.
             let base_amount_col =
@@ -54,7 +48,8 @@ where
             let mut total_value = Amount::nil();
             for base_amount_val in base_amount_col.into_list() {
                 let (base_amount, _) = base_amount_val.as_amount().ok_or(err!(
-                    "Function 'value()' requires the second argument to be an `Amount` type"
+                    "Function 'value()' requires the second argument to be an `Amount` type: {}",
+                    base_amount_val.as_type_string()
                 ))?;
 
                 // The third argument is an optional datetime.
@@ -65,7 +60,7 @@ where
                 let datetime = datetime_col
                     .map(|c| {
                         c.as_datetime().ok_or_else(|| {
-                            err!("Function 'value' requires the third argument to be a `Datetime` type")
+                            err!("Function 'value' requires the third argument to be a `Datetime` type: {}", c.as_type_string())
                         })
                     })
                     .transpose()?;

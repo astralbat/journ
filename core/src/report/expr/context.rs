@@ -9,7 +9,7 @@ use crate::datetime::JDateTime;
 use crate::error::JournResult;
 use crate::journal_context::JContext;
 use crate::journal_entry::JournalEntry;
-use crate::journal_entry_flow::{Flow, LinkedFlow};
+use crate::journal_entry_flow::Flow;
 use crate::posting::Posting;
 use crate::report::expr::{ColumnValue, GroupKey};
 use crate::valuer::{SystemValuer, Valuer};
@@ -83,17 +83,6 @@ macro_rules! eval_identifier {
                 _ => None
             }
         };
-
-        /*
-        let res = 'matcher: {
-            $(
-                if left_ident.eq_ignore_ascii_case($part) {
-                    break 'matcher eval_next($handler);
-                }
-            )+ else {
-                None
-            }
-        };*/
         res
     }};
 }
@@ -163,12 +152,11 @@ pub trait ValuerContext<'h, 'p>: IdentifierContext<'h, 'p> {
         'h: 'a,
     {
         match date {
-            Some(date) => Ok(Box::new(SystemValuer::on_date(
-                JContext::get().journal().config().clone(),
-                date,
-            ))),
+            Some(date) => {
+                Ok(Box::new(SystemValuer::on_date(JContext::get().config().clone(), date)))
+            }
             None => Ok(Box::new(SystemValuer::on_date(
-                JContext::get().journal().config().clone(),
+                JContext::get().config().clone(),
                 JDateTime::now(),
             ))),
         }
@@ -321,7 +309,6 @@ impl<'h, 'a> IdentifierContext<'h, 'a> for PostingContext<'h, 'a> {
         use ColumnValue::*;
         let res = eval_identifier!(identifier, ColumnValue<'h>,
             "account" => Account(Arc::clone(self.posting.account())),
-            //"date" => Date(self.entry.datetime_range().start().date()),
             "date" => DatetimeRange(self.entry.datetime_range()),
             "description" => Description(self.entry.description().into()),
             "amount" => Amount(self.posting.amount(), true),
@@ -357,9 +344,7 @@ impl<'h, 'p> ValuerContext<'h, 'p> for PostingContext<'h, 'p> {
         'h: 'a,
     {
         let sys_valuer = match datetime {
-            Some(datetime) => {
-                SystemValuer::on_date(JContext::get().journal().config().clone(), datetime)
-            }
+            Some(datetime) => SystemValuer::on_date(self.entry.config().clone(), datetime),
             None => SystemValuer::from(self.entry()),
         };
         Ok(Box::new(sys_valuer))
@@ -379,12 +364,13 @@ impl<'h> Flow<'h> {
 }
 
 pub struct LinkedFlowContext<'h, 'a> {
-    linked_flow: &'a LinkedFlow<'h>,
+    flow: &'a Flow<'h>,
+    linked: &'a Flow<'h>,
     variables: HashMap<SS, ColumnValue<'h>>,
 }
 impl<'h, 'a> LinkedFlowContext<'h, 'a> {
-    pub fn new(linked_flow: &'a LinkedFlow<'h>) -> Self {
-        Self { linked_flow, variables: HashMap::new() }
+    pub fn new(flow: &'a Flow<'h>, linked: &'a Flow<'h>) -> Self {
+        Self { flow, linked, variables: HashMap::new() }
     }
 }
 
@@ -405,9 +391,9 @@ impl<'h, 'a> IdentifierContext<'h, 'a> for LinkedFlowContext<'h, 'a> {
 
     fn eval_identifier(&self, identifier: &str) -> Option<ColumnValue<'h>> {
         let res = eval_identifier!(identifier, &Flow<'h>,
-            "linked" => self.linked_flow.linked()
+            "linked" => self.linked
         );
 
-        res.or_else(|| self.linked_flow.flow().eval_identifier(identifier))
+        res.or_else(|| self.flow.eval_identifier(identifier))
     }
 }

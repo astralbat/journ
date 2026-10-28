@@ -27,7 +27,7 @@ where
         return Err(err!("Function 'amount' requires exactly one argument"));
     }
 
-    let mut config: Configuration<'h> = JContext::get().journal().config().clone();
+    let mut config: Configuration<'h> = JContext::get().config().clone();
     let mut arg = args[0].eval(context)?;
     for a in arg.as_list_mut() {
         match a {

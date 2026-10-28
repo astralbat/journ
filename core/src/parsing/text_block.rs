@@ -153,7 +153,9 @@ impl<'h> TextBlock<'h> {
 
         // Otherwise, look at the parent's node and see whether it changes.
         match self.location.node {
-            Some(node) => node != parent.location.node.unwrap(),
+            Some(node) => {
+                node.nearest_filename() != parent.location.node.unwrap().nearest_filename()
+            }
             None => false,
         }
     }

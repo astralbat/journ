@@ -20,6 +20,7 @@ atty = "0.2"
 supports-color = "3.0.2"
 
 smallvec = { version = "1.11.1", features = ["drain_filter"] }
+hashlink = "0.12.2"
 smartstring = "1.0.1"
 
 nom = "7.1.3"

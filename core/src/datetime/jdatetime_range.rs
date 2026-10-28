@@ -6,7 +6,7 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::configuration::Configuration;
-use crate::datetime::{DateTimeFormat, JDateTime};
+use crate::datetime::{DateTimeFormat, JDateTime, MAX_DATETIME, MIN_DATETIME, jdatetime};
 use crate::journal_context::JContext;
 use chrono::Duration;
 use chrono_tz::Tz;
@@ -20,6 +20,7 @@ use std::range::{Bound, RangeBounds};
 pub struct JDateTimeRange {
     /// The first datetime in the range.
     start: JDateTime,
+    /// The last datetime in the range, exclusive.
     end: JDateTime,
 }
 
@@ -69,7 +70,7 @@ impl JDateTimeRange {
         self.end = end;
     }
 
-    pub fn average(&self) -> JDateTime {
+    pub fn mid(&self) -> JDateTime {
         let duration: Duration = self.end().datetime() - self.start().datetime();
         JDateTime::new(self.start().datetime() + duration / 2, self.start().precision())
     }
@@ -166,5 +167,21 @@ impl RangeBounds<JDateTime> for JDateTimeRange {
 
     fn end_bound(&self) -> Bound<&JDateTime> {
         Bound::Excluded(&self.end)
+    }
+}
+
+impl From<(Bound<JDateTime>, Bound<JDateTime>)> for JDateTimeRange {
+    fn from(range: (Bound<JDateTime>, Bound<JDateTime>)) -> Self {
+        let start = match range.0 {
+            Bound::Included(dt) => dt,
+            Bound::Excluded(dt) => dt.increment(),
+            Bound::Unbounded => *MIN_DATETIME,
+        };
+        let end = match range.1 {
+            Bound::Included(dt) => dt.increment(),
+            Bound::Excluded(dt) => dt,
+            Bound::Unbounded => *MAX_DATETIME,
+        };
+        JDateTimeRange { start, end }
     }
 }

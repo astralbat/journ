@@ -9,6 +9,7 @@ use crate::amount::Amount;
 use crate::err;
 use crate::error::JournResult;
 use crate::report::expr::{ColumnValue, Expr, IdentifierContext};
+use crate::unit::RoundingStrategy;
 
 pub fn round<'h, 'a>(
     args: &[Expr],
@@ -17,11 +18,25 @@ pub fn round<'h, 'a>(
 where
     'h: 'a,
 {
-    if args.is_empty() || args.len() > 2 {
-        return Err(err!("Function 'round' requires one or two arguments"));
+    if args.is_empty() || args.len() > 3 {
+        return Err(err!("Function 'round' requires one, two or three arguments"));
     }
     let mut value = args[0].eval(context)?;
     let num_dp = args.get(1).map(|a| a.eval(context)).transpose()?;
+    let rounding_strategy: Option<RoundingStrategy> =
+        args.get(2)
+            .map(|rs| rs.eval(context))
+            .transpose()?
+            .map(|v| {
+                v.as_str().ok_or_else(|| {
+                    err!(
+                        "Function 'round' requires the third argument to be of type `String`: {}",
+                        v.as_type_string()
+                    )
+                })
+                .and_then(str::parse)
+            })
+            .transpose()?;
 
     if value.is_undefined() || num_dp.as_ref().map(|v| v.is_undefined()).unwrap_or(false) {
         return Ok(value);
@@ -29,14 +44,20 @@ where
 
     for v in value.as_list_mut() {
         match (v, num_dp.as_ref().and_then(|n| n.as_number().and_then(|d| u8::try_from(d).ok()))) {
-            (ColumnValue::Amount(amount, _), Some(dp)) => {
-                *amount = amount.rounded_dec_places(dp);
+            (ColumnValue::Amount(amount, precise), Some(dp)) => {
+                *amount = amount
+                    .rounded_dec_places_with_strategy(dp, rounding_strategy.unwrap_or_default());
+                *precise = true;
             }
-            (ColumnValue::Amount(amount, _), None) => {
-                *amount = amount.rounded();
+            (ColumnValue::Amount(amount, precise), None) => {
+                *amount = amount.rounded_with_strategy(rounding_strategy.unwrap_or_default());
+                *precise = true;
             }
             (ColumnValue::Number(num), Some(dp)) => {
-                *num = Amount::nil().with_quantity(*num).rounded_dec_places(dp).quantity()
+                *num = Amount::nil()
+                    .with_quantity(*num)
+                    .rounded_dec_places_with_strategy(dp, rounding_strategy.unwrap_or_default())
+                    .quantity()
             }
             _ => {
                 return Err(err!(

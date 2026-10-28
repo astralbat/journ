@@ -26,6 +26,7 @@ use journ_core::journal_entry::JournalEntry;
 use journ_core::metadata::Metadata;
 use journ_core::unit::Unit;
 use linked_hash_set::LinkedHashSet;
+use smallvec::SmallVec;
 use std::fmt::Debug;
 use std::rc::Rc;
 use std::{fmt, iter};
@@ -159,7 +160,7 @@ impl<'h> DealHolding<'h> {
         match self {
             Single(single) => single.expenses(),
             Sequence(seq) => seq.expenses(),
-            Average(avg) => avg.expenses().clone(),
+            Average(avg) => avg.expenses(),
         }
     }
 
@@ -304,46 +305,65 @@ impl<'h> DealHolding<'h> {
         }
     }
 
-    /// The journal entries behind the deals in the holding. This will be empty for average holdings.
+    /// The journal entries behind the deals in the holding. The list is deduplicated so that each entry is only returned once, even if it has multiple deals in the holding.
     pub fn entries(&self) -> Box<dyn Iterator<Item = &'h JournalEntry<'h>> + '_> {
         match self {
             Single(single) => Box::new(iter::once(single.deal().entry())),
             Sequence(seq) => seq.entries(),
-            Average(avg) => Box::new(avg.deal_iter().map(|d| d.entry())),
+            Average(avg) => avg.entries(),
         }
     }
 
+    /// Gets note metadata on deals in the holding. Only notes that are common to all deals in the holding will be included.
     pub fn notes(&self) -> LinkedHashSet<&str> {
         let mut notes = LinkedHashSet::new();
         match self {
             Single(single) => notes.extend(single.deal().notes()),
-            Sequence(seq) => {
-                for dh in seq.iter() {
-                    notes.extend(dh.notes());
+            Sequence(_) | Average(_) => {
+                let mut iter = self.deal_iter();
+                notes = iter.next().map(|dh| dh.notes().into_iter().collect()).unwrap_or_default();
+                for dh in iter {
+                    let diff =
+                        notes.difference(&dh.notes()).cloned().collect::<SmallVec<[&str; 2]>>();
+                    for note in diff {
+                        notes.remove(note);
+                    }
                 }
             }
-            // Don't take notes from average holding. This may end up causing too many notes of little
-            // value in the report.
-            Average(_) => {}
         }
         notes
     }
 
     /// Looks up metadata values on the associated entries.
-    pub fn entry_metadata_by_key(&self, key: &str) -> LinkedHashSet<&Metadata<'h>> {
+    pub fn entry_metadata_by_key(&self, key: &str) -> SmallVec<[&Metadata<'h>; 4]> {
+        self.entries().flat_map(|entry| entry.metadata_by_key(key)).collect()
+        /*
         match self {
             Single(single) => single.deal().entry().metadata_by_key(key).into_iter().collect(),
             Sequence(seq) => {
-                let mut tag_vals = LinkedHashSet::new();
+                let mut tag_vals = SmallVec::new();
                 for dh in seq.iter() {
                     for val in dh.entry_metadata_by_key(key) {
-                        tag_vals.insert(val);
+                        if tag_vals.iter().all(|v: &&Metadata| !v.is_same_block(val)) {
+                            tag_vals.push(val);
+                        }
                     }
                 }
                 tag_vals
             }
-            Average(_avg) => LinkedHashSet::new(),
-        }
+            Average(avg) => {
+                let mut tag_vals = SmallVec::new();
+                for deal in avg.deal_iter() {
+                    for val in deal.entry().metadata_by_key(key) {
+                        if tag_vals.iter().all(|v: &&Metadata| !v.is_same_block(val)) {
+                            tag_vals.push(val);
+                        }
+                    }
+                }
+                tag_vals
+            }
+
+        }*/
     }
 
     /// Gets whether this holding matches the specified condition at the specified clock time.

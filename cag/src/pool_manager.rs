@@ -57,20 +57,8 @@ impl<'h> PoolManager<'h> {
         self.unit_filter = unit_filter;
     }
 
-    fn get_pool(&self, pool_id: usize) -> Option<&Pool<'h>> {
-        self.pools.iter().find(|p| p.id() == pool_id)
-    }
-
-    fn get_pool_by_name(&self, pool_name: &str) -> Option<&Pool<'h>> {
-        self.pools.iter().find(|p| p.name() == pool_name)
-    }
-
     fn get_pool_by_name_mut(&mut self, pool_name: &str) -> Option<&mut Pool<'h>> {
         self.pools.iter_mut().find(|p| p.name() == pool_name)
-    }
-
-    fn get_pool_mut(&mut self, pool_id: usize) -> Option<&mut Pool<'h>> {
-        self.pools.iter_mut().find(|p| p.id() == pool_id)
     }
 
     /// Gets the pool with the specified `name` or creates a new one if it does not exist. The `name` must

@@ -15,7 +15,7 @@ use chrono::format::{DelayedFormat, Fixed, Item, Numeric, Pad};
 use chrono::{NaiveDate, NaiveTime};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, tag_no_case, take};
-use nom::character::complete::{none_of, one_of, space1};
+use nom::character::complete::{none_of, one_of};
 use nom::combinator::{map, verify};
 use nom::error::context;
 use nom::sequence::pair;
@@ -126,7 +126,15 @@ impl<'h> DateTimeFormat<'h> {
                 tag_no_case("M") => |_| Ok(items.push(Item::Numeric(Numeric::Month, Pad::None))),
                 tag_no_case("DD") => |_| Ok(items.push(Item::Numeric(Numeric::Day, Pad::Zero))),
                 tag_no_case("D") => |_| Ok(items.push(Item::Numeric(Numeric::Day, Pad::None))),
-                space1 => |sp: I| Ok(items.push(Item::Space(sp.text()))),
+                // Don't use Item::Space since it will consume multiple spaces, potentially including
+                // the terminating double space between date and entry descriptions.
+                tag(" ") => |_sp: I| {
+                    if items.last() == Some(&Item::Literal(" ")) {
+                        Err(NomErr::Failure(err!("A Double space in date format is not allowed")))
+                    } else {
+                        Ok(items.push(Item::Literal(" ")))
+                    }
+                },
                 verify(lit, lit_allowed) => |lit: I| Ok(items.push(Item::Literal(lit.text()))),
                 alt((tag("\r"), tag("\n"))) => |rest: I| Err(NomErr::Failure(rest.into_err("Date format must not span multiple lines")))
             )?.0;
@@ -172,7 +180,15 @@ impl<'h> DateTimeFormat<'h> {
                 tag_no_case("S") => |_| Ok(items.push(Item::Numeric(Numeric::Second, Pad::None))),
                 tag("P") => |_| Ok(items.push(Item::Fixed(Fixed::UpperAmPm))),
                 tag("p") => |_| Ok(items.push(Item::Fixed(Fixed::LowerAmPm))),
-                space1 => |sp: I| Ok(items.push(Item::Space(sp.text()))),
+                // Don't use Item::Space since it will consume multiple spaces, potentially including
+                // the terminating double space between date and entry descriptions.
+                tag(" ") => |_sp: I| {
+                    if items.last() == Some(&Item::Literal(" ")) {
+                        Err(NomErr::Failure(err!("A Double space in time format is not allowed")))
+                    } else {
+                        Ok(items.push(Item::Literal(" ")))
+                    }
+                },
                 verify(lit, lit_allowed) => |lit: I| Ok(items.push(Item::Literal(lit.text()))),
                 alt((tag("\r"), tag("\n"))) => |rest: I| Err(NomErr::Failure(rest.into_err("Time format must not span multiple lines")))
             )?
@@ -301,6 +317,36 @@ impl<'h> DateTimeFormat<'h> {
             .collect()
     }
 
+    pub fn as_date_format(&self) -> Option<DateTimeFormat<'h>> {
+        let date_items: Vec<Item<'h>> = self.date_items().cloned().collect();
+        if date_items.is_empty() {
+            None
+        } else {
+            Some(DateTimeFormat {
+                format_str: Self::format_str_from_items(&date_items),
+                spaces: Self::count_spaces(&date_items),
+                date_item_range: 0..date_items.len() as u8,
+                items: date_items,
+                time_item_range: 0..0,
+            })
+        }
+    }
+
+    pub fn as_time_format(&self) -> Option<DateTimeFormat<'h>> {
+        let time_items: Vec<Item<'h>> = self.time_items().cloned().collect();
+        if time_items.is_empty() {
+            None
+        } else {
+            Some(DateTimeFormat {
+                format_str: Self::format_str_from_items(&time_items),
+                spaces: Self::count_spaces(&time_items),
+                time_item_range: 0..time_items.len() as u8,
+                date_item_range: 0..0,
+                items: time_items,
+            })
+        }
+    }
+
     fn count_spaces(items: &[Item<'h>]) -> usize {
         let mut total_spaces = 0;
         for item in items {
@@ -316,56 +362,6 @@ impl<'h> DateTimeFormat<'h> {
         }
         total_spaces
     }
-
-    /*
-    pub fn set_date_format(&mut self, date_format: &'h DateFormat<'h>) {
-        self.date_inner = date_format.inner.clone();
-    }
-
-    pub fn set_time_format(&mut self, time_format: &'h TimeFormat<'h>) {
-        self.time_inner = time_format.inner.clone();
-    }*/
-
-    /*
-    pub(super) fn translate<I>(input: I) -> JParseResult<I, Vec<Item<'h>>>
-    where
-        I: TextInput<'h>,
-    {
-        let mut items = vec![];
-
-        let lit = |input: I| -> IParseResult<'h, I, I> {
-            none_of("\r\n")(input.clone())?;
-            take(1usize)(input)
-        };
-
-        let (rem, items) = permutation((DateFormat::translate, TimeFormat::translate))(input)?;
-
-        let input = match_parsers!(input,
-            tag_no_case("YYYY") => |_| Ok(items.push(Item::Numeric(Numeric::Year, Pad::None))),
-            tag_no_case("YY") => |_| Ok(items.push(Item::Numeric(Numeric::YearMod100, Pad::None))),
-            tag_no_case("MMMM") => |_| Ok(items.push(Item::Fixed(Fixed::LongMonthName))),
-            tag_no_case("MMM") => |_| Ok(items.push(Item::Fixed(Fixed::ShortMonthName))),
-            tag_no_case("MM") => |_| Ok(items.push(Item::Numeric(Numeric::Month, Pad::Zero))),
-            tag_no_case("M") => |_| Ok(items.push(Item::Numeric(Numeric::Month, Pad::None))),
-            tag_no_case("DD") => |_| Ok(items.push(Item::Numeric(Numeric::Day, Pad::Zero))),
-            tag_no_case("D") => |_| Ok(items.push(Item::Numeric(Numeric::Day, Pad::None))),
-            tag_no_case("HH") => |_| Ok(items.push(Item::Numeric(Numeric::Hour, Pad::Zero))),
-            tag_no_case("H") => |_| Ok(items.push(Item::Numeric(Numeric::Hour, Pad::None))),
-            tag_no_case("II") => |_| Ok(items.push(Item::Numeric(Numeric::Hour12, Pad::Zero))),
-            tag_no_case("I") => |_| Ok(items.push(Item::Numeric(Numeric::Hour12, Pad::None))),
-            tag_no_case("MM") => |_| Ok(items.push(Item::Numeric(Numeric::Minute, Pad::Zero))),
-            tag_no_case("M") => |_| Ok(items.push(Item::Numeric(Numeric::Minute, Pad::None))),
-            tag_no_case("SS") => |_| Ok(items.push(Item::Numeric(Numeric::Second, Pad::Zero))),
-            tag_no_case("S") => |_| Ok(items.push(Item::Numeric(Numeric::Second, Pad::None))),
-            tag("P") => |_| Ok(items.push(Item::Fixed(Fixed::UpperAmPm))),
-            tag("p") => |_| Ok(items.push(Item::Fixed(Fixed::LowerAmPm))),
-            space1 => |sp: I| Ok(items.push(Item::Space(sp.text()))),
-            lit => |lit: I| Ok(items.push(Item::Literal(lit.text()))),
-            rest => |rest: I| Err(NomErr::Failure(rest.into_err("Datetime format must not span multiple lines")))
-        )?
-            .0;
-        Ok((input, items))
-    }*/
 
     pub fn format<'a>(
         &'a self,
@@ -508,88 +504,3 @@ impl FromStr for TimeFormat {
         DateTimeFormat::parse_to_owned(s, DateFormatMode::Time).map(TimeFormat)
     }
 }
-/*
-
-impl Default for &'static DateTimeFormat<'static> {
-    fn default() -> Self {
-        static DEFAULT_DATETIME_FORMAT: LazyLock<&'static DateTimeFormat<'static>> =
-            LazyLock::new(|| "yyyy-mm-dd hh:mm:ss".parse().unwrap());
-
-        *DEFAULT_DATETIME_FORMAT
-    }
-}*/
-
-/*
-impl<'h> From<&DateFormat<'h>> for &'static DateTimeFormat<'static> {
-    /// Implements From<DateFormat>, creating a DateTimeFormat that only prints the date.
-    fn from(value: &DateFormat<'h>) -> Self {
-        let map = DATETIME_FORMATS.lock().unwrap();
-        if let Some(dtf) = map.get(&(value.inner.format_str)) {
-            return dtf;
-        }
-
-        DateTimeFormat {
-            date_inner: value.inner.clone(),
-            inter_literal: DateTimeFormatInner::empty(),
-            time_inner: DateTimeFormatInner::empty(),
-            date_first: true,
-        }.into_owned()
-    }
-}
-
-impl<'h> From<&TimeFormat<'h>> for &'static DateTimeFormat<'static> {
-    /// Implements From<TimeFormat>, creating a DateTimeFormat that only prints the time.
-    fn from(value: &TimeFormat<'h>) -> Self {
-        let map = DATETIME_FORMATS.lock().unwrap();
-        if let Some(dtf) = map.get(&(value.inner.format_str)) {
-            return dtf;
-        }
-
-        DateTimeFormat {
-            date_inner: DateTimeFormatInner::empty(),
-            inter_literal: DateTimeFormatInner::empty(),
-            time_inner: value.inner.clone(),
-            date_first: true,
-        }.into_owned()
-    }
-}*/
-
-/*
-impl<'h> From<(Option<&DateFormat<'h>>, Option<&TimeFormat<'h>>)>
-    for &'static DateTimeFormat<'static>
-{
-    /// Implements From<(DateFormat, TimeFormat)>, creating a DateTimeFormat that prints
-    /// date and time separated by a space.
-    fn from(value: (Option<&DateFormat<'h>>, Option<&TimeFormat<'h>>)) -> Self {
-        let map = DATETIME_FORMATS.lock().unwrap();
-        match (value.0.as_ref().map(|v| &v.inner), value.1.as_ref().map(|v| &v.inner)) {
-            (Some(df), Some(tf)) => {
-                if let Some(dtf) = map.get(&(df.format_str.clone() + " " + tf.format_str.clone())) {
-                    return dtf;
-                }
-            }
-            (Some(inner), None) | (None, Some(inner)) => {
-                if let Some(dtf) = map.get(&inner.format_str) {
-                    return dtf;
-                }
-            }
-            _ => {}
-        }
-
-        DateTimeFormat {
-            date_inner: value.0.map(|v| v.inner.clone()).unwrap_or(DateTimeFormatInner::empty()),
-            inter_literal: if value.0.is_some() && value.1.is_some() {
-                DateTimeFormatInner {
-                    format_str: SS::from(" "),
-                    items: vec![Item::Space(" ")],
-                    spaces: 1,
-                }
-            } else {
-                DateTimeFormatInner::empty()
-            },
-            time_inner: value.1.map(|v| v.inner.clone()).unwrap_or(DateTimeFormatInner::empty()),
-            date_first: true,
-        }
-        .into_owned()
-    }
-}*/

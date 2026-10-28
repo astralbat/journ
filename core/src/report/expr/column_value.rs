@@ -12,7 +12,10 @@ use crate::configuration::{AccountFilter, Filter};
 use crate::datetime::{DateTimePrecision, JDate, JDateTime, JDateTimeRange};
 use crate::error::JournResult;
 use crate::journal_context::JContext;
-use crate::report::table2::{BLANK_CELL, CellRef, EllipsisCell, MultiLineCell, StyledCell};
+use crate::report::table2::{
+    BLANK_CELL, Cell, CellRef, EllipsisCell, EllipsisPolicy, MultiLineCell, PolicyWrappingCell,
+    StyledCell, WrapEase, WrapPolicy,
+};
 use crate::report::term_style::{Colour, Style};
 use crate::unit::{NumberFormat, Unit};
 use crate::valued_amount::ValuedAmount;
@@ -21,13 +24,14 @@ use chrono::MappedLocalTime;
 use rust_decimal::Decimal;
 use smartstring::alias::String as SS;
 use std::cmp::Ordering;
+use std::hash::Hash;
 use std::iter::Sum;
 use std::ops::{Add, AddAssign};
 use std::sync::Arc;
 use std::{fmt, iter, mem, slice};
 use yaml_rust2::Yaml;
 
-#[derive(Debug, Clone, PartialEq, Eq, Default, Hash)]
+#[derive(Debug, Clone, Eq, Default)]
 pub enum ColumnValue<'h> {
     #[default]
     Undefined,
@@ -83,7 +87,13 @@ impl<'h> ColumnValue<'h> {
         match self {
             ColumnValue::Unit(u) => Some(u),
             ColumnValue::Amount(a, _) => Some(a.unit()),
-            _ => None,
+            c => {
+                if let Some(unit_code) = c.as_str() {
+                    Some(JContext::get().config_mut().get_or_create_unit(unit_code))
+                } else {
+                    None
+                }
+            }
         }
     }
 
@@ -153,16 +163,20 @@ impl<'h> ColumnValue<'h> {
     /// Like [Self::into_string()], except that this will return a string for any
     /// value, formatted in the canonical way.
     pub fn as_reporting_string(&self) -> String {
+        let context = JContext::get();
+        let dtf = context
+            .cmd()
+            .datetime_fmt_cmd()
+            .datetime_format()
+            .unwrap_or_else(|| context.config().datetime_format());
         match self {
             ColumnValue::Datetime(dt) => {
-                let dtf = JContext::get().cmd().datetime_fmt_cmd().datetime_format_or_default();
                 let tz =
                     JContext::get().cmd().datetime_fmt_cmd().timezone().unwrap_or(dt.timezone());
                 // format with max precision to avoid inconsistent formats in the reporting output
                 format!("{}", dt.with_timezone(tz).format_with_precision(dtf, dtf.max_precision()))
             }
             ColumnValue::DatetimeRange(range) => {
-                let dtf = JContext::get().cmd().datetime_fmt_cmd().datetime_format_or_default();
                 let tz =
                     JContext::get().cmd().datetime_fmt_cmd().timezone().unwrap_or(range.timezone());
                 let mut s = String::new();
@@ -170,8 +184,7 @@ impl<'h> ColumnValue<'h> {
                 s
             }
             ColumnValue::Date(date) => {
-                let df = JContext::get().cmd().datetime_fmt_cmd().datetime_format_or_default();
-                format!("{}", date.format(df))
+                format!("{}", date.format(dtf))
             }
             col => col.to_string(),
         }
@@ -179,7 +192,7 @@ impl<'h> ColumnValue<'h> {
 
     pub fn as_type_string(&self) -> String {
         match self {
-            ColumnValue::Undefined => "UNDEFINED".to_string(),
+            ColumnValue::Undefined => "UNDEFINED".into(),
             ColumnValue::Boolean(b) => format!("Boolean({})", b),
             ColumnValue::Account(a) => format!("Account({})", a),
             ColumnValue::Unit(u) => format!("Unit({})", u),
@@ -192,7 +205,16 @@ impl<'h> ColumnValue<'h> {
             ColumnValue::Number(n) => format!("Number({})", n),
             ColumnValue::Amount(a, _) => format!("Amount({})", a),
             ColumnValue::ValuedAmount(a) => format!("ValuedAmount({})", a),
-            ColumnValue::List(_l) => format!("List({})", self.as_reporting_string()),
+            ColumnValue::List(list) => {
+                let mut inner = String::new();
+                for (i, cv) in list.iter().enumerate() {
+                    if i > 0 {
+                        inner.push_str(", ");
+                    }
+                    inner.push_str(&cv.as_type_string());
+                }
+                format!("List({})", inner)
+            }
         }
     }
 
@@ -200,6 +222,7 @@ impl<'h> ColumnValue<'h> {
         match self {
             ColumnValue::Datetime(dt) => Some(dt.date()),
             ColumnValue::Date(date) => Some(*date),
+            ColumnValue::DatetimeRange(range) => Some(range.mid().date()),
             _ => None,
         }
     }
@@ -217,6 +240,7 @@ impl<'h> ColumnValue<'h> {
                 }?;
                 Some(JDateTime::new(dt, DateTimePrecision::Day))
             }
+            ColumnValue::DatetimeRange(range) => Some(range.mid()),
             _ => None,
         }
     }
@@ -231,6 +255,29 @@ impl<'h> ColumnValue<'h> {
             ColumnValue::Amount(num, false) => Some(num.rounded().quantity()),
             ColumnValue::Number(num) => Some(*num),
             _ => None,
+        }
+    }
+
+    /// Updates the units of this value to the current configuration in context. This is useful
+    /// if any units have been renamed since the value was first created.
+    ///
+    /// TODO: Update accounts.
+    pub fn update(&mut self) {
+        match self {
+            ColumnValue::Unit(u) => *u = JContext::get().config().get_unit(u.code()).unwrap_or(*u),
+            ColumnValue::Amount(a, _) => {
+                *a = JContext::get()
+                    .config()
+                    .get_unit(a.unit().code())
+                    .unwrap_or(a.unit())
+                    .with_quantity(a.quantity())
+            }
+            ColumnValue::List(list) => {
+                for cv in list.iter_mut() {
+                    cv.update();
+                }
+            }
+            _ => {}
         }
     }
 
@@ -301,7 +348,15 @@ impl<'h> ColumnValue<'h> {
             ColumnValue::String(s) => CellRef::Owned(Box::new(s)),
             ColumnValue::StringRef(s) => CellRef::Owned(Box::new(s)),
             ColumnValue::Description(s) => {
-                CellRef::Owned(Box::new(EllipsisCell::new(CellRef::Owned(Box::new(s)))))
+                let wrap = JContext::get().cmd().table_fmt_cmd().wrap();
+                let boxed: Box<dyn Cell> = if wrap {
+                    let mut wrapping_desc = PolicyWrappingCell::new(Box::new(s), WrapPolicy::Word);
+                    wrapping_desc.set_wrap_ease(WrapEase::Reluctant);
+                    Box::new(wrapping_desc)
+                } else {
+                    Box::new(EllipsisCell::new(Box::new(s), EllipsisPolicy::End))
+                };
+                CellRef::Owned(boxed)
             }
             ColumnValue::Date(_date) => CellRef::Owned(Box::new(StyledCell::new(
                 self.as_reporting_string(),
@@ -318,10 +373,10 @@ impl<'h> ColumnValue<'h> {
             ColumnValue::Account(acc) => CellRef::Owned(acc.into_cell()),
             ColumnValue::Unit(unit) => CellRef::Owned(Box::new(unit.code())),
             ColumnValue::Amount(amount, false) => {
-                CellRef::Owned(amount.into_cell(amount.unit().format()))
+                CellRef::Owned(amount.into_cell(amount.unit().format(), false))
             }
             ColumnValue::Amount(amount, true) => {
-                CellRef::Owned(amount.into_cell(&amount.unit().format().as_precise()))
+                CellRef::Owned(amount.into_cell(amount.unit().format(), true))
             }
             // Format numbers similar to amounts using a number format
             ColumnValue::Number(qty) => ColumnValue::Amount(Amount::nil().with_quantity(qty), true)
@@ -359,8 +414,8 @@ impl<'h> ColumnValue<'h> {
             ColumnValue::Date(_) => Yaml::String(self.as_reporting_string()),
             ColumnValue::Datetime(_) => Yaml::String(self.as_reporting_string()),
             ColumnValue::DatetimeRange(_) => Yaml::String(self.as_reporting_string()),
-            ColumnValue::Account(acc) => Yaml::String(acc.to_string()),
-            ColumnValue::Unit(unit) => Yaml::String(unit.to_string()),
+            ColumnValue::Account(acc) => Yaml::String(acc.name().to_string()),
+            ColumnValue::Unit(unit) => Yaml::String(unit.code().to_string()),
             ColumnValue::Amount(amount, false) => Yaml::String(amount.to_string()),
             ColumnValue::Amount(amount, true) => Yaml::String(amount.format_precise().to_string()),
             // Don't format with thousands separators so that tools can parse it.
@@ -395,6 +450,8 @@ impl<'h> ColumnValue<'h> {
         // We will overflow the stack without this.
         if identifier.is_empty() {
             return Some(self);
+        } else if identifier == "type" {
+            return Some(String(self.as_type_string().into()));
         }
 
         use ColumnValue::*;
@@ -420,7 +477,7 @@ impl<'h> ColumnValue<'h> {
             Datetime(dt) if "date" => Date(dt.date()),
             DatetimeRange(range) if "start" => Datetime(range.start()),
             DatetimeRange(range) if "end" => Datetime(range.end()),
-            DatetimeRange(range) if "mid" => Datetime(range.average()),
+            DatetimeRange(range) if "mid" => Datetime(range.mid()),
             // Fallback to code if name unavailable
             Unit(u) if "name" => u.name().map(|s| String(s.into())).unwrap_or(String(u.code().into())),
             Unit(u) if "format" => {
@@ -475,6 +532,43 @@ impl fmt::Display for ColumnValue<'_> {
     }
 }
 
+impl PartialEq for ColumnValue<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.partial_cmp(other) == Some(Ordering::Equal)
+    }
+}
+
+impl Hash for ColumnValue<'_> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        match self {
+            ColumnValue::Undefined => 0.hash(state),
+            ColumnValue::Boolean(b) => b.hash(state),
+            ColumnValue::String(s) => s.hash(state),
+            ColumnValue::StringRef(s) => s.hash(state),
+            ColumnValue::Description(s) => s.hash(state),
+            ColumnValue::Account(acc) => acc.name().hash(state),
+            ColumnValue::Unit(unit) => unit.code().hash(state),
+            ColumnValue::Date(date) => date.hash(state),
+            ColumnValue::Datetime(dt) => dt.hash(state),
+            ColumnValue::DatetimeRange(range) => range.hash(state),
+            ColumnValue::Amount(amount, _) => {
+                amount.unit().code().hash(state);
+                amount.quantity().hash(state);
+            }
+            ColumnValue::Number(qty) => qty.hash(state),
+            ColumnValue::ValuedAmount(va) => {
+                va.amount().unit().code().hash(state);
+                va.amount().quantity().hash(state);
+            }
+            ColumnValue::List(values) => {
+                for value in values {
+                    value.hash(state);
+                }
+            }
+        }
+    }
+}
+
 impl PartialOrd for ColumnValue<'_> {
     /// The comparison of `ColumnValues` may result in a `None` when either is `undefined`.
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
@@ -486,14 +580,24 @@ impl PartialOrd for ColumnValue<'_> {
             (ColumnValue::Undefined, _) | (_, ColumnValue::Undefined) => None,
             (ColumnValue::List(a), ColumnValue::List(b)) => a.partial_cmp(b),
             (ColumnValue::Boolean(a), ColumnValue::Boolean(b)) => Some(a.cmp(b)),
-            (ColumnValue::Amount(a, _), ColumnValue::Amount(b, _)) => Some(a.cmp(b)),
+            (ColumnValue::Amount(a, _), ColumnValue::Amount(b, _)) => {
+                // Unit naturally compares on canonical_code. We want to compare on code.
+                Some(a.unit().code().cmp(b.unit().code()).then(a.quantity().cmp(&b.quantity())))
+            }
             (ColumnValue::Number(a), ColumnValue::Number(b)) => Some(a.cmp(b)),
             (ColumnValue::Amount(a, _), ColumnValue::Number(b)) => Some(a.quantity().cmp(b)),
             (ColumnValue::Number(a), ColumnValue::Amount(b, _)) => Some(a.cmp(&b.quantity())),
             (ColumnValue::Datetime(a), ColumnValue::Datetime(b)) => Some(a.cmp(b)),
             (ColumnValue::DatetimeRange(a), ColumnValue::DatetimeRange(b)) => Some(a.cmp(b)),
             (ColumnValue::ValuedAmount(a), ColumnValue::ValuedAmount(b)) => {
-                Some(a.amount().cmp(&b.amount()))
+                // Unit naturally compares on canonical_code. We want to compare on code.
+                Some(
+                    a.amount()
+                        .unit()
+                        .code()
+                        .cmp(b.amount().unit().code())
+                        .then(a.amount().quantity().cmp(&b.amount().quantity())),
+                )
             }
             (a, b) if a.as_str().is_some() && b.as_str().is_some() => {
                 Some(a.as_str().unwrap().cmp(b.as_str().unwrap()))
@@ -511,8 +615,22 @@ where
     C: Into<ColumnValue<'h>>,
 {
     fn from_iter<T: IntoIterator<Item = C>>(iter: T) -> Self {
-        let vec: Vec<ColumnValue> = iter.into_iter().map(|c| c.into()).collect();
-        ColumnValue::List(vec)
+        let mut iter = iter.into_iter();
+        let first = iter.next();
+        match first {
+            Some(first) => {
+                let second = iter.next();
+                match second {
+                    Some(second) => {
+                        let mut vec = vec![first.into(), second.into()];
+                        vec.extend(iter.map(Into::into));
+                        ColumnValue::List(vec)
+                    }
+                    None => first.into(),
+                }
+            }
+            None => ColumnValue::Undefined,
+        }
     }
 }
 
@@ -541,7 +659,8 @@ impl<'h> Add for &ColumnValue<'h> {
             (ColumnValue::Amount(a, a_precise), ColumnValue::Amount(b, b_precise))
                 if a.unit() == b.unit() =>
             {
-                Some(ColumnValue::Amount(a + b, *a_precise || *b_precise))
+                // We do b + a, rather than a + b to insert any updated unit.
+                Some(ColumnValue::Amount(b + a, *a_precise || *b_precise))
             }
             (ColumnValue::List(a), ColumnValue::List(b)) => {
                 let mut res = vec![];
@@ -587,16 +706,24 @@ impl AddAssign for ColumnValue<'_> {
                     left.push(r);
                 }
             }
-            (ColumnValue::List(left), right) => {
-                for l in left.iter_mut() {
-                    if let Some(sum) = &*l + &right {
-                        *l = sum;
+            (ColumnValue::List(list), val) => {
+                for elem in list.iter_mut() {
+                    if let Some(sum) = &*elem + &val {
+                        *elem = sum;
                         return;
                     }
                 }
-                // Avoid duplicates in the list
-                if !left.contains(&right) {
-                    left.push(right);
+                list.push(val);
+            }
+            (val, ColumnValue::List(list)) => {
+                for elem in list.iter() {
+                    match &*val + elem {
+                        Some(sum) => *val = sum,
+                        None => match val {
+                            ColumnValue::List(v) => v.push(elem.clone()),
+                            _ => *val = ColumnValue::List(vec![val.clone(), elem.clone()]),
+                        },
+                    }
                 }
             }
             (l, r) => match &*l + &r {

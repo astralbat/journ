@@ -17,7 +17,7 @@ pub struct Table<'cell> {
     rows: Vec<Row<'cell>>,
     stripe: bool,
     title_separator: char,
-    chain_separator: char,
+    chain_separator: Option<char>,
     total_separator: char,
     grand_total_separator: char,
     column_preferences: Vec<ColumnPreferences>,
@@ -40,12 +40,16 @@ impl<'cell> Table<'cell> {
         row
     }
 
-    pub fn create_chain_separator(&self) -> Row<'cell> {
-        self.create_separator_row(
-            RowKind::ChainSeparator,
-            self.chain_separator,
-            self.rows.column_count(),
-        )
+    pub fn create_chain_separator(&self) -> Option<Row<'cell>> {
+        if let Some(separator) = self.chain_separator {
+            Some(self.create_separator_row(
+                RowKind::ChainSeparator,
+                separator,
+                self.rows.column_count(),
+            ))
+        } else {
+            None
+        }
     }
 
     pub fn create_total_separator(&self) -> Row<'cell> {
@@ -84,7 +88,7 @@ impl<'cell> Table<'cell> {
         self.title_separator = separator;
     }
 
-    pub fn set_chain_separator(&mut self, separator: char) {
+    pub fn set_chain_separator(&mut self, separator: Option<char>) {
         self.chain_separator = separator;
     }
 
@@ -152,7 +156,8 @@ impl<'cell> Table<'cell> {
             formatter.set_striped();
         }
         formatter.set_max_width(term_size::dimensions().map(|(w, _)| w));
-        formatter.print(&self.rows, &self.column_preferences)
+        formatter.print(&self.rows, &self.column_preferences)?;
+        writeln!(writer)
     }
 }
 
@@ -161,7 +166,7 @@ impl Default for Table<'_> {
         Self {
             rows: vec![],
             title_separator: '-',
-            chain_separator: '-',
+            chain_separator: None,
             total_separator: '-',
             grand_total_separator: '=',
             column_preferences: vec![],

@@ -17,14 +17,12 @@ use journ_core::amount::{Amount, Quantity};
 use journ_core::configuration::Configuration;
 use journ_core::datetime::{DateTimePrecision, JDateTime, JDateTimeRange};
 use journ_core::error::JournResult;
-use journ_core::journal_context::JContext;
 use journ_core::journal_entry::JournalEntry;
 use journ_core::journal_entry_flow::{Flow, LinkedFlow};
 use journ_core::metadata::Metadata;
 use journ_core::tree_id::TreeId;
 use journ_core::unit::Unit;
-use journ_core::valued_amount::ValuedAmount;
-use journ_core::valuer::{SystemValuer, ValuationError, ValueError, ValueResult, Valuer};
+use journ_core::valuer::{SystemValuer, ValuationError, Valuer};
 use linked_hash_set::LinkedHashSet;
 use std::fmt;
 use std::fmt::Formatter;
@@ -70,45 +68,11 @@ impl<'h> Deal<'h> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         entry: &'h JournalEntry<'h>,
-        valued_amount: ValuedAmount<'h>,
-        expenses: ValuedAmount<'h>,
+        adjusted_value: AdjustedValue<'h>,
         linked_flow: Option<LinkedFlow<'h>>,
-        taxable_gain: Option<ValuedAmount<'h>>,
-        uoa: &'h Unit<'h>,
-    ) -> ValueResult<'h, Self> {
-        assert!(!valued_amount.is_nil());
-
-        let amount = valued_amount.amount();
-        let valuation =
-            valued_amount.value_in(uoa).ok_or_else(|| ValueError::ValuationNeeded(uoa, amount))?;
-        let expenses_valuation = expenses
-            .value_in(uoa)
-            .ok_or_else(|| ValueError::ValuationNeeded(uoa, expenses.amount()))?;
-
-        let adjusted_value = AdjustedValue::new(
-            amount,
-            (valuation + expenses_valuation).abs(),
-            expenses_valuation.abs(),
-        );
-
-        let taxable_gain = taxable_gain
-            .map(|tg| tg.value_in(uoa).ok_or_else(|| ValueError::ValuationNeeded(uoa, tg.amount())))
-            .transpose()?;
-
-        Ok(Self { entry, linked_flow: linked_flow.map(Rc::new), taxable_gain, adjusted_value })
-    }
-
-    pub fn zero(unit: &'h Unit<'h>, entry: &'h JournalEntry<'h>, uoa: &'h Unit<'h>) -> Self {
-        let allocator = JContext::get().allocator();
-        Self::new(
-            entry,
-            ValuedAmount::new_in(unit.with_quantity(0), allocator),
-            ValuedAmount::nil(),
-            None,
-            None,
-            uoa,
-        )
-        .unwrap()
+        taxable_gain: Option<Amount<'h>>,
+    ) -> Self {
+        Self { entry, linked_flow: linked_flow.map(Rc::new), taxable_gain, adjusted_value }
     }
 
     pub fn datetime(&self) -> JDateTimeRange {

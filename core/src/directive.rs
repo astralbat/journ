@@ -13,7 +13,7 @@ use crate::journal_node::JournalNode;
 use crate::module::ModuleDirectiveObj;
 use crate::parsing::text_block::{BlockObject, TextBlock, TextBlockBuf};
 use crate::price::Price;
-use crate::unit::{Unit, Units};
+use crate::unit::Unit;
 use chrono_tz::Tz;
 use std::cmp::Ordering;
 use std::fmt::{Debug, Write};
@@ -25,17 +25,17 @@ use std::sync::Arc;
 pub enum DirectiveKind<'h> {
     Entry(&'h JournalEntry<'h>) = 0,
     Price(Arc<Price<'h>>) = 1,
-    Account(Arc<Account<'h>>) = 3,
-    Unit(&'h Unit<'h>) = 4,
-    Units(Units<'h>) = 2,
-    Include(&'h JournalNode<'h>) = 5,
-    Branch(&'h JournalNode<'h>) = 6,
-    Python(&'h JournalNode<'h>) = 7,
-    DateFormat(&'h DateTimeFormat<'h>) = 8,
-    TimeFormat(&'h DateTimeFormat<'h>) = 9,
-    DateTimeFormat(&'h DateTimeFormat<'h>) = 10,
-    TimeZone(Tz) = 11,
-    //Cgt(CgtConfiguration<'h>) = 11,
+    Account(Arc<Account<'h>>) = 4,
+    Accounts(Arc<Account<'h>>) = 3,
+    Unit(&'h Unit<'h>) = 5,
+    Units(&'h Unit<'h>) = 2,
+    Include(&'h JournalNode<'h>) = 6,
+    Branch(&'h JournalNode<'h>) = 7,
+    Python(&'h TextBlock<'h>) = 8,
+    DateFormat(&'h DateTimeFormat<'h>) = 9,
+    TimeFormat(&'h DateTimeFormat<'h>) = 10,
+    DateTimeFormat(&'h DateTimeFormat<'h>) = 11,
+    TimeZone(Tz) = 12,
     Module(&'h dyn ModuleDirectiveObj) = 13,
     Comment(&'h str) = 14,
 }
@@ -140,27 +140,6 @@ impl<'h> Directive<'h> {
     }
 }
 
-/*
-impl<'h> fmt::Display for Directive<'h> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        match &self.parsed {
-            Some(raw) => write!(f, "{}", raw.text()),
-            None => match self.kind() {
-                DirectiveKind::Entry(entry) => {
-                    write!(f, "{}", entry)
-                }
-                DirectiveKind::Price(price) => {
-                    write!(f, "{}", **price)
-                }
-                _ => panic!(
-                    "Cannot display directive without raw text: {:?}; Only entry and price objects may be written",
-                    self.kind
-                ),
-            },
-        }
-    }
-}*/
-
 impl<'h> PartialEq<Directive<'h>> for Directive<'h> {
     fn eq(&self, other: &Directive<'h>) -> bool {
         self.kind == other.kind
@@ -194,226 +173,3 @@ impl BlockObject for Directive<'_> {
         }
     }
 }
-
-/*
-pub struct DirectiveIndex(u64);
-
-impl DirectiveIndex {
-    pub fn new(file_number: u64, directive_line_num: u32) -> DirectiveIndex {
-        DirectiveIndex((file_number << 32) + directive_line_num as u64)
-    }
-}*/
-
-/*
-#[derive(Debug, Clone)]
-pub struct DirectiveLocation<'t> {
-    node: Arc<JournalFile<'t>>,
-    /// The line offset in the journal file from where this directive begins.
-    line_offset: usize,
-}
-impl<'t> DirectiveLocation<'t> {
-    pub fn new(node: Arc<JournalFile>, line_offset: usize) -> DirectiveLocation {
-        DirectiveLocation { node, line_offset }
-    }
-
-    /// Gets the line number of the directive with the first line being 1.
-    pub fn line_number(&self) -> usize {
-        self.line_offset + 1
-    }
-
-    fn filename_or_text(&self) -> &str {
-        self.node.stream().filename().unwrap_or(self.node.stream().text())
-    }
-}
-impl<'t> fmt::Display for DirectiveLocation<'t> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{}", self.filename_or_text(), self.line_offset)
-    }
-}
-impl<'t> PartialEq for DirectiveLocation<'t> {
-    fn eq(&self, other: &Self) -> bool {
-        self.line_offset == other.line_offset && self.filename_or_text() == other.filename_or_text()
-    }
-}
-impl<'t> Eq for DirectiveLocation<'t> {}
-
-impl<'t> PartialOrd for DirectiveLocation<'t> {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl<'t> Ord for DirectiveLocation<'t> {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.filename_or_text().cmp(other.filename_or_text()).then(self.line_offset.cmp(&other.line_offset))
-    }
-}*/
-/*
-pub struct RawDirective<'t> {
-    location: Option<DirectiveLocation<'t>>,
-    leading_space: Box<dyn AsRef<str> + Send + Sync>,
-    contents: Box<dyn AsRef<str> + Send + Sync>,
-}
-
-impl<'t> RawDirective<'t> {
-    pub fn new(
-        leading_space: impl AsRef<str> + Sync + Send + 'static,
-        contents: impl AsRef<str> + Sync + Send + 'static,
-        location: Option<DirectiveLocation<'t>>,
-    ) -> Self {
-        Self { location, leading_space: Box::new(leading_space), contents: Box::new(contents) }
-    }
-
-    pub fn location(&self) -> Option<&DirectiveLocation<'t>> {
-        self.location.as_ref()
-    }
-
-    /// Gets the contents
-    pub fn contents(&self) -> &str {
-        (*self.contents).as_ref()
-    }
-
-    pub fn leading_whitespace(&self) -> &str {
-        (*self.leading_space).as_ref()
-    }
-
-    pub fn set_leading_whitespace(&mut self, space: impl AsRef<str> + Sync + Send + 'static) {
-        self.leading_space = Box::new(space);
-    }
-
-    pub fn first_line(&self) -> &str {
-        (*self.contents).as_ref().lines().next().unwrap().trim()
-    }
-
-    /// All raw trimmed lines within the directive
-    pub fn sub_directives(&self) -> impl Iterator<Item = &str> {
-        (*self.contents).as_ref().trim().lines().skip(1).map(|l| l.trim())
-    }
-}
-
-impl<'t> PartialEq for RawDirective<'t> {
-    fn eq(&self, other: &Self) -> bool {
-        self.location == other.location
-    }
-}
-
-impl<'t> Eq for RawDirective<'t> {}
-
-impl<'t> Ord for RawDirective<'t> {
-    fn cmp(&self, other: &Self) -> cmp::Ordering {
-        self.location.cmp(&other.location)
-    }
-}
-
-impl<'t> PartialOrd for RawDirective<'t> {
-    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-impl<'t> fmt::Display for RawDirective<'t> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}{}", (*self.leading_space).as_ref(), (*self.contents).as_ref())
-    }
-}
-impl<'t> fmt::Debug for RawDirective<'t> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        <Self as fmt::Display>::fmt(self, f)
-    }
-}*/
-
-/*
-#[derive(Debug, Eq)]
-pub struct ParsedDirective<'h, T: 'h> {
-    raw: TextBlock<'h>,
-    item: T,
-}
-
-impl<'h, T> ParsedDirective<'h, T> {
-    pub fn new(raw: TextBlock<'h>, item: T) -> Self {
-        Self { raw, item }
-    }
-
-    pub fn raw(&self) -> &TextBlock<'h> {
-        &self.raw
-    }
-
-    pub fn item(&self) -> &T {
-        &self.item
-    }
-
-    pub fn item_mut(&mut self) -> &mut T {
-        &mut self.item
-    }
-
-    pub fn into_inner(self) -> T {
-        self.item
-    }
-}
-
-impl<'h, T> PartialEq for ParsedDirective<'h, T>
-where
-    T: PartialEq,
-{
-    fn eq(&self, other: &Self) -> bool {
-        self.item == other.item
-    }
-}
-
-impl<'h, T> fmt::Display for ParsedDirective<'h, T>
-where
-    T: fmt::Display,
-{
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.item)
-    }
-}
-
-macro_rules! impl_partial_cmp_pd {
-    ($type:ty) => {
-        impl<'h> PartialOrd for ParsedDirective<'h, $type> {
-            fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-                Some(self.cmp(other))
-            }
-        }
-    };
-}
-macro_rules! impl_cmp_pd {
-    ($type:ty) => {
-        impl<'h> Ord for ParsedDirective<'h, $type> {
-            fn cmp(&self, other: &Self) -> Ordering {
-                self.item.cmp(&other.item)
-            }
-        }
-    };
-}
-impl_partial_cmp_pd!(JournalEntry<'h>);
-impl_cmp_pd!(JournalEntry<'h>);
-impl_partial_cmp_pd!(Arc<Price<'h>>);
-impl_cmp_pd!(Arc<Price<'h>>);
-impl_partial_cmp_pd!(Arc<Account<'h>>);
-impl_cmp_pd!(Arc<Account<'h>>);
-impl_partial_cmp_pd!(&Unit<'_>);
-impl_cmp_pd!(&Unit<'_>);
-impl_partial_cmp_pd!(Arc<String>);
-impl_cmp_pd!(Arc<String>);
-impl PartialOrd for ParsedDirective<'_, Arc<Tz>> {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        self.item.name().partial_cmp(other.item.name())
-    }
-}
-impl<T> Deref for ParsedDirective<'_, T> {
-    type Target = T;
-    fn deref(&self) -> &Self::Target {
-        &self.item
-    }
-}
-impl<T> DerefMut for ParsedDirective<'_, T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.item
-    }
-}
-
-/// Directives and their components may have whitespace before the start of their content.
-pub trait WhitespacePrefixed {
-    fn leading_whitespace(&self) -> &'static str;
-}*/

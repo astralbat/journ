@@ -15,6 +15,7 @@ use journ_core::datetime::JDateTimeRange;
 use journ_core::metadata::Metadata;
 use journ_core::unit::Unit;
 use linked_hash_set::LinkedHashSet;
+use smallvec::SmallVec;
 use smartstring::alias::String as SS;
 use std::fmt;
 use std::fmt::Write;
@@ -323,7 +324,7 @@ impl<'h> PoolEvent<'h> {
     pub fn acquired(&self) -> Option<AdjustedValue<'h>> {
         match &self.event_kind {
             PoolEventKind::PooledDeal(dh)
-                if dh.datetime().start() == self.event_datetime().start() && dh.value() > 0 =>
+                if dh.datetime().start() == self.event_datetime().start() && dh.amount() > 0 =>
             {
                 Some(dh.adjusted_value())
             }
@@ -433,7 +434,7 @@ impl<'h> PoolEvent<'h> {
         }
     }
 
-    pub fn entry_metadata_by_key(&self, key: &str) -> LinkedHashSet<&Metadata<'h>> {
+    pub fn entry_metadata_by_key(&self, key: &str) -> SmallVec<[&Metadata<'h>; 4]> {
         match &self.event_kind {
             PoolEventKind::PooledDeal(dh) => dh.entry_metadata_by_key(key),
             PoolEventKind::MovedFrom(dh, _)

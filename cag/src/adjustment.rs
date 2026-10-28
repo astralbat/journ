@@ -18,7 +18,6 @@ use journ_core::unit::Unit;
 use log::trace;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::One;
-use smallvec::SmallVec;
 use std::fmt;
 use std::fmt::Formatter;
 use yaml_rust2::Yaml;
@@ -162,7 +161,6 @@ pub struct Adjustment<'h> {
     /// If set, only apply the adjustment to the specified pool
     pool: Option<&'h str>,
     entry: &'h JournalEntry<'h>,
-    metadata: SmallVec<[Metadata<'h>; 4]>,
     datetime: JDateTimeRange,
     amount_adjustments: Vec<AmountAdjustment<'h>>,
     properties: Vec<Metadata<'h>>,
@@ -173,7 +171,6 @@ impl<'h> Adjustment<'h> {
     pub fn new(
         position: usize,
         entry: &'h JournalEntry<'h>,
-        metadata: SmallVec<[Metadata<'h>; 4]>,
         pool: Option<&'h str>,
         amount_adjustments: Vec<AmountAdjustment<'h>>,
     ) -> Self {
@@ -190,7 +187,6 @@ impl<'h> Adjustment<'h> {
         Adjustment {
             datetime,
             entry,
-            metadata,
             pool,
             amount_adjustments,
             id: entry.id().branch(position + 1),

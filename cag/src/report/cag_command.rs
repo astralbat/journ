@@ -6,11 +6,11 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::computer::CapitalGainsComputer;
-use crate::pool_event::PoolEvent;
+use crate::pool_event::{PoolEvent, PoolEventKind};
 use crate::report::cmd_line::CagArguments;
 use crate::report::expr::context::CagContext;
 use clap::Parser;
-use journ_core::configuration::{AccountFilter, Filter, UnitFilter};
+use journ_core::configuration::{AccountFilter, Configuration, Filter, UnitFilter};
 use journ_core::error::JournResult;
 use journ_core::journal_context::JContext;
 use journ_core::module::ModuleCommand;
@@ -88,7 +88,9 @@ impl CagCommand {
         let mut rows = vec![];
 
         if chain_pos > 0 {
-            rows.push(table.create_chain_separator());
+            if let Some(chain_sep) = table.create_chain_separator() {
+                rows.push(chain_sep);
+            }
         }
         if let Some(title) = &self.title {
             let (title, title_sep) = table.create_title_row(
@@ -351,6 +353,10 @@ impl Command for CagCommand {
     fn begin_and_end_cmd(&self) -> &BeginAndEndCommand {
         &self.begin_and_end_cmd
     }
+
+    fn table_fmt_cmd(&self) -> &TableFormatCommand {
+        &self.table_fmt_cmd
+    }
 }
 
 impl ModuleCommand for CagCommand {
@@ -377,6 +383,10 @@ impl ChainableCommand for CagCommand {
 }
 
 impl ExecCommand for CagCommand {
+    fn with_config<'h>(&mut self, config: &Configuration<'h>) {
+        self.datetime_fmt_cmd = self.datetime_fmt_cmd.or_config(config);
+    }
+
     fn execute<'h, 'a, 'cell>(
         &self,
         chained: Option<ChainingResult<'h, 'a, 'cell>>,
@@ -421,6 +431,20 @@ impl ExecCommand for CagCommand {
         };
         let (data, total_row) = plan.execute(
             capital_gains.events().iter().filter_map(move |e| {
+                // Set the config in context.
+                let config = match e.kind() {
+                    PoolEventKind::PooledDeal(summary)
+                    | PoolEventKind::MovedTo(summary, _)
+                    | PoolEventKind::MovedFrom(summary, _) => {
+                        summary.entries().last().unwrap().config()
+                    }
+                    PoolEventKind::Match(details) => {
+                        details.originator().entries().last().unwrap().config()
+                    }
+                    PoolEventKind::Adjustment(adj) => adj.entry().config(),
+                };
+                JContext::get().set_config(config.clone());
+
                 let mut context = CagContext::new(e);
                 for filter_expr in &self.filter {
                     match filter_expr.eval(&mut context) {
@@ -491,7 +515,6 @@ impl ExecCommand for CagCommand {
 
         // Always write the price databases.
         JContext::get()
-            .journal()
             .config()
             .price_databases()
             .into_iter()

@@ -5,19 +5,28 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
+use crate::ext::StrExt;
 use crate::report::table2::cell::ModifiableCell;
 use crate::report::table2::fmt::CellFormatter;
 use crate::report::table2::{Cell, CellRef, CellWidth, ColumnWidth, ShrinkableCell};
 use std::fmt;
 use std::fmt::Formatter;
 
+#[derive(Default, Copy, Clone, PartialEq, Eq)]
+pub enum EllipsisPolicy {
+    AfterMidSep(char),
+    #[default]
+    End,
+}
+
 pub struct EllipsisCell<'c> {
     modifiable_cell: ModifiableCell<'c>,
+    policy: EllipsisPolicy,
 }
 
 impl<'c> EllipsisCell<'c> {
-    pub fn new<C: Into<CellRef<'c>>>(cell: C) -> Self {
-        Self { modifiable_cell: ModifiableCell::new(cell) }
+    pub fn new<C: Into<CellRef<'c>>>(cell: C, policy: EllipsisPolicy) -> Self {
+        Self { modifiable_cell: ModifiableCell::new(cell), policy }
     }
 }
 
@@ -68,20 +77,55 @@ impl ShrinkableCell for EllipsisCell<'_> {
             );
 
             let width_diff = line.width().sum() - target_width.sum();
+            let trim_len = width_diff + 2;
             if width_diff > 0 {
-                let trim_len = width_diff + 2;
-                let i = line.char_indices().rev().nth(trim_len - 1).map(|(i, _)| i).unwrap_or(0);
-                let trunc_len = line.len() - (line.len() - i);
-                // Keep at least two chars
-                if trunc_len < 2 {
-                    return 0;
-                }
-                line.truncate(trunc_len);
-                while line.ends_with(' ') {
-                    line.pop();
-                }
-                line.push_str("..");
-                success_len = trim_len;
+                let (start_pos, end_pos) = match self.policy {
+                    EllipsisPolicy::AfterMidSep(sep) => {
+                        match line.find_closest_to_mid("..").or(line.find_closest_to_mid(sep)) {
+                            Some(pos) => {
+                                let (mut start_pos, mut end_pos) = (
+                                    pos,
+                                    if line[pos..].starts_with("..") { pos + 2 } else { pos + 1 },
+                                );
+
+                                while (start_pos..end_pos).len() < trim_len {
+                                    let left = &line[..start_pos];
+                                    let right = &line[end_pos..];
+                                    if left.len() > right.len() {
+                                        match left.chars().rev().position(|c| c == sep) {
+                                            Some(i) => start_pos = left.len() - i - 1,
+                                            // Retain first component
+                                            None => break,
+                                        }
+                                    } else {
+                                        match right.chars().position(|c| c == sep) {
+                                            Some(i) => end_pos += i + 1,
+                                            // Retain last component
+                                            None => break,
+                                        }
+                                    }
+                                }
+                                (start_pos, end_pos)
+                            }
+                            None => return 0,
+                        }
+                    }
+                    EllipsisPolicy::End => {
+                        let mut start_pos =
+                            line.char_indices().rev().nth(trim_len).map(|(i, _)| i).unwrap_or(0);
+                        while line[..start_pos].ends_with(' ') {
+                            start_pos -= 1;
+                        }
+                        let end_pos = line.len();
+                        // Keep at least two chars
+                        if (start_pos..end_pos).len() < 2 {
+                            return 0;
+                        }
+                        (start_pos, end_pos)
+                    }
+                };
+                line.replace_range(start_pos..end_pos, "..");
+                success_len = (start_pos..end_pos).len() - 2;
             }
         }
         success_len

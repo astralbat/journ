@@ -87,49 +87,53 @@ impl Posting {
     }
 
     fn set_unit_value(&self, unit_value: &str) -> PyLedgerResult<()> {
-        let mut entry = self.entry.lock().unwrap();
-        let mut config = entry.config().clone();
-        let pst = entry.find_posting_mut(&self.posting_id).unwrap();
-        let unit_value_alloc = crate::bindings_pyo3::ALLOCATOR.alloc(unit_value.to_string());
+        self.context.with(|| {
+            let mut entry = self.entry.lock().unwrap();
+            let mut config = entry.config().clone();
+            let pst = entry.find_posting_mut(&self.posting_id).unwrap();
+            let unit_value_alloc = crate::bindings_pyo3::ALLOCATOR.alloc(unit_value.to_string());
 
-        let parse_res = parse!(unit_value_alloc, parsing::amount::amount, &mut config)?.1;
+            let parse_res = parse!(unit_value_alloc, parsing::amount::amount, &mut config)?.1;
 
-        if !parse_res.is_positive() {
-            return Err(PyLedgerError::new(err!("Unit value must be positive")));
-        }
-        if pst.value_units().any(|u| u == parse_res.unit()) {
-            return Err(PyLedgerError::new(err!(
-                "Valuation already set for unit: {}",
-                parse_res.unit()
-            )));
-        }
+            if !parse_res.is_positive() {
+                return Err(PyLedgerError::new(err!("Unit value must be positive")));
+            }
+            if pst.value_units().any(|u| u == parse_res.unit()) {
+                return Err(PyLedgerError::new(err!(
+                    "Valuation already set for unit: {}",
+                    parse_res.unit()
+                )));
+            }
 
-        pst.set_valuation(PostingValuation::new_unit(parse_res));
-        Ok(())
+            pst.set_valuation(PostingValuation::new_unit(parse_res));
+            Ok(())
+        })
     }
 
     fn set_total_value(&self, total_value: &str) -> PyLedgerResult<()> {
-        let mut entry = self.entry.lock().unwrap();
-        let mut config = entry.config().clone();
-        let pst = entry.find_posting_mut(&self.posting_id).unwrap();
-        let total_value_alloc = crate::bindings_pyo3::ALLOCATOR.alloc(total_value.to_string());
+        self.context.with(|| {
+            let mut entry = self.entry.lock().unwrap();
+            let mut config = entry.config().clone();
+            let pst = entry.find_posting_mut(&self.posting_id).unwrap();
+            let total_value_alloc = crate::bindings_pyo3::ALLOCATOR.alloc(total_value.to_string());
 
-        let mut parse_res = parse!(total_value_alloc, parsing::amount::amount, &mut config)?.1;
-        if !parse_res.is_positive() {
-            return Err(PyLedgerError::new(err!("Total value must be positive")));
-        }
-        if pst.value_units().any(|u| u == parse_res.unit()) {
-            return Err(PyLedgerError::new(err!(
-                "Valuation already set for unit: {}",
-                parse_res.unit()
-            )));
-        }
+            let mut parse_res = parse!(total_value_alloc, parsing::amount::amount, &mut config)?.1;
+            if !parse_res.is_positive() {
+                return Err(PyLedgerError::new(err!("Total value must be positive")));
+            }
+            if pst.value_units().any(|u| u == parse_res.unit()) {
+                return Err(PyLedgerError::new(err!(
+                    "Valuation already set for unit: {}",
+                    parse_res.unit()
+                )));
+            }
 
-        if pst.amount().is_negative() {
-            parse_res = -parse_res;
-        }
-        pst.set_valuation(PostingValuation::new_total(parse_res, false));
-        Ok(())
+            if pst.amount().is_negative() {
+                parse_res = -parse_res;
+            }
+            pst.set_valuation(PostingValuation::new_total(parse_res, false));
+            Ok(())
+        })
     }
 
     /// Removes the valuation specified by the unit code `unit`, returning `true`

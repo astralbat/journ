@@ -115,7 +115,7 @@ where
                 };
                 unit.set_format(unit_format(false)(consumed.clone())?.1);
                 let mut mut_config = input.config_mut();
-                mut_config.merge_unit(&unit);
+                mut_config.merge_unit(unit, &[], None);
                 mut_config.get_unit(unit_code).unwrap()
             }
         };

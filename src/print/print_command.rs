@@ -6,7 +6,7 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::ExecCommand;
-use journ_core::configuration::{AccountFilter, Filter};
+use journ_core::configuration::{AccountFilter, Configuration, Filter};
 use journ_core::datetime::JDateTime;
 use journ_core::directive::{Directive, DirectiveKind};
 use journ_core::error::JournResult;
@@ -16,6 +16,7 @@ use journ_core::journal_node::JournalNode;
 use journ_core::report::command::arguments::{Command, DateTimeFormatCommand};
 use journ_core::report::command::chained_result::ChainingResult;
 use journ_core::report::command::cmd_line::BeginAndEndCommand;
+use journ_core::report::command::table_format_args::TableFormatCommand;
 use std::ops::RangeBounds;
 use std::path::Path;
 use std::process::exit;
@@ -35,6 +36,10 @@ impl Command for PrintCommand {
 
     fn begin_and_end_cmd(&self) -> &BeginAndEndCommand {
         &self.begin_and_end_cmd
+    }
+
+    fn table_fmt_cmd(&self) -> &TableFormatCommand {
+        panic!("PrintCommand does not support table formatting")
     }
 }
 
@@ -81,6 +86,10 @@ impl PrintCommand {
 }
 
 impl ExecCommand for PrintCommand {
+    fn with_config<'h>(&mut self, config: &Configuration<'h>) {
+        self.datetime_fmt_cmd = self.datetime_fmt_cmd.or_config(config);
+    }
+
     fn execute<'h, 'a, 'cell>(
         &self,
         _chained: Option<ChainingResult<'h, 'a, 'cell>>,

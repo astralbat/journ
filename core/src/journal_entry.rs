@@ -12,7 +12,6 @@ use crate::configuration::Configuration;
 use crate::datetime::JDateTime;
 use crate::datetime::JDateTimeRange;
 use crate::error::{BlockContext, BlockContextError, JournError, JournResult};
-use crate::ext::RangeBoundsExt;
 use crate::journal_entry_flow::{Flow, Flows};
 use crate::journal_node::JournalNode;
 use crate::metadata::Metadata;
@@ -27,6 +26,7 @@ use rust_decimal::prelude::Zero;
 use rust_decimal_macros::*;
 use smallvec::{SmallVec, smallvec};
 use std::fmt::Write;
+use std::hash::Hash;
 use std::ops::{Bound, RangeBounds};
 use std::{cmp, fmt};
 
@@ -398,15 +398,18 @@ impl<'h> JournalEntry<'h> {
     }
 
     /// Checks and creates a new modified entry with derived entries and elided postings.
+    ///
+    /// This checks that amounts are balanced, but does not require the valuations (if specified on all postings) to be balanced.
+    /// This is because valuations are assumed to be rounded to the precision of their quantity, and so may not balance exactly on
+    /// total valuations.
+    ///
+    /// The `LinearSystemValuer` will check to ensure that valuations, if provided, are done so in a consistent way across
+    /// all postings.
     pub fn check(&mut self) -> JournResult<()> {
         self.create_elided_postings()
             .and_then(|_| self.derive_posting_amount())
             .and_then(|_| self.check_amounts_balanced())
             .and_then(|_| LinearSystemValuer::check(self))
-        // Commented out whilst linear system valuer improvements are made. This valuer
-        // could perhaps do the job better.
-        //.and_then(|_| self.check_valuations_balanced())
-        //.and_then(|_| self.check_valuations_consistent())
     }
 
     /// Create additional postings on the entry in situations with more than once unit
@@ -546,137 +549,6 @@ impl<'h> JournalEntry<'h> {
         }
     }
 
-    /// Where a particular valuation unit is specified against all postings, then check that
-    /// valuation on the combined debit side is equal to the combined valuation on the credit side.
-    /// This will not check if valuations are inconsistently applied at varying prices e.g. $1 @@ €1; $1 @@ €2.
-    fn check_valuations_balanced(&self) -> JournResult<()> {
-        'next_unit: for unit in self.value_units() {
-            let mut credits_total = unit.with_quantity(0);
-            let mut debits_total = unit.with_quantity(0);
-            for pst in self.postings().filter(|p| p.account().is_balanced()) {
-                if let Some(val) = pst.valued_amount().value_in(unit) {
-                    if val > 0 {
-                        debits_total += val;
-                    } else {
-                        credits_total += val;
-                    }
-                }
-                /*
-                // We allow for there to be multiple valuations in the same unit. We just take the first one
-                // for our needs and leave it up to the ValuedAmount to ensure they're consistent.
-                if let Some(val) =
-                    pst.valued_amount().valuations().find(|v| v.unit() == unit && !v.is_elided())
-                {
-                    match val {
-                        Valuation::Total(value, _elided) => {
-                            if pst.is_credit() {
-                                credits_total += **value;
-                            } else {
-                                debits_total += **value;
-                            }
-                        }
-                        Valuation::Unit(value) => {
-                            let total = (**value * pst.amount().quantity().abs()).rounded();
-                            if pst.is_credit() {
-                                credits_total += total;
-                            } else {
-                                debits_total += total;
-                            }
-                        }
-                    }*/
-                else {
-                    continue 'next_unit;
-                }
-            }
-            let sum = credits_total.rounded() + debits_total.rounded();
-            if !sum.is_zero() {
-                return Err(
-                    err!(err!("Credits: {}, Debits: {} ({} difference)", credits_total.format_precise(), debits_total.format_precise(), sum.format_precise()); "Unable to balance valuations in entry"),
-                );
-            }
-        }
-        Ok(())
-    }
-
-    /// Check that where posting valuations are provided, they are done so in a consistent way, using the same price for all the postings
-    /// with the same amount unit and valuation unit.
-    /// Due to expected rounding of the valuations, the real price here is eluded. Thus we place error bars on the valuations, allowing
-    /// a range of permitted prices. All of these ranges must intersect, for if they don't, we have proven that no single price can exist
-    /// to satisfy all of the postings.
-    fn check_valuations_consistent(&self) -> JournResult<()> {
-        struct PriceRangeEntry<'h> {
-            base_unit: &'h Unit<'h>,
-            quote_unit: &'h Unit<'h>,
-            range: (Bound<Decimal>, Bound<Decimal>),
-        }
-        let mut price_range_entries = SmallVec::<[PriceRangeEntry; 2]>::new();
-        for pst in self.postings() {
-            if pst.amount() == 0 {
-                for valuation in pst.valuations() {
-                    if !valuation.value().is_zero() {
-                        return Err(err!(err!(
-                                "Value should be 0 for 0 posting amounts: {}",
-                                pst
-                            ); "Inconsistent valuation"));
-                    }
-                }
-            } else {
-                'next_curr: for unit in pst.value_units() {
-                    let pst_value = pst.amount_in(unit).unwrap().abs();
-                    let pst_value_range = pst_value.rounding_error();
-                    // Calculate the min and max possible prices. Handle rounded values 0 or close to 0
-                    // as we are treating valuations amounts and valuations using abs(), we know the bounds will never be negative.
-                    let price_bound = |val_bound: Bound<Amount>| match val_bound {
-                        Bound::Included(v) => Bound::Included(
-                            cmp::max(v.quantity(), Decimal::zero()) / pst.amount().quantity().abs(),
-                        ),
-                        Bound::Excluded(v) => Bound::Excluded(
-                            cmp::max(v.quantity(), Decimal::zero()) / pst.amount().quantity().abs(),
-                        ),
-                        _ => unreachable!(),
-                    };
-                    let pst_price_range =
-                        (price_bound(pst_value_range.0), price_bound(pst_value_range.1));
-
-                    if let Some(entry) = price_range_entries
-                        .iter_mut()
-                        .find(|e| e.base_unit == pst.unit() && e.quote_unit == pst_value.unit())
-                    {
-                        match entry.range.intersection(&pst_price_range) {
-                            Some(intersection) => entry.range = intersection,
-                            None => {
-                                let block_context = match pst.block() {
-                                    Some(block) => BlockContext::from(block),
-                                    None => {
-                                        let mut buf = TextBlockBuf::new();
-                                        buf.write(self, Some(self.config()));
-                                        BlockContext::from(&buf.as_text_block())
-                                    }
-                                };
-                                return Err(err!(BlockContextError::new(
-                                    block_context,
-                                    format!(
-                                        "Posting valuation: {} @@ {} is not consistent with previous postings. Expected to be in range {}",
-                                        pst.amount(),
-                                        pst_value,
-                                        entry.range.to_string()
-                                    )
-                                )));
-                            }
-                        }
-                        continue 'next_curr;
-                    }
-                    price_range_entries.push(PriceRangeEntry {
-                        base_unit: pst.unit(),
-                        quote_unit: unit,
-                        range: pst_price_range,
-                    });
-                }
-            }
-        }
-        Ok(())
-    }
-
     /// Creates an error that includes the text block of the entry.
     pub fn err(&self, msg: String) -> JournError {
         let context = match self.text_block {
@@ -690,9 +562,9 @@ impl<'h> JournalEntry<'h> {
     /// are by default, skipped.
     ///
     /// At present, two entries are considered the same when they have:
-    /// * this date range contains the other date range
+    /// * this date range intersects the other date range
     /// * different parent nodes
-    /// * overlapping postings, metadata where one is a subset of another (must be consitent with date).
+    /// * overlapping postings, metadata where one is a subset of another (must be consistent with date).
     ///
     /// This should give a good compromise in being:
     /// * `false` for identical entries in the same file (repeated transactions on the same day).
@@ -711,7 +583,9 @@ impl<'h> JournalEntry<'h> {
         if self.id.parent() == other.id.parent() {
             return false;
         }
-        if !self.datetime_range.contains(&other.datetime_range) {
+
+        // This has been relaxed from this datetime range being a superset of the other datetime range.
+        if !self.datetime_range.intersects(&other.datetime_range) {
             return false;
         }
 
@@ -802,6 +676,12 @@ impl Ord for JournalEntry<'_> {
             .start()
             .cmp(&other.datetime_range.start())
             .then_with(|| self.id.cmp(&other.id))
+    }
+}
+
+impl Hash for JournalEntry<'_> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.id.hash(state);
     }
 }
 

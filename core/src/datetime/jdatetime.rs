@@ -6,7 +6,7 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::configuration::Configuration;
-use crate::datetime::{DateTimeFormat, DateTimePrecision};
+use crate::datetime::{DEFAULT_DATETIME_FORMAT, DateTimeFormat, DateTimePrecision};
 use crate::datetime::{JDate, JTime};
 use crate::err;
 use crate::error::JournResult;
@@ -31,8 +31,7 @@ use std::{fmt, iter};
 #[derive(Copy, Clone)]
 pub struct JDateTime {
     datetime: DateTime<Tz>,
-    precision: DateTimePrecision, //pub(super) datetime_format: &'h DateTimeFormat<'h>,
-                                  //print_utc_marker: bool,
+    precision: DateTimePrecision,
 }
 
 pub static MIN_DATETIME: Lazy<JDateTime> = Lazy::new(|| JDateTime {
@@ -45,12 +44,7 @@ pub static MAX_DATETIME: Lazy<JDateTime> = Lazy::new(|| JDateTime {
 });
 
 impl JDateTime {
-    pub fn new(
-        datetime: DateTime<Tz>,
-        precision: DateTimePrecision,
-        //format: &'h DateTimeFormat<'h>,
-        //print_utc_marker: bool,
-    ) -> Self {
+    pub fn new(datetime: DateTime<Tz>, precision: DateTimePrecision) -> Self {
         Self { datetime, precision } //, datetime_format: format, print_utc_marker }
     }
 
@@ -88,6 +82,14 @@ impl JDateTime {
             // Any prefix is valid here. E.g. " 10:" but not " ".
             let saved_remainder = parsed_remainder;
             for ndi in dtf.non_date_items() {
+                if parsed_remainder.starts_with(' ')
+                    && !matches!(ndi, &Item::Literal(" "))
+                    && !matches!(ndi, Item::OwnedLiteral(s) if s.as_ref() == " ")
+                {
+                    // Chrono parsing is too lenient (open bug #660) and gobbles up leading whitespace. We want
+                    // to be strict and only allow this if specified in the format.
+                    break;
+                }
                 match parse_and_remainder(&mut parsed, parsed_remainder, iter::once(ndi)) {
                     Ok(rem) => parsed_remainder = rem,
                     Err(_) => break,
@@ -145,43 +147,8 @@ impl JDateTime {
                 _ => return Err(err!("Time not valid in timezone on this date")),
             },
             precision: self.precision,
-            //datetime_format: dtf,
-            //print_utc_marker: time.map(|t| t.print_utc_marker).unwrap_or(false),
         })
     }
-
-    /*
-    pub fn from_date_time(
-        date: JDate,
-        time: Option<JTime>,
-        tz: Tz,
-        //dtf: &'h DateTimeFormat<'h>,
-    ) -> JournResult<Self> {
-        let timezone = if time.map(|t| t.print_utc_marker).unwrap_or(false) { Tz::UTC } else { tz };
-
-        Ok(Self {
-            datetime: match timezone.from_local_datetime(&NaiveDateTime::new(
-                *date,
-                time.map(|t| *t).unwrap_or_else(|| NaiveTime::from_hms_opt(0, 0, 0).unwrap()),
-            )) {
-                LocalResult::Single(t) => t,
-                LocalResult::Ambiguous(t, _) => {
-                    warn!("Ambiguous local datetime: {}", t);
-                    t
-                }
-                _ => return Err(err!("Time not valid in timezone on this date")),
-            },
-            //datetime_format: dtf,
-            //print_utc_marker: time.map(|t| t.print_utc_marker).unwrap_or(false),
-        })
-    }*/
-    /*
-    pub fn from_datetime(
-        datetime: DateTime<Tz>,
-        //datetime_format: &'h DateTimeFormat<'h>,
-    ) -> JDateTime<'h> {
-        JDateTime { datetime } //, datetime_format, print_utc_marker: false }
-    }*/
 
     pub fn datetime(&self) -> DateTime<Tz> {
         self.datetime
@@ -219,20 +186,6 @@ impl JDateTime {
         format.format(Some(naive_local.date()), Some(naive_local.time()), precision)
     }
 
-    /*
-    pub fn write<'h, W: fmt::Write>(
-        &self,
-        writer: &mut W,
-        format: &DateTimeFormat<'h>,
-    ) -> fmt::Result {
-        let naive_local = self.datetime.naive_local();
-
-        write!(
-            writer,
-            "{}",
-            format.format(Some(naive_local.date()), Some(naive_local.time()), self.precision)
-        )
-    }*/
     pub fn format_for_entry<'h, 'a>(
         &'a self,
         entry_config: &'a Configuration<'h>,
@@ -255,39 +208,8 @@ impl JDateTime {
         DelayedFormat::new(Some(naive_local.date()), Some(naive_local.time()), items_iter)
     }
 
-    /*
-    pub fn formatter(&self) -> &'h DateTimeFormat<'h> {
-        self.datetime_format
-    }*/
-
-    /*
-    pub fn with_date_and_time_format(
-        &self,
-        date_format: &'h DateFormat<'h>,
-        time_format: &'h TimeFormat<'h>,
-    ) -> JDateTime<'h> {
-        JDateTime { date_format: Some(date_format), ..*self }
-    }*/
-    /*
-    pub fn time_format(&self) -> Option<&'h TimeFormat<'h>> {
-        self.time_format
-    }
-
-    pub fn with_time_format(&self, time_format: &'h TimeFormat<'h>) -> JDateTime<'h> {
-        JDateTime { time_format: Some(time_format), ..*self }
-    }
-
-    pub fn with_datetime_format(&self, datetime_format: &'h DateTimeFormat<'h>) -> JDateTime<'h> {
-        JDateTime { datetime_format: Some(datetime_format), ..*self }
-    }*/
-
     pub fn with_timezone(&self, tz: Tz) -> JDateTime {
-        JDateTime {
-            datetime: self.datetime.with_timezone(&tz),
-            ..*self //date_format: self.date_format,
-                    //time_format: self.time_format,
-                    //print_utc_marker: self.print_utc_marker && tz == Tz::UTC,
-        }
+        JDateTime { datetime: self.datetime.with_timezone(&tz), ..*self }
     }
 
     pub fn with_precision(&self, precision: DateTimePrecision) -> JDateTime {
@@ -314,25 +236,8 @@ impl JDateTime {
         datetime_utc: &NaiveDateTime,
         precision: DateTimePrecision,
     ) -> JDateTime {
-        JDateTime {
-            datetime: self.timezone().from_utc_datetime(datetime_utc),
-            precision, //date_format: self.date_format,
-                       //time_format: self.time_format,
-                       //print_utc_marker: self.print_utc_marker,
-        }
+        JDateTime { datetime: self.timezone().from_utc_datetime(datetime_utc), precision }
     }
-
-    /*
-    /// Gets how precise this datetime is if it were to be printed; its resolution.
-    pub fn precision(&self) -> DateTimePrecision {
-        match self.time_format {
-            Some(tf) => tf.precision(),
-            None => match self.date_format {
-                Some(df) => df.precision(),
-                None => DateTimePrecision::Second,
-            },
-        }
-    }*/
 
     /// Increments the datetime based on the most precise component of the time or date format.
     pub fn increment(&self) -> Self {
@@ -358,31 +263,28 @@ impl JDateTime {
             DateTimePrecision::Week => *self + Duration::days(7),
         }
     }
-
-    /*
-    pub fn with_date_and_time_format(
-        &self,
-        date_format: Option<&'h DateFormat<'h>>,
-        time_format: Option<&'h TimeFormat<'h>>,
-    ) -> JDateTime<'h> {
-        JDateTime { date_format, time_format, ..*self }
-    }*/
 }
 
 impl fmt::Display for JDateTime {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        let cmd = JContext::get().cmd();
-        let dtf = cmd.datetime_fmt_cmd().datetime_format_or_default();
-        let tz = cmd.datetime_fmt_cmd().timezone_or_default();
+        let cmd = JContext::get().cmd_opt();
+        let dtf = cmd
+            .as_ref()
+            .and_then(|cmd| cmd.datetime_fmt_cmd().datetime_format())
+            .unwrap_or_else(|| &DEFAULT_DATETIME_FORMAT);
+        let tz = cmd.as_ref().and_then(|cmd| cmd.datetime_fmt_cmd().timezone()).unwrap_or_default();
         write!(f, "{}", self.with_timezone(tz).format(dtf))
     }
 }
 
 impl fmt::Debug for JDateTime {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        let cmd = JContext::get().cmd();
-        let dtf = cmd.datetime_fmt_cmd().datetime_format_or_default();
-        let tz = cmd.datetime_fmt_cmd().timezone_or_default();
+        let cmd = JContext::get().cmd_opt();
+        let dtf = cmd
+            .as_ref()
+            .and_then(|cmd| cmd.datetime_fmt_cmd().datetime_format())
+            .unwrap_or_else(|| &DEFAULT_DATETIME_FORMAT);
+        let tz = cmd.as_ref().and_then(|cmd| cmd.datetime_fmt_cmd().timezone()).unwrap_or_default();
         // Format with second precision for debug.
         write!(
             f,
@@ -391,31 +293,6 @@ impl fmt::Debug for JDateTime {
         )
     }
 }
-
-/*
-impl From<JDateTime> for SS {
-    fn from(value: JDateTime) -> Self {
-        let mut s = SS::new();
-        fmt::write(&mut s, format_args!("{}", value)).unwrap();
-        s
-    }
-}*/
-
-/*
-impl table2::Cell for JDateTime {
-    fn print<'format>(
-        &self,
-        f: &mut dyn CellFormatter,
-        line: usize,
-        _width: Option<ColumnWidth>,
-    ) -> fmt::Result {
-        if line == 0 { write!(f, "{}", self) } else { Err(fmt::Error) }
-    }
-
-    fn width(&self) -> CellWidth {
-        CellWidth::Unary(self.to_string().chars().count())
-    }
-}*/
 
 impl PartialEq<JDateTime> for JDateTime {
     fn eq(&self, other: &JDateTime) -> bool {
@@ -464,5 +341,41 @@ impl Sub<Duration> for JDateTime {
 
     fn sub(self, rhs: Duration) -> Self::Output {
         JDateTime { datetime: self.datetime.sub(rhs), ..self }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::datetime::{DateFormatMode, DateTimeFormat, JDateTime};
+    use chrono::{Datelike, Timelike};
+    use chrono_tz::Tz;
+
+    #[test]
+    fn test_parse_datetime() {
+        let dtf = DateTimeFormat::parse_to_owned("yyyy-mm-dd hh:mm:ss", DateFormatMode::DateTime)
+            .unwrap();
+        let tz: Tz = "America/New_York".parse().unwrap();
+        let input = "2024-06-15 14:30:00";
+        let (_, jdt) = JDateTime::parse(dtf, tz)(input).unwrap();
+        assert_eq!(jdt.timezone(), tz);
+        assert_eq!(jdt.datetime().year(), 2024);
+        assert_eq!(jdt.datetime().month(), 6);
+        assert_eq!(jdt.datetime().day(), 15);
+        assert_eq!(jdt.datetime().hour(), 14);
+        assert_eq!(jdt.datetime().minute(), 30);
+        assert_eq!(jdt.datetime().second(), 0);
+    }
+
+    #[test]
+    fn test_parse_does_not_consume_double_space() {
+        let dtf = DateTimeFormat::parse_to_owned("yyyy-mm-dd hh:mm:ss", DateFormatMode::DateTime)
+            .unwrap();
+        let input = "2024-06-15 14:30:00  ";
+        let (rem, _) = JDateTime::parse(dtf, Tz::UTC)(input).unwrap();
+        assert_eq!(rem, "  ");
+
+        let input = "2024-06-15  09:11";
+        let (rem, _) = JDateTime::parse(dtf, Tz::UTC)(input).unwrap();
+        assert_eq!(rem, "  09:11");
     }
 }

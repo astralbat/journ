@@ -8,7 +8,7 @@
 use crate::ext::NumExt;
 use crate::report::table2;
 use crate::report::table2::{
-    AlignedCell, Alignment, BlankCell, EllipsisCell, SpaceDistribution, StyledCell,
+    AlignedCell, Alignment, BlankCell, EllipsisCell, EllipsisPolicy, SpaceDistribution, StyledCell,
 };
 use crate::report::term_style::{Colour, Style};
 use crate::unit;
@@ -292,7 +292,12 @@ impl<'h> Amount<'h> {
 
     /// Formats the amount as a string, allowing a handler to process the
     /// different parts of the amount.
-    pub fn handle_parts<H: AmountPartHandler>(&self, handler: &mut H, format: &UnitFormat) {
+    pub fn handle_parts<H: AmountPartHandler>(
+        &self,
+        handler: &mut H,
+        format: &UnitFormat,
+        precise: bool,
+    ) {
         struct AmountStrParser<'h, H: AmountPartHandler> {
             handler: &'h mut H,
             thousands_separator: char,
@@ -380,10 +385,17 @@ impl<'h> Amount<'h> {
             found_decimal: false,
             found_sign: false,
         };
-        format.write_amount(self.quantity, self.unit.code(), None, &mut parser).unwrap();
+        format
+            .write_amount(
+                self.quantity,
+                self.unit.code(),
+                if precise { None } else { Some(self.unit.rounding_strategy()) },
+                &mut parser,
+            )
+            .unwrap();
     }
 
-    pub fn into_cell(self, format: &UnitFormat) -> Box<dyn table2::Cell> {
+    pub fn into_cell(self, format: &UnitFormat, precise: bool) -> Box<dyn table2::Cell> {
         if self.is_nil() {
             return Box::new(BlankCell);
         }
@@ -427,7 +439,7 @@ impl<'h> Amount<'h> {
             }
         }
         let mut handler = AmountHandler::default();
-        self.handle_parts(&mut handler, format);
+        self.handle_parts(&mut handler, format, precise);
 
         let left: Box<dyn table2::Cell> = if !handler.code_before_amount.is_empty() {
             // Align right so that "-$" and "$" line up on the $.
@@ -452,10 +464,10 @@ impl<'h> Amount<'h> {
         };
         let right = if !handler.code_after_amount.is_empty() {
             let left = Box::new(handler.part_after_decimal) as Box<dyn table2::Cell>;
-            let right = Box::new(EllipsisCell::new(AlignedCell::new(
-                handler.code_after_amount,
-                Alignment::Right,
-            ))) as Box<dyn table2::Cell>;
+            let right = Box::new(EllipsisCell::new(
+                AlignedCell::new(handler.code_after_amount, Alignment::Right),
+                EllipsisPolicy::End,
+            )) as Box<dyn table2::Cell>;
             let mut cell = table2::BinaryCell::new(left, right);
             cell.set_space_distribution(SpaceDistribution::Left);
             Box::new(cell)

@@ -5,6 +5,7 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
+use crate::configuration::Configuration;
 use crate::error::{BlockContextError, JournError, JournResult};
 use crate::journal_context::JContext;
 use crate::report::command::arguments::{Arguments, Command};
@@ -29,6 +30,8 @@ pub fn print_jerror(mut e: JournError) {
 }
 
 pub trait ExecCommand: Command {
+    fn with_config<'h>(&mut self, config: &Configuration<'h>);
+
     fn execute<'h, 'a, 'cell>(
         &self,
         chained: Option<ChainingResult<'h, 'a, 'cell>>,
@@ -93,7 +96,7 @@ pub trait ChainableCommand: ExecCommand {
                 }
                 // Using print! macro can cause panic when piping. Use write and ignore the result.
                 let stdout = std::io::stdout();
-                let _ = writeln!(&mut stdout.lock(), "{}", table);
+                let _ = write!(&mut stdout.lock(), "{}", table);
             }
             ChainingResult::Yaml(root) => {
                 let mut string = String::new();

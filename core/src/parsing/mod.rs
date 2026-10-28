@@ -5,6 +5,7 @@
  * Journ is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
+mod account_directive;
 pub mod amount;
 pub mod decimal;
 pub mod directive;
@@ -40,8 +41,6 @@ use std::rc::Rc;
 pub type StringInput<'h, 'p, 's> = LocatedSpan<&'h str, Rc<RefCell<Configuration<'h>>>>;
 pub type TextFileInput<'h, 's, 'e, 'p> = LocatedSpan<&'h str, &'s JournalParseNode<'h, 's>>;
 
-//pub type IParseResult<'h, I, T> =
-//    Result<(I, T), NomErr<JournError<'h, InputErr<'h, <I as TextInput<'h>>::Error>>>>;
 pub type IParseResult<'h, I, O> = Result<(I, O), NomErr<IParseError<I>>>;
 pub type JParseResult<I, O> = Result<(I, O), NomErr<JournError>>;
 
@@ -95,25 +94,6 @@ where
     Ok((fragment, (extra.into_inner(), out)))
 }
 
-/*
-fn str_parse<'h, O, E, F>(
-    str: &'h str,
-    config: Arc<Configuration<'h>>,
-    mut func: F,
-) -> JournResult<(&'h str, (O, Arc<Configuration<'h>>))>
-where
-    E: Into<JournError>,
-    F: FnMut(
-        LocatedSpan<&'h str, RefCell<Arc<Configuration<'h>>>>,
-    ) -> IResult<LocatedSpan<&'h str, RefCell<Arc<Configuration<'h>>>>, O, E>,
-{
-    let wrapped_config = RefCell::new(config);
-    let input = LocatedSpan::new_extra(str, wrapped_config);
-    let (rem, out) = func(input).finish().map_err(Into::into)?;
-    let (fragment, extra) = rem.into_fragment_and_extra();
-    Ok((fragment, (out, extra.into_inner())))
-}*/
-
 pub fn parse<
     'h,
     O,
@@ -164,21 +144,6 @@ where
     *config = extra.into_inner();
     Ok((frag, out))
 }
-
-/*
-#[macro_export]
-#[cfg(any(test, feature = "testing"))]
-macro_rules! parse_node {
-    ($str:expr) => {{
-        use $crate::parsing::node_input;
-        node_input($str, None)
-    }};
-
-    ($str:expr, $config:expr) => {{
-        use $crate::parsing::node_input;
-        node_input($str, Some($config))
-    }};
-}*/
 
 pub trait OwnedOrMutConfigParseHelper<'h> {
     fn handle_str<F, O, E>(self, str: &'h str, func: F) -> JournResult<(&'h str, O)>
@@ -317,38 +282,6 @@ macro_rules! match_parsers {
     }}
 }
 
-/*
-/// Creates a new `JournalFileParseNode` from the supplied expression.
-#[macro_export]
-macro_rules! parse_node {
-    ($str:expr, $scope:expr, $config:expr, $node_kind:expr) => {{
-        use std::sync::Arc;
-
-        let allocator = $config.allocator();
-        let node = Arc::new($crate::journal_node::JournalNode::new(
-            None,
-            $crate::journal_node::NodeId::allocate(),
-            $node_kind,
-            $config,
-            allocator.alloc($crate::parsing::text_block::TextBlock::from($str)),
-            vec![],
-        ));
-        $crate::parsing::parser::JournalParseNode::new_root(&node, $scope)
-    }};
-    ($str:expr, $scope:expr, $config:expr) => {{ parse_node!($str, $scope, $config, $crate::journal_node::JournalNodeKind::Entry) }};
-    // This uses a static allocator, and so should only be used for testing.
-    ($str:expr, $scope:expr) => {{
-        parse_node!(
-            $str,
-            $scope,
-            $crate::configuration::Configuration::new($crate::alloc::HerdAllocator::new(
-                &$crate::alloc::HERD
-            )),
-            $crate::journal_node::JournalNodeKind::Entry
-        )
-    }};
-}*/
-
 #[cfg(any(test, doctest, feature = "testing"))]
 mod testing {
     use crate::configuration::Configuration;
@@ -407,12 +340,11 @@ mod testing {
             TreeId::new_root().into(),
             None,
             JournalNodeKind::Entry,
-            //tb.as_input(allocator),
             allocator,
         ));
         let parse_node_config: Configuration<'h> = match config {
             Some(config) => config.clone(),
-            None => Configuration::new(),
+            None => Configuration::default(),
         };
         JournalParseNode::new_root(node, tb, parse_node_config, scope)
     }
@@ -420,16 +352,11 @@ mod testing {
     /// `$config` should be a `Arc<Configuration>` type that may get modified as a result of the parser's actions.
     #[macro_export]
     macro_rules! parse_block {
-        ($block:expr, $func:expr, $config:expr) => {{
-            $crate::parsing::testing::parse_block_with_config_mut($block, $func, $config)
-            //use $crate::parsing::OwnedOrMutConfigParseHelper;
-            //$config.handle_block($block, $func)
-        }};
+        ($block:expr, $func:expr, $config:expr) => {{ $crate::parsing::testing::parse_block_with_config_mut($block, $func, $config) }};
         ($str:expr, $func:expr) => {{
             use $crate::config;
             let mut config = config!();
             $crate::parsing::testing::parse_block_with_config_mut($str, $func, &mut config)
-            //parse_block!($str, $func, config)
         }};
     }
 

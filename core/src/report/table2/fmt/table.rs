@@ -237,7 +237,6 @@ impl<'format> RowFormatter<'format> for TableCellFormatter<'_, 'format> {
         self.cursor_line += 1;
         self.cursor_col = 0;
         Ok(())
-        //writeln!(self.writer)
     }
 
     fn cell_separator(&self) -> &str {

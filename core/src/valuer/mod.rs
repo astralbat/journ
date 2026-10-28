@@ -26,7 +26,7 @@ use smartstring::alias::String as SS;
 use std::borrow::Cow;
 use std::cell::LazyCell;
 use std::ops::{Add, Deref, DerefMut};
-use std::{fmt, iter};
+use std::{fmt, iter, mem};
 pub use system_valuer::SystemValuer;
 
 #[derive(Default, Clone)]
@@ -137,6 +137,22 @@ impl<'h> Valuation<'h> {
             }
             None => Err(err!("Unable to revalue")),
         }
+    }
+
+    /// Puts the valuation in terms of the specified unit, if it is in the valuation chain.
+    pub fn in_terms_of(&mut self, unit: &'h Unit<'h>) -> bool {
+        if self.amount.unit() != unit {
+            let mut next_via = self.via.as_deref_mut();
+            while let Some(via) = next_via {
+                if via.amount.unit() == unit {
+                    mem::swap(&mut self.amount, &mut via.amount);
+                    return true;
+                }
+                next_via = via.via.as_deref_mut();
+            }
+            return false;
+        }
+        true
     }
 
     /// Gets the other valuations in the chain for traceability where the last valuation
@@ -279,26 +295,15 @@ impl<'h> Valuer<'h> for Valuation<'h> {
         let mut new_value = self.clone();
         match new_value.revalue(amount) {
             Ok(()) => {
-                if new_value.value().unit() == quote_unit {
-                    new_value.set_unit(quote_unit);
-                    return Ok(new_value);
+                if !new_value.in_terms_of(quote_unit) {
+                    return Err(ValuationError::Undetermined(err!(
+                        "Unable to value {} in {}",
+                        amount,
+                        quote_unit
+                    )));
                 }
-                new_value
-                    .via()
-                    .find(|v| v.unit() == quote_unit)
-                    .cloned()
-                    .map(|v| {
-                        let mut v = v;
-                        v.set_unit(quote_unit);
-                        Ok(v)
-                    })
-                    .unwrap_or_else(|| {
-                        Err(ValuationError::Undetermined(err!(
-                            "Unable to value {} in {}",
-                            amount,
-                            quote_unit
-                        )))
-                    })
+                new_value.set_unit(quote_unit);
+                Ok(new_value)
             }
             Err(e) => Err(ValuationError::EvalFailure(
                 err!("Unable to revalue {} in {}", amount, quote_unit).with_source(e),
@@ -314,6 +319,14 @@ pub enum ValuationError {
     /// An error occurred during evaluation of the valuer
     EvalFailure(JournError),
 }
+impl ValuationError {
+    pub fn with_source(self, source: JournError) -> Self {
+        match self {
+            ValuationError::Undetermined(e) => ValuationError::Undetermined(e.with_source(source)),
+            ValuationError::EvalFailure(e) => ValuationError::EvalFailure(e.with_source(source)),
+        }
+    }
+}
 impl std::error::Error for ValuationError {}
 impl fmt::Display for ValuationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -327,8 +340,7 @@ impl fmt::Display for ValuationError {
 impl From<ValuationError> for JournError {
     fn from(e: ValuationError) -> Self {
         match e {
-            ValuationError::Undetermined(reason) => err!("{}", reason),
-            ValuationError::EvalFailure(e) => e,
+            ValuationError::Undetermined(e) | ValuationError::EvalFailure(e) => e,
         }
     }
 }
@@ -422,6 +434,13 @@ where
         self(unit, amount)
     }
 }
+
+/*
+impl<'h, V: Valuer<'h>> Valuer<'h> for &mut V {
+    fn value(&mut self, quote_unit: &'h Unit<'h>, amount: Amount<'h>) -> ValuationResult<'h> {
+        (**self).value(quote_unit, amount)
+    }
+}*/
 
 impl<'h, T: Valuer<'h>> Valuer<'h> for LazyCell<T> {
     fn value(&mut self, quote_unit: &'h Unit<'h>, amount: Amount<'h>) -> ValuationResult<'h> {
@@ -560,6 +579,10 @@ mod test {
         let mut via = Valuation::binary(amount!("10 A"), amount!("1 B"));
         assert!(via.revalue(amount!("2 B")).is_ok());
         assert_eq!(via.value(), amount!("20 A"));
+        // Now revalue back to original amount
+        assert!(via.revalue(amount!("10 A")).is_ok());
+        assert_eq!(via.value(), amount!("10 A"));
+        assert_eq!(via.via.as_deref().map(|v| v.value()), Some(amount!("1 B")));
     }
 
     #[test]

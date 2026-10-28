@@ -13,7 +13,6 @@ use crate::holding::{DealHolding, DealHoldingSummary, SingleDealHolding};
 use crate::pool_event::{MatchDetails, PoolEvent, PoolEventKind};
 use chrono::DateTime;
 use chrono_tz::Tz;
-use journ_core::alloc::HerdAllocator;
 use journ_core::configuration::Configuration;
 use journ_core::datetime::JDateTimeRange;
 use journ_core::err;
@@ -385,15 +384,18 @@ impl<'h> Pool<'h> {
                 if adj.is_scalar() {
                     return Err(err!("Cannot push scalar adjustment on to empty holding"))?;
                 }
+                let mut adj_value = AdjustedValue::zero(unit, self.unit_of_account);
+                adj.apply(&mut adj_value)?;
+
                 self.holdings.insert(
                     ideal_holding_key,
-                    DealHolding::Single(SingleDealHolding::new(Deal::zero(
-                        unit,
+                    DealHolding::Single(SingleDealHolding::new(Deal::new(
                         adj.entry(),
-                        self.unit_of_account,
+                        adj_value,
+                        None,
+                        None,
                     ))),
                 );
-                self.holdings.get_mut(&ideal_holding_key).unwrap().add_adjustment(adj.clone())?;
                 ideal_holding_key
             }
         };

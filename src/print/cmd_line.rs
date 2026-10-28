@@ -6,6 +6,7 @@
  * You should have received a copy of the GNU Affero General Public License along with Journ. If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::print::print_command::PrintCommand;
+use journ_core::datetime::JDateTimeRange;
 use journ_core::error::JournResult;
 use journ_core::journal_context::JContext;
 use journ_core::report::command::IntoExecCommand;
@@ -27,12 +28,19 @@ pub struct PrintArguments {
     print_file: Option<String>,
 }
 
+impl PrintArguments {
+    pub fn begin_and_end(&self) -> &BeginAndEndArguments {
+        &self.begin_and_end
+    }
+}
+
 impl IntoExecCommand for PrintArguments {
     type Command = PrintCommand;
 
     fn into_exec_cmd(self, args: &Arguments) -> JournResult<Self::Command> {
-        let datetime_fmt_cmd =
-            DateTimeFormatCommand::from_args_or_config(args, JContext::get().journal().config());
+        let config = JContext::get().journal().config(None);
+        let datetime_fmt_cmd = args.datetime_cmd.or_config(config);
+
         let cmd = PrintCommand {
             begin_and_end_cmd: self.begin_and_end.into_cmd(&datetime_fmt_cmd),
             datetime_fmt_cmd,

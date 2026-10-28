@@ -10,7 +10,7 @@ use clap::Parser;
 use journ_core::error::JournResult;
 use journ_core::journal_context::JContext;
 use journ_core::report::command::IntoExecCommand;
-use journ_core::report::command::arguments::{Arguments, DateTimeFormatCommand};
+use journ_core::report::command::arguments::Arguments;
 use journ_core::report::command::cmd_line::BeginAndEndArguments;
 use journ_core::report::command::table_format_args::TableFormatArguments;
 
@@ -95,8 +95,9 @@ pub struct BalArguments {
 
 impl BalArguments {
     fn into_exec_cmd_inner(self, args: &Arguments) -> JournResult<BalCommand> {
-        let datetime_fmt_cmd =
-            DateTimeFormatCommand::from_args_or_config(args, JContext::get().journal().config());
+        let config = JContext::get().journal().config(None);
+        let datetime_fmt_cmd = args.datetime_cmd.or_config(config);
+
         let bal_cmd = BalCommand {
             begin_and_end_cmd: self.begin_and_end.into_cmd(&datetime_fmt_cmd),
             table_fmt_cmd: self.table_format_arguments.into_cmd(),
@@ -147,7 +148,7 @@ impl IntoExecCommand for BalArguments {
         // The chained command is merged, with default options set by the previous command.
         let mut cmd_opt = Some(&mut bal_cmd);
         while let Some(cmd) = cmd_opt {
-            cmd.chain = cmd.chain.as_ref().map(|c| Box::new(c.merge_from(&cmd)));
+            cmd.chain = cmd.chain.as_ref().map(|c| Box::new(c.merge_from(cmd)));
             cmd_opt = cmd.chain.as_deref_mut();
         }
         Ok(bal_cmd)

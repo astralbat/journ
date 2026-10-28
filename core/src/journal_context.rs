@@ -99,6 +99,10 @@ impl<'h> JContext<'h> {
         *self.curr_cmd.get().expect("Command not yet initialised").lock().unwrap()
     }
 
+    pub fn cmd_opt(&self) -> Option<&'h dyn ExecCommand> {
+        self.curr_cmd.get().map(|m| *m.lock().unwrap())
+    }
+
     /// Gets and converts the `Command` being run
     ///
     /// # Panics
@@ -153,6 +157,10 @@ impl<'h> JContext<'h> {
         self.journal.into_inner().unwrap().expect("Journal not yet initialized")
     }
 
+    /// Gets the configuration in scope.
+    ///
+    /// For a recently parsed journal, this will be the derived global configuration, but when processing a particular
+    /// node or entry, this _should_ be a more specific configuration.
     pub fn config(&self) -> MappedRwLockReadGuard<'_, Configuration<'h>> {
         let guard = self.curr_config.read().unwrap();
         RwLockReadGuard::map(guard, |c| c.as_ref().expect("Configuration not yet initialized"))
@@ -166,6 +174,7 @@ impl<'h> JContext<'h> {
         RwLockWriteGuard::map(guard, |c| c.as_mut().expect("Configuration not yet initialized"))
     }
 
+    /// Sets the configuration in scope.
     pub fn set_config(&self, config: Configuration<'h>) {
         let mut guard = self.curr_config.write().unwrap();
         *guard = Some(config);

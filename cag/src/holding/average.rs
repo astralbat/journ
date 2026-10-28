@@ -20,8 +20,10 @@ use journ_core::configuration::Configuration;
 use journ_core::datetime::JDateTimeRange;
 use journ_core::error::{JournError, JournResult};
 use journ_core::ext::NumExt;
+use journ_core::journal_entry::JournalEntry;
 use journ_core::unit::Unit;
 use journ_core::valuer::{SystemValuer, ValuationError, Valuer};
+use linked_hash_set::LinkedHashSet;
 use std::fmt;
 use std::fmt::Debug;
 use std::rc::Rc;
@@ -121,6 +123,12 @@ impl<'h> AverageDealHolding<'h> {
 
     pub fn split_parent(&self) -> Option<&Rc<DealHoldingSummary<'h>>> {
         self.split_parent.as_ref()
+    }
+
+    /// Returns an iterator over all the journal entries in the sequence of deal holdings.
+    /// The list of entries is deduplicated, so that if the same entry appears in multiple deal holdings, it will only be returned once.
+    pub fn entries(&self) -> Box<dyn Iterator<Item = &'h JournalEntry<'h>> + '_> {
+        Box::new(self.deals.iter().map(|d| d.entry()).collect::<LinkedHashSet<_>>().into_iter())
     }
 
     pub fn value_with<V: Valuer<'h>>(
@@ -300,7 +308,7 @@ impl<'h> AverageDealHolding<'h> {
         for (i, deal) in self.deals.iter_mut().enumerate() {
             if i == deals_len - 1 {
                 rem_adj.set_amount_adjustments(rem_amount_adjustments);
-                deal.add_adjustment(rem_adj);
+                deal.add_adjustment(rem_adj)?;
                 break;
             } else {
                 // Create the mini adjustment for this holding

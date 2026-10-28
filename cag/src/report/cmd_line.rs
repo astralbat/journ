@@ -10,7 +10,7 @@ use clap::Parser;
 use journ_core::error::JournResult;
 use journ_core::journal_context::JContext;
 use journ_core::report::command::IntoExecCommand;
-use journ_core::report::command::arguments::{Arguments, DateTimeFormatCommand};
+use journ_core::report::command::arguments::Arguments;
 use journ_core::report::command::cmd_line::BeginAndEndArguments;
 use journ_core::report::command::table_format_args::TableFormatArguments;
 use journ_core::report::expr::ScalarExprList;
@@ -82,8 +82,9 @@ pub struct CagArguments {
 
 impl CagArguments {
     fn into_exec_cmd_inner(self, args: &Arguments) -> JournResult<CagCommand> {
-        let config = JContext::get().journal().config();
-        let datetime_fmt_cmd = DateTimeFormatCommand::from_args_or_config(args, config);
+        let config = JContext::get().journal().config(None);
+        let datetime_fmt_cmd = args.datetime_cmd.or_config(config);
+
         let cmd = CagCommand {
             begin_and_end_cmd: self.begin_and_end.into_cmd(&datetime_fmt_cmd),
             table_fmt_cmd: self.table_format_arguments.into_cmd(),

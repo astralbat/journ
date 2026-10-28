@@ -21,6 +21,7 @@ use std::ops::{
     RangeToInclusive,
 };
 use std::str::FromStr;
+use std::str::pattern::{Pattern, ReverseSearcher};
 
 /// Generic wrapping type to enable the implementation of foreign traits.
 #[derive(Debug)]
@@ -171,6 +172,9 @@ pub trait StrExt {
     /// Compares ignoring case for the ascii characters. Non-ascii characters are compared without
     /// any conversion.
     fn cmp_ignore_case_ascii(&self, b: &str) -> Ordering;
+    fn find_closest_to_mid<P: Pattern + Copy>(&self, pattern: P) -> Option<usize>
+    where
+        for<'a> P::Searcher<'a>: ReverseSearcher<'a>;
 }
 pub trait StringExt {
     fn trim_newline(&mut self);
@@ -331,6 +335,22 @@ impl StrExt for str {
             .find(|&ordering| ordering != Ordering::Equal)
             .unwrap_or(Ordering::Equal)
     }
+
+    fn find_closest_to_mid<P: Pattern + Copy>(&self, pattern: P) -> Option<usize>
+    where
+        for<'a> P::Searcher<'a>: ReverseSearcher<'a>,
+    {
+        let mut best_pos = self.len();
+        while let Some(pos) = self[..best_pos].rfind(pattern) {
+            let mid = self.len() / 2;
+            // Minimise distance from middle
+            if (pos as isize - mid as isize).abs() > (best_pos as isize - mid as isize).abs() {
+                return Some(best_pos);
+            }
+            best_pos = pos;
+        }
+        if best_pos == self.len() { None } else { Some(best_pos) }
+    }
 }
 impl StrExt for String {
     #[inline]
@@ -377,6 +397,13 @@ impl StrExt for String {
 
     fn cmp_ignore_case_ascii(&self, b: &str) -> Ordering {
         self.as_str().cmp_ignore_case_ascii(b)
+    }
+
+    fn find_closest_to_mid<P: Pattern + Copy>(&self, pattern: P) -> Option<usize>
+    where
+        for<'a> P::Searcher<'a>: ReverseSearcher<'a>,
+    {
+        self.as_str().find_closest_to_mid(pattern)
     }
 }
 impl StringExt for String {

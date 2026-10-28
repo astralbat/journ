@@ -9,14 +9,17 @@ use crate::reg::reg_command::RegCommand;
 use journ_core::error::JournResult;
 use journ_core::journal_context::JContext;
 use journ_core::report::command::IntoExecCommand;
-use journ_core::report::command::arguments::{Arguments, DateTimeFormatCommand};
+use journ_core::report::command::arguments::Arguments;
 use journ_core::report::command::cmd_line::BeginAndEndArguments;
+use journ_core::report::command::table_format_args::TableFormatArguments;
 
 #[derive(clap::Args, Debug)]
 #[command(name = "reg", about = "Register of accounts")]
 pub struct RegArguments {
     #[command(flatten)]
     begin_and_end: BeginAndEndArguments,
+    #[command(flatten)]
+    table_format_arguments: TableFormatArguments,
     #[arg(
         value_name = "ACCOUNT_FILTER",
         help = "Filter accounts by regexp pattern",
@@ -72,10 +75,12 @@ pub struct RegArguments {
 impl IntoExecCommand for RegArguments {
     type Command = RegCommand;
     fn into_exec_cmd(self, args: &Arguments) -> JournResult<Self::Command> {
-        let datetime_fmt_cmd =
-            DateTimeFormatCommand::from_args_or_config(args, JContext::get().journal().config());
+        let config = JContext::get().journal().config(None);
+        let datetime_fmt_cmd = args.datetime_cmd.or_config(config);
+
         let cmd = RegCommand {
             begin_and_end_cmd: self.begin_and_end.into_cmd(&datetime_fmt_cmd),
+            table_fmt_cmd: self.table_format_arguments.into_cmd(),
             datetime_fmt_cmd,
             unit_filter: self.unit_filter,
             account_filter: self.account_filter,

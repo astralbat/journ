@@ -21,7 +21,6 @@ use nom::bytes::complete::{tag, take, take_while1};
 use nom::character::complete::space0;
 use nom::combinator::{all_consuming, map, map_parser};
 use nom::sequence::{preceded, terminated, tuple};
-use smallvec::{SmallVec, smallvec};
 use std::fmt::Debug;
 
 /// Manual inclusion of deals on entries that overrides the implied deal detection for a particular unit.
@@ -37,6 +36,9 @@ pub static CAG_ZERO_PROCEEDS: &str = "CAG-ZeroProceeds";
 pub static CAG_INCLUDE: &str = "CAG-Include";
 /// Notes about the deals to be included in reports.
 pub static CAG_NOTE: &str = "CAG-Note";
+pub static SHARED_EXPENSE_TAG: &str = "CAG-DealExpense";
+pub static ACQUISITION_EXPENSE_TAG: &str = "CAG-AcquisitionExpense";
+pub static DISPOSAL_EXPENSE_TAG: &str = "CAG-DisposalExpense";
 
 pub trait CapitalGainsMetadataAccess<'h> {
     fn cg_metadata(&self) -> JournResult<CapitalGainsEntryMetadata<'h>>;
@@ -249,15 +251,7 @@ impl<'h> CapitalGainsEntryMetadata<'h> {
             );
         }
 
-        let mut all_md = smallvec![metadata.clone()];
-        // Add entry metadata
-        all_md.append(
-            &mut entry.metadata_by_key(CAG_NOTE).into_iter().cloned().collect::<SmallVec<[_; 2]>>(),
-        );
-        // Append nested metadata under this CAG-Deal
-        all_md.append(&mut metadata.value_as_metadata_lines());
-
-        Ok(Adjustment::new(position, entry, all_md, None, amount_adjustments))
+        Ok(Adjustment::new(position, entry, None, amount_adjustments))
     }
 
     fn adj_parser<I>() -> impl FnMut(I) -> IParseResult<'h, I, Vec<AmountAdjustment<'h>>>
@@ -313,13 +307,12 @@ impl<'h> CapitalGainsEntryMetadata<'h> {
         position: usize,
     ) -> Result<Adjustment<'h>, JournError> {
         let err = "Adjustments should be in the format:\nCAG-AdjustPool: <pool_name>, <amount_adjustment>, [consideration_adjustment]";
-        let parsed = metadata.parse_value(Self::pool_adj_parser(entry, metadata, position), err)?;
+        let parsed = metadata.parse_value(Self::pool_adj_parser(entry, position), err)?;
         Ok(parsed)
     }
 
     fn pool_adj_parser<'p, 'c, I>(
         entry: &'h JournalEntry<'h>,
-        metadata: &'h Metadata<'h>,
         position: usize,
     ) -> impl FnMut(I) -> IParseResult<'h, I, Adjustment<'h>> + 'p
     where
@@ -336,28 +329,7 @@ impl<'h> CapitalGainsEntryMetadata<'h> {
 
             let (rem, amount_adjustments) = Self::adj_parser()(rem)?;
 
-            let mut all_md = smallvec![metadata.clone()];
-            // Add entry metadata
-            all_md.append(
-                &mut entry
-                    .metadata_by_key(CAG_NOTE)
-                    .into_iter()
-                    .cloned()
-                    .collect::<SmallVec<[_; 2]>>(),
-            );
-            // Append nested metadata under this CAG-Deal
-            all_md.append(&mut metadata.value_as_metadata_lines());
-
-            Ok((
-                rem,
-                Adjustment::new(
-                    position,
-                    entry,
-                    all_md,
-                    Some(pool_name.text()),
-                    amount_adjustments,
-                ),
-            ))
+            Ok((rem, Adjustment::new(position, entry, Some(pool_name.text()), amount_adjustments)))
         }
     }
 

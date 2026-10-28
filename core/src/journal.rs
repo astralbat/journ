@@ -7,7 +7,7 @@
  */
 use crate::alloc::HerdAllocator;
 use crate::configuration::Configuration;
-use crate::datetime::JDateTime;
+use crate::datetime::{JDateTime, JDateTimeRange, MAX_DATETIME};
 use crate::directive::DirectiveKind;
 use crate::err;
 use crate::error::{BlockContext, BlockContextError, JournError, JournErrors, JournResult};
@@ -18,12 +18,12 @@ use crate::journal_node::{JournalNode, JournalNodeKind};
 use crate::parsing::parser::JournalParseNode;
 use crate::parsing::text_block::TextBlock;
 use crate::posting::Posting;
-use crate::python::mod_ledger::PythonLedgerModule;
 use crate::report::balance::AccountBalances;
 use crate::tree_id::TreeId;
 use normalize_path::NormalizePath;
 use std::collections::{BTreeMap, VecDeque};
 use std::iter::Peekable;
+use std::ops::Deref;
 use std::path::Path;
 use std::range::RangeBounds;
 use std::thread;
@@ -31,7 +31,6 @@ use std::thread;
 pub struct Journal<'h> {
     root: &'h JournalNode<'h>,
     entries: BTreeMap<EntryDateId, &'h JournalEntry<'h>>,
-    combined_config: &'h Configuration<'h>,
 }
 
 impl<'h> Journal<'h> {
@@ -39,11 +38,10 @@ impl<'h> Journal<'h> {
         filename: Option<&'h Path>,
         mut text_block: TextBlock<'h>,
         allocator: &'h HerdAllocator<'h>,
-    ) -> JournResult<JContext<'h>> {
-        let context = JContext::new(allocator);
-        let journal = context.with(|| {
+    ) -> JournResult<Box<dyn Deref<Target = Journal<'h>> + 'h>> {
+        let journal = {
             let node_id = TreeId::new_root().into();
-            let config = Configuration::new();
+            let config = Configuration::default();
             let node = allocator.alloc(JournalNode::new(
                 None,
                 node_id,
@@ -66,50 +64,25 @@ impl<'h> Journal<'h> {
             journal.check_balance_assertions()?;
 
             Ok::<_, JournError>(journal)
-        })?;
-        context.set_config(journal.config().clone());
+        }?;
+        let context = JContext::get();
         context.set_journal(journal);
-        Ok(context)
+        Ok(Box::new(context.journal()))
     }
 
     pub fn new_in(root: &'h JournalNode<'h>, allocator: &'h HerdAllocator<'h>) -> Journal<'h> {
-        // Create a sorted logical map of entries and set the price databases.
-        // The price databases are set here rather than during parsing to ensure a deterministic order
-        // without a race condition.
+        // Create a sorted logical map of entries.
         let mut entries = BTreeMap::new();
         for (_seg, dir) in root.all_directives_iter() {
             match dir.kind() {
                 DirectiveKind::Entry(e) => {
-                    //if !Journal::_contains_entry(&entries, *e) {
                     entries.insert(EntryDateId::from(*e), *e);
-                    //}
-                }
-                DirectiveKind::Unit(unit) => {
-                    if let Some(db) = unit.prices() {
-                        for alias in unit.aliases() {
-                            PythonLedgerModule::set_price_database(alias, db);
-                        }
-                    }
-                }
-                DirectiveKind::Units(units) => {
-                    if let Some(db) = units.default_unit().and_then(|d| d.prices()) {
-                        PythonLedgerModule::set_default_price_database(db);
-                    }
                 }
                 _ => {}
             }
         }
 
-        // Create a combined configuration that follows all branch paths in order,
-        // applying all configuration items in order.
-        let combined_config = allocator.alloc(Configuration::new());
-        let mut segment = Some(*root.segments().first().unwrap());
-        while let Some(seg) = segment {
-            combined_config.merge_config(seg.config());
-            segment = seg.next_segment();
-        }
-
-        Journal { entries, root, combined_config }
+        Journal { entries, root }
     }
 
     pub fn allocator(&self) -> &'h HerdAllocator<'h> {
@@ -454,8 +427,29 @@ impl<'h> Journal<'h> {
     /// Returns a combined configuration that includes all configuration items applied from each successive
     /// journal segment in a depth-first fashion. I.e. descending into all branches and includes.
     /// The configuration thus contains all accounts, units and other items at their last setting.
-    pub fn config(&self) -> &'h Configuration<'h> {
-        self.combined_config
+    pub fn config(&self, until: Option<JDateTime>) -> &'h Configuration<'h> {
+        // Create a combined configuration that follows all branch paths in order,
+        // applying all configuration items in order. We only do this until the end date of the command so that configuration
+        // after this date is not included. This supports the idea of the journal being an append log of transactions and configuration changes where
+        // we want to keep a static historical view, despite any renaming of accounts or units that may have occurred after the end date of the command.
+        // This allows reports that use an end date to stay working.
+        let allocator = JContext::get().allocator();
+        let combined_config = allocator.alloc(Configuration::default());
+        let mut segment = Some(*self.root.segments().first().unwrap());
+        while let Some(seg) = segment {
+            match until {
+                Some(until) => {
+                    if let Some(config) = seg.last_config_before(until) {
+                        combined_config.merge_config(config);
+                    }
+                }
+                None => combined_config.merge_config(seg.config()),
+            }
+            //combined_config.merge_config(seg.config());
+            segment = seg.next_segment();
+        }
+
+        combined_config
     }
 
     pub fn node(&self, index: &TreeId) -> &JournalNode<'h> {

@@ -12,6 +12,7 @@ use journ_core::datetime::JDateTimeRange;
 use journ_core::journal_entry::JournalEntry;
 use journ_core::metadata::Metadata;
 use linked_hash_set::LinkedHashSet;
+use smallvec::SmallVec;
 use std::rc::Rc;
 
 /// A snapshot summary of a deal holding for including in a parent tree of deal holdings and for events.
@@ -20,7 +21,7 @@ pub struct DealHoldingSummary<'h> {
     parent: Option<Rc<Self>>,
     date: JDateTimeRange,
     adjusted_value: AdjustedValue<'h>,
-    // Entries included for provenance: metadata, descriptions and file info.
+    // Unique list of entries included for provenance: metadata, descriptions and file info.
     entries: Vec<&'h JournalEntry<'h>>,
 }
 
@@ -58,6 +59,10 @@ impl<'h> DealHoldingSummary<'h> {
         self.adjusted_value.expenses()
     }
 
+    pub fn entries(&self) -> impl Iterator<Item = &'h JournalEntry<'h>> {
+        self.entries.iter().copied()
+    }
+
     pub fn entry_description(&self) -> LinkedHashSet<&'h str> {
         let mut descriptions = LinkedHashSet::new();
         for entry in &self.entries {
@@ -66,11 +71,11 @@ impl<'h> DealHoldingSummary<'h> {
         descriptions
     }
 
-    pub fn entry_metadata_by_key(&self, key: &str) -> LinkedHashSet<&Metadata<'h>> {
-        let mut metadata_set = LinkedHashSet::new();
+    pub fn entry_metadata_by_key(&self, key: &str) -> SmallVec<[&Metadata<'h>; 4]> {
+        let mut metadata_set = SmallVec::new();
         for entry in &self.entries {
             for metadata in entry.metadata_by_key(key) {
-                metadata_set.insert(metadata);
+                metadata_set.push(metadata);
             }
         }
         metadata_set
